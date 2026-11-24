@@ -9,6 +9,7 @@ package com.automatethethings.xkey.sync
 import android.content.Context
 import android.util.Log
 import com.automatethethings.xkey.crypto.Base32
+import com.automatethethings.xkey.crypto.MalformedSyncValueException
 import com.automatethethings.xkey.crypto.SyncCodec
 import com.automatethethings.xkey.oath.OathRepository
 import com.automatethethings.xkey.oath.OathSecretManager
@@ -85,8 +86,11 @@ class SyncEngine(
                 skipped++
                 continue
             }
-            val der = SyncCodec.pemToDer(obj.optString("pem", ""))
-            if (der == null) {
+            val der = try {
+                SyncCodec.pemToDer(obj.optString("pem", ""))
+            } catch (e: MalformedSyncValueException) {
+                // Rejected, not imported; the rest of the batch still merges.
+                Log.w(TAG, "Rejected incoming certificate $i: ${e.message}")
                 skipped++
                 continue
             }

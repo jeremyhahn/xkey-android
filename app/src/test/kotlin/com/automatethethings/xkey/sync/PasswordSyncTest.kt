@@ -31,6 +31,7 @@ import io.mockk.mockk
 import io.mockk.mockkStatic
 import io.mockk.slot
 import io.mockk.unmockkAll
+import io.mockk.verify
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.test.runTest
@@ -185,6 +186,8 @@ class PasswordSyncTest {
             }
         })
         sync = PasswordSync(repository, factors)
+        mockkStatic(Log::class)
+        every { Log.w(any<String>(), any<String>()) } returns 0
     }
 
     @After
@@ -376,6 +379,7 @@ class PasswordSyncTest {
         assertEquals(SyncEngine.ItemCounts(added = 1, updated = 0, skipped = 1), counts)
         assertNull("a malformed timestamp must not be stored as zero", repository.get("bad-time"))
         assertEquals("y", repository.get("remote-2")!!.password)
+        verify { Log.w(any<String>(), match<String> { !it.contains("yesterday") && !it.contains("bad-time") }) }
     }
 
     @Test

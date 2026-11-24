@@ -7,6 +7,7 @@
 package com.automatethethings.xkey.sync
 
 import android.util.Log
+import com.automatethethings.xkey.crypto.MalformedSyncValueException
 import com.automatethethings.xkey.crypto.SyncCodec
 import com.automatethethings.xkey.password.PasswordEntity
 import com.automatethethings.xkey.password.PasswordEntryTooLargeException
@@ -92,8 +93,9 @@ class PasswordSync(
      *
      * An existing entry is overwritten last-writer-wins: only by an incoming
      * copy whose `updated_at` is strictly newer than the stored one. An older
-     * or equal copy, or one without a parseable `updated_at`, keeps the local
-     * entry and is counted as skipped.
+     * or equal copy, or one without an `updated_at`, keeps the local entry and
+     * is counted as skipped. A copy whose `updated_at` is present but not
+     * RFC 3339 is rejected (counted as skipped) whether or not the entry exists.
      *
      * @throws com.automatethethings.xkey.password.PasswordStoreLockedException
      *   if the store is locked; nothing is written.
@@ -111,6 +113,15 @@ class PasswordSync(
                 skipped++
                 continue
             }
+            // A blank updated_at is 0 (no timestamp); a malformed one rejects
+            // the item instead of merging it as if it were the oldest copy.
+            val updatedAt = try {
+                SyncCodec.parseRfc3339(obj.optString("updated_at", ""))
+            } catch (e: MalformedSyncValueException) {
+                Log.w(TAG, "Rejected incoming password entry $i: ${e.message}")
+                skipped++
+                continue
+            }
             val record = PasswordRecord(
                 passwordId = id,
                 name = obj.optString("name", "").ifBlank { id },
@@ -121,7 +132,7 @@ class PasswordSync(
                 notes = obj.optString("notes", "").ifBlank { null },
                 folderPath = obj.optString("folder_path", "").ifBlank { null },
                 source = "remote",
-                updatedAt = SyncCodec.parseRfc3339(obj.optString("updated_at", ""))
+                updatedAt = updatedAt
             )
             val patch = record.asPatch()
             val existed = try {
