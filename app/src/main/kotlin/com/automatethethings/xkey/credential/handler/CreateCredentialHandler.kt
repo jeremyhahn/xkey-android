@@ -53,10 +53,12 @@ import java.security.SecureRandom
  */
 @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
 class CreateCredentialHandler(
-    private val context: Context
+    private val context: Context,
+    // Parameters so a unit test can pass fakes: AndroidKeyStore and DataStore
+    // do not exist on the JVM.
+    private val keystoreManager: KeystoreManager = KeystoreManager(context),
+    private val settingsRepository: BiometricSettingsRepository = BiometricSettingsRepository(context)
 ) {
-    private val keystoreManager = KeystoreManager(context)
-    private val settingsRepository = BiometricSettingsRepository(context)
     private val database = XKeyDatabase.getInstance(context)
     private val credentialDao = database.credentialMetadataDao()
     private val keyDao = database.keyDao()
