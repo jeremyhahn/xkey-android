@@ -57,7 +57,7 @@ class KeystorePqcBackendTest {
     fun `below API 37 nothing is supported and no probe runs`() {
         for (sdk in 28 until KeystorePqcBackend.MIN_SDK) {
             val calls = AtomicInteger()
-            val backend = KeystorePqcBackend(sdkInt = sdk, probe = {
+            val backend = KeystorePqcBackend(sdkInt = sdk, probe = { _, _ ->
                 calls.incrementAndGet()
                 KeyProperties.SECURITY_LEVEL_TRUSTED_ENVIRONMENT
             })
@@ -75,7 +75,7 @@ class KeystorePqcBackendTest {
             MlDsaParameterSet.ML_DSA_65 to KeyProperties.SECURITY_LEVEL_TRUSTED_ENVIRONMENT,
             MlDsaParameterSet.ML_DSA_87 to KeyProperties.SECURITY_LEVEL_STRONGBOX
         )
-        val backend = KeystorePqcBackend(sdkInt = 37, probe = { levels[it] })
+        val backend = KeystorePqcBackend(sdkInt = 37, probe = { set, _ -> levels[set] })
         backend.startProbe(scope)
 
         val expected = setOf(MlDsaParameterSet.ML_DSA_65, MlDsaParameterSet.ML_DSA_87)
@@ -84,9 +84,40 @@ class KeystorePqcBackendTest {
     }
 
     @Test
+    fun `a set the TEE refuses but StrongBox makes is kept`() {
+        val asked = mutableListOf<Pair<MlDsaParameterSet, Boolean>>()
+        val backend = KeystorePqcBackend(sdkInt = 37, probe = { set, strongBox ->
+            synchronized(asked) { asked += set to strongBox }
+            when {
+                strongBox -> KeyProperties.SECURITY_LEVEL_STRONGBOX
+                set == MlDsaParameterSet.ML_DSA_44 -> throw IllegalStateException("no TEE ML-DSA-44")
+                else -> null
+            }
+        })
+        backend.startProbe(scope)
+
+        assertEquals(MlDsaParameterSet.entries.toSet(), backend.awaitProbeBlocking(5_000))
+        assertTrue(asked.containsAll(MlDsaParameterSet.entries.map { it to true }))
+    }
+
+    @Test
+    fun `a set both backends refuse or make in software is dropped`() {
+        val backend = KeystorePqcBackend(sdkInt = 37, probe = { set, strongBox ->
+            when (set) {
+                MlDsaParameterSet.ML_DSA_44 -> if (strongBox) throw IllegalStateException("no StrongBox") else null
+                MlDsaParameterSet.ML_DSA_65 -> KeyProperties.SECURITY_LEVEL_SOFTWARE
+                MlDsaParameterSet.ML_DSA_87 ->
+                    if (strongBox) KeyProperties.SECURITY_LEVEL_SOFTWARE else throw IllegalStateException("no TEE")
+            }
+        })
+        backend.startProbe(scope)
+        assertEquals(emptySet<MlDsaParameterSet>(), backend.awaitProbeBlocking(5_000))
+    }
+
+    @Test
     fun `a probe that throws, returns null or an unknown level reports nothing`() {
-        val backend = KeystorePqcBackend(sdkInt = 37, probe = {
-            when (it) {
+        val backend = KeystorePqcBackend(sdkInt = 37, probe = { set, _ ->
+            when (set) {
                 MlDsaParameterSet.ML_DSA_44 -> throw IllegalStateException("no ML-DSA-44")
                 MlDsaParameterSet.ML_DSA_65 -> null
                 MlDsaParameterSet.ML_DSA_87 -> KeyProperties.SECURITY_LEVEL_UNKNOWN_SECURE
@@ -98,8 +129,8 @@ class KeystorePqcBackendTest {
 
     @Test
     fun `one failing set does not hide the others`() {
-        val backend = KeystorePqcBackend(sdkInt = 37, probe = {
-            if (it == MlDsaParameterSet.ML_DSA_65) throw RuntimeException("probe failed")
+        val backend = KeystorePqcBackend(sdkInt = 37, probe = { set, _ ->
+            if (set == MlDsaParameterSet.ML_DSA_65) throw RuntimeException("probe failed")
             KeyProperties.SECURITY_LEVEL_TRUSTED_ENVIRONMENT
         })
         backend.startProbe(scope)
@@ -112,7 +143,7 @@ class KeystorePqcBackendTest {
     @Test
     fun `supported sets are empty and do not block before the probe ends`() {
         val release = CountDownLatch(1)
-        val backend = KeystorePqcBackend(sdkInt = 37, probe = {
+        val backend = KeystorePqcBackend(sdkInt = 37, probe = { _, _ ->
             release.await(10, TimeUnit.SECONDS)
             KeyProperties.SECURITY_LEVEL_TRUSTED_ENVIRONMENT
         })
@@ -131,7 +162,7 @@ class KeystorePqcBackendTest {
     @Test
     fun `the probe runs once however often it is started`() {
         val calls = AtomicInteger()
-        val backend = KeystorePqcBackend(sdkInt = 37, probe = {
+        val backend = KeystorePqcBackend(sdkInt = 37, probe = { _, _ ->
             calls.incrementAndGet()
             KeyProperties.SECURITY_LEVEL_TRUSTED_ENVIRONMENT
         })
@@ -145,8 +176,8 @@ class KeystorePqcBackendTest {
 
     @Test
     fun `generate refuses a set the probe did not report`() {
-        val backend = KeystorePqcBackend(sdkInt = 37, probe = {
-            if (it == MlDsaParameterSet.ML_DSA_65) KeyProperties.SECURITY_LEVEL_TRUSTED_ENVIRONMENT else null
+        val backend = KeystorePqcBackend(sdkInt = 37, probe = { set, _ ->
+            if (set == MlDsaParameterSet.ML_DSA_65) KeyProperties.SECURITY_LEVEL_TRUSTED_ENVIRONMENT else null
         })
         assertThrows("before the probe", UnsupportedAlgorithmException::class.java) {
             backend.generate("xkey_key_t", MlDsaParameterSet.ML_DSA_65, -1, false)
@@ -163,7 +194,7 @@ class KeystorePqcBackendTest {
 
     @Test
     fun `generate refuses everything below API 37`() {
-        val backend = KeystorePqcBackend(sdkInt = 36, probe = { KeyProperties.SECURITY_LEVEL_STRONGBOX })
+        val backend = KeystorePqcBackend(sdkInt = 36, probe = { _, _ -> KeyProperties.SECURITY_LEVEL_STRONGBOX })
         backend.startProbe(scope)
         backend.awaitProbeBlocking(5_000)
         for (set in MlDsaParameterSet.entries) {
@@ -175,7 +206,7 @@ class KeystorePqcBackendTest {
 
     @Test
     fun `the JCA signature name is the platform's ML-DSA name for every set`() {
-        val backend = KeystorePqcBackend(sdkInt = 37, probe = { null })
+        val backend = KeystorePqcBackend(sdkInt = 37, probe = { _, _ -> null })
         for (set in MlDsaParameterSet.entries) {
             assertEquals(KeyProperties.KEY_ALGORITHM_ML_DSA, backend.jcaSignatureAlgorithm(set))
             assertEquals("ML-DSA", backend.jcaSignatureAlgorithm(set))
