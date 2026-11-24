@@ -21,11 +21,13 @@ import android.content.Intent
 import android.os.Build
 import android.os.Bundle
 import androidx.biometric.BiometricManager
+import androidx.credentials.CreatePublicKeyCredentialRequest
 import androidx.credentials.GetPublicKeyCredentialOption
 import androidx.credentials.exceptions.CreateCredentialInterruptedException
 import androidx.credentials.exceptions.CreateCredentialUnknownException
 import androidx.credentials.exceptions.GetCredentialUnknownException
 import androidx.credentials.provider.PendingIntentHandler
+import androidx.credentials.provider.ProviderCreateCredentialRequest
 import androidx.credentials.provider.ProviderGetCredentialRequest
 import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
@@ -63,12 +65,15 @@ import org.junit.runner.RunWith
  * must neither store nor return a credential. Each case counts the stored
  * credential rows before and after the launch.
  *
- * Only the platform attaches a provider request to the intent, so the cases
- * that name a failure past the retrieval guard (an unknown credential id, a
- * malformed request JSON, a cancelled user verification) stub
- * `PendingIntentHandler`'s retrieval to hand the selector the request the
- * framework would, and assert the error only that failure produces. The
- * other cases stop at the guard and prove that nothing on the way there
+ * Only the platform attaches a provider request to the intent, so every
+ * case that names a failure past the retrieval guard (an unknown or empty
+ * credential id, a malformed get or create request JSON) goes through
+ * `assertFailsPastGuard`: it stubs `PendingIntentHandler`'s retrieval to
+ * hand the selector the request the framework would, with any JSON,
+ * malformed included, and asserts the exact error type and message that
+ * failure produces, never the missing-request one. The cancelled user
+ * verification case supplies the request the same way. The no-extras cases
+ * stop at the guard by design and prove that nothing on the way there
  * writes a row or answers with a credential.
  *
  * The user-verification case needs a device that can verify the user: it
@@ -130,17 +135,13 @@ class CredentialSelectorErrorPathTest {
     fun getWithGarbledRequestJson_failsWithoutACredential() {
         seedCredential(SEEDED_CREDENTIAL_ID)
 
-        val result = assertFailsWithoutCredential(
-            selector(
-                CredentialSelectorActivity.ACTION_GET_CREDENTIAL,
-                credentialId = SEEDED_CREDENTIAL_ID,
-                requestJson = GARBLED_JSON,
-                providerRequestJson = GARBLED_JSON,
-            ),
-            GET_MARKER,
+        assertFailsPastGuard(
+            CredentialSelectorActivity.ACTION_GET_CREDENTIAL,
+            credentialId = SEEDED_CREDENTIAL_ID,
+            json = GARBLED_JSON,
+            type = GetCredentialUnknownException().type,
+            message = MALFORMED_JSON_ERROR,
         )
-
-        assertError(result, GET_MARKER, GetCredentialUnknownException().type, MALFORMED_JSON_ERROR)
     }
 
     /**
@@ -152,34 +153,27 @@ class CredentialSelectorErrorPathTest {
     fun createWithGarbledRequestJson_failsWithoutACredential() {
         assumeNoAuthenticator()
 
-        val result = assertFailsWithoutCredential(
-            selector(
-                CredentialSelectorActivity.ACTION_CREATE_CREDENTIAL,
-                requestJson = GARBLED_JSON,
-                providerRequestJson = GARBLED_JSON,
-            ),
-            CREATE_MARKER,
+        assertFailsPastGuard(
+            CredentialSelectorActivity.ACTION_CREATE_CREDENTIAL,
+            credentialId = null,
+            json = GARBLED_JSON,
+            type = CreateCredentialUnknownException().type,
+            message = MALFORMED_JSON_ERROR,
         )
-
-        assertError(result, CREATE_MARKER, CreateCredentialUnknownException().type, MALFORMED_JSON_ERROR)
     }
 
     @Test
     fun createWithTruncatedRequestJson_failsWithoutACredential() {
         assumeNoAuthenticator()
-        val full = CredentialRequestFixtures.createRequestJson(RP_ID)
-        val json = full.dropLast(full.length / 2)
+        val json = CredentialRequestFixtures.createRequestJson(RP_ID)
 
-        val result = assertFailsWithoutCredential(
-            selector(
-                CredentialSelectorActivity.ACTION_CREATE_CREDENTIAL,
-                requestJson = json,
-                providerRequestJson = json,
-            ),
-            CREATE_MARKER,
+        assertFailsPastGuard(
+            CredentialSelectorActivity.ACTION_CREATE_CREDENTIAL,
+            credentialId = null,
+            json = json.dropLast(json.length / 2),
+            type = CreateCredentialUnknownException().type,
+            message = MALFORMED_JSON_ERROR,
         )
-
-        assertError(result, CREATE_MARKER, CreateCredentialUnknownException().type, MALFORMED_JSON_ERROR)
     }
 
     // ---------------------------------------------------------------
@@ -193,23 +187,12 @@ class CredentialSelectorErrorPathTest {
      */
     @Test
     fun getForAnUnknownCredentialId_failsWithoutACredential() {
-        val json = CredentialRequestFixtures.getRequestJson(RP_ID, allowCredentialIds = listOf(UNKNOWN_CREDENTIAL_ID))
-
-        val result = assertFailsWithoutCredential(
-            selector(
-                CredentialSelectorActivity.ACTION_GET_CREDENTIAL,
-                credentialId = UNKNOWN_CREDENTIAL_ID,
-                requestJson = json,
-                providerRequestJson = json,
-            ),
-            GET_MARKER,
-        )
-
-        assertError(
-            result,
-            GET_MARKER,
-            GetCredentialUnknownException().type,
-            "$UNKNOWN_CREDENTIAL_ERROR$UNKNOWN_CREDENTIAL_ID",
+        assertFailsPastGuard(
+            CredentialSelectorActivity.ACTION_GET_CREDENTIAL,
+            credentialId = UNKNOWN_CREDENTIAL_ID,
+            json = CredentialRequestFixtures.getRequestJson(RP_ID, allowCredentialIds = listOf(UNKNOWN_CREDENTIAL_ID)),
+            type = GetCredentialUnknownException().type,
+            message = "$UNKNOWN_CREDENTIAL_ERROR$UNKNOWN_CREDENTIAL_ID",
         )
     }
 
@@ -292,9 +275,10 @@ class CredentialSelectorErrorPathTest {
     }
 
     /**
-     * Stubs the retrieval the selector makes. The get option is a mock so any
-     * JSON, malformed included, reaches the handler as given: the androidx
-     * option constructor may refuse a malformed one before the selector sees it.
+     * Stubs the retrieval the selector makes. The get option and the create
+     * request are mocks so any JSON, malformed included, reaches the handler
+     * as given: the androidx constructors refuse JSON that does not parse
+     * before the selector sees it.
      */
     private fun supplyProviderRequest(action: String, json: String) {
         mockkObject(PendingIntentHandler)
@@ -306,7 +290,11 @@ class CredentialSelectorErrorPathTest {
             val request = ProviderGetCredentialRequest(listOf(option), CredentialRequestFixtures.appWithoutOrigin())
             every { PendingIntentHandler.retrieveProviderGetCredentialRequest(any()) } returns request
         } else {
-            val request = CredentialRequestFixtures.providerCreateRequest(json)
+            val option = mockk<CreatePublicKeyCredentialRequest>(relaxed = true) {
+                every { requestJson } returns json
+                every { clientDataHash } returns CredentialRequestFixtures.BROWSER_CLIENT_DATA_HASH
+            }
+            val request = ProviderCreateCredentialRequest(option, CredentialRequestFixtures.appWithoutOrigin())
             every { PendingIntentHandler.retrieveProviderCreateCredentialRequest(any()) } returns request
         }
     }
@@ -322,6 +310,26 @@ class CredentialSelectorErrorPathTest {
         assertExceptionFamily(result, marker)
         assertEquals("no credential row may be written", before, storedCredentials())
         return result
+    }
+
+    /**
+     * Starts [action] with [json] both as the application extra and as the
+     * provider request the framework would attach, so the selector gets past
+     * the retrieval guard; the error must carry exactly [type] and [message].
+     */
+    private fun assertFailsPastGuard(
+        action: String,
+        credentialId: String?,
+        json: String,
+        type: String,
+        message: String,
+    ) {
+        val marker = if (action == CredentialSelectorActivity.ACTION_GET_CREDENTIAL) GET_MARKER else CREATE_MARKER
+        val result = assertFailsWithoutCredential(
+            selector(action, credentialId = credentialId, requestJson = json, providerRequestJson = json),
+            marker,
+        )
+        assertError(result, marker, type, message)
     }
 
     /**
