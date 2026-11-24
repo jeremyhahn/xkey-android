@@ -130,13 +130,19 @@ class RemoteSyncClientTest {
         return String(CharArray(16) { 'a' + random.nextInt(26) })
     }
 
-    /** Stubs every gather to empty and every merge to zero counts. */
-    private fun stubIdleEngine() {
+    /**
+     * Stubs every gather to empty and every merge to zero counts. With
+     * [realCertificateMerge] the certificate merge is left unstubbed, so the
+     * constructor mock passes it to the real suspend method.
+     */
+    private fun stubIdleEngine(realCertificateMerge: Boolean = false) {
         coEvery { anyConstructed<SyncEngine>().gatherCertificates() } returns JSONArray()
         coEvery { anyConstructed<SyncEngine>().gatherOath() } returns JSONArray()
         coEvery { anyConstructed<SyncEngine>().gatherPasswords() } returns JSONArray()
-        coEvery { anyConstructed<SyncEngine>().mergeCertificates(any()) } returns
-            SyncEngine.CertCounts(added = 0, skipped = 0)
+        if (!realCertificateMerge) {
+            coEvery { anyConstructed<SyncEngine>().mergeCertificates(any()) } returns
+                SyncEngine.CertCounts(added = 0, skipped = 0)
+        }
         coEvery { anyConstructed<SyncEngine>().mergeOath(any()) } returns
             SyncEngine.ItemCounts(added = 0, updated = 0, skipped = 0)
         coEvery { anyConstructed<SyncEngine>().mergePasswords(any()) } returns
@@ -468,11 +474,12 @@ class RemoteSyncClientTest {
 
     @Test
     fun `syncAll with a self-signed root in the trust-store reply still syncs the other stores`() = runTest {
-        stubIdleEngine()
-        // The real certificate merge runs against a trust store in a temp directory.
-        coEvery { anyConstructed<SyncEngine>().mergeCertificates(any()) } answers { callOriginal() }
-        every { context.getDir("trust_store", Context.MODE_PRIVATE) } returns
-            Files.createTempDirectory("trust_store").toFile()
+        val audited = captureAudit()
+        // The real certificate merge, with no stub answer around it, runs
+        // against a trust store in a temp directory.
+        stubIdleEngine(realCertificateMerge = true)
+        val trustStoreDir = Files.createTempDirectory("trust_store").toFile()
+        every { context.getDir("trust_store", Context.MODE_PRIVATE) } returns trustStoreDir
         val root = JSONObject()
             .put("pem", TestCertificates.ROOT_CA_A_PEM)
             .put("fingerprint", TestCertificates.fingerprint(TestCertificates.ROOT_CA_A_PEM))
@@ -480,13 +487,21 @@ class RemoteSyncClientTest {
             """{"id":${request.id},"result":{"added":0,"local":${JSONArray().put(root)}}}"""
         }
 
-        auditedClient().syncAll()
+        val result = auditedClient().syncAll()
 
         assertEquals(
             listOf("remote.syncTrustStore", "remote.syncOATH", "remote.syncPasswords"),
             sender.sent.map { it.method }
         )
         coVerify(exactly = 1) { anyConstructed<SyncEngine>().markSynced() }
+        // The trust-store leg succeeded: the root was refused, not stored.
+        val entry = audited.single { it.operationType.name == "TRUST_STORE_SYNC_PERFORMED" }
+        assertEquals(true, entry.success)
+        val details = JSONObject(entry.details!!)
+        assertEquals(0, details.getInt("added"))
+        assertEquals(1, details.getInt("skipped"))
+        assertEquals(0, result.certsPulled)
+        assertEquals(0, trustStoreDir.listFiles()?.size ?: 0)
     }
 
     @Test
