@@ -39,8 +39,8 @@ import java.util.UUID
  *   left alone. Only the description is read back, never the secret text.
  * - Android 10 and later hide the clipboard from an app without window
  *   focus. An unreadable clipboard is never cleared: the clear stays pending
- *   until the app can read the clipboard again ([retryPendingClears], called
- *   when one of its windows gains focus) and finds its own token there.
+ *   until the app can read the clipboard again ([retryPendingClears], called by
+ *   [ClipboardFocusRetry] when any window of the app gains focus) and finds its own token there.
  * - [clearIfOwned] is the only place the clipboard is cleared.
  *
  * Main thread only: copies, the change listener, the timer and the retry
@@ -103,8 +103,9 @@ internal object SensitiveClipboard {
 
     /**
      * Clear the copies whose time is up and whose clip the clipboard still
-     * holds. Call when a window of the app gains focus: from Android 10 on
-     * that is when the app can read the clipboard again.
+     * holds. Called only by [ClipboardFocusRetry], when any window of the app
+     * gains focus: from Android 10 on that is when the app can read the
+     * clipboard again.
      */
     fun retryPendingClears(clipboard: ClipboardManager) {
         val now = clock.nowMillis()

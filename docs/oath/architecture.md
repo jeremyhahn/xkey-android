@@ -151,8 +151,9 @@ code off the clipboard 45 seconds later (counted on `MonotonicClock.SYSTEM`,
 so time the device spends asleep counts), but only once it can read the
 clipboard and finds the token it tagged the clip with: a clip set by anyone
 else stays. Android 10 and later hide the clipboard from an app without window
-focus, and an unreadable clipboard is never cleared; the clear waits until a
-window of the app gains focus again (`retryPendingClears`) and the token is
+focus, and an unreadable clipboard is never cleared; the clear waits until any
+window of the app, on any screen, gains focus again (`ClipboardFocusRetry`,
+registered in `XKeyApplication`, calls `retryPendingClears`) and the token is
 still there.
 
 **Long-press menu.** `OathListMenu` lists Copy, Delete and Details, followed by
