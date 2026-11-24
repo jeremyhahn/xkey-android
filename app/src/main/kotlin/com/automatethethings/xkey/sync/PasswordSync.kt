@@ -191,7 +191,8 @@ class PasswordSync(
                 } else {
                     // Added only while still absent and not deleted since this copy, in one transaction with
                     // the deletion check: never replaces an entry another writer added, nor undoes a delete.
-                    when (repository.insertIfAbsentUnlessDeleted(record, isClamped)) {
+                    // Compared with the time the peer sent, unknown (null) when it sent none or was clamped.
+                    when (repository.insertIfAbsentUnlessDeleted(record, sentUpdatedAt.takeIf { !isClamped && it > 0 })) {
                         PasswordRepository.SyncInsert.ADDED -> false
                         // Deleted on the phone, and this copy is no newer than the delete: it stays deleted.
                         PasswordRepository.SyncInsert.DELETED -> {

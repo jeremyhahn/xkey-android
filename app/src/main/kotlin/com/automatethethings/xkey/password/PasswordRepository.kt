@@ -267,13 +267,16 @@ class PasswordRepository(
 
     /**
      * Add a synced [record] like [insertIfAbsent], unless this phone deleted
-     * it at or after its `updated_at` (any deletion record, when [clamped]),
-     * in one transaction with the deletion check
-     * ([PasswordDao.insertIfAbsentUnlessDeleted]): a delete landing meanwhile
-     * cannot let a copy that predates it back in.
+     * it at or after [sentUpdatedAt], the time the peer sent for the copy
+     * (null when unknown: none, blank, or clamped; any deletion record then
+     * holds it back). The comparison runs in one transaction with the
+     * deletion check ([PasswordDao.insertIfAbsentUnlessDeleted]), so a
+     * delete landing meanwhile cannot let a copy that predates it back in,
+     * and it never reads the phone's time [newEntity] stores for a copy
+     * sent without one.
      */
-    suspend fun insertIfAbsentUnlessDeleted(record: PasswordRecord, clamped: Boolean): SyncInsert =
-        when (dao.insertIfAbsentUnlessDeleted(newEntity(record), clamped)) {
+    suspend fun insertIfAbsentUnlessDeleted(record: PasswordRecord, sentUpdatedAt: Long?): SyncInsert =
+        when (dao.insertIfAbsentUnlessDeleted(newEntity(record), sentUpdatedAt)) {
             KEPT_DELETED -> SyncInsert.DELETED
             -1L -> SyncInsert.PRESENT
             else -> SyncInsert.ADDED

@@ -97,8 +97,8 @@ class PasswordSyncTest {
 
         override suspend fun deleteAndRecordDeletion(passwordId: String, tenantId: String?, deletedAt: Long): Boolean =
             transaction.withLock { super<PasswordDao>.deleteAndRecordDeletion(passwordId, tenantId, deletedAt) }
-        override suspend fun insertIfAbsentUnlessDeleted(password: PasswordEntity, clamped: Boolean): Long =
-            transaction.withLock { super<PasswordDao>.insertIfAbsentUnlessDeleted(password, clamped) }
+        override suspend fun insertIfAbsentUnlessDeleted(password: PasswordEntity, sentUpdatedAt: Long?): Long =
+            transaction.withLock { super<PasswordDao>.insertIfAbsentUnlessDeleted(password, sentUpdatedAt) }
 
         override suspend fun insert(password: PasswordEntity): Long {
             val id = if (password.id != 0L) password.id else ++rowId

@@ -174,16 +174,24 @@ interface PasswordDao : PasswordDeletionQueries {
      * deleted it since: the deletion check and the add see the same state, so
      * a delete cannot land between them.
      *
-     * An entry the phone deleted at or after the incoming copy's
-     * `updated_at` is not added back: the peer's copy predates the delete.
-     * A [clamped] copy's real time is unknown, so any deletion record holds
-     * it back. Returns [KEPT_DELETED] (-2) when held back, otherwise what
-     * [insertIfAbsent] returns (-1 when an entry with that id is there).
+     * The deletion is compared with [sentUpdatedAt], the time the peer sent
+     * for the copy, never with [password]'s stored `updated_at`, which is the
+     * phone's time when the peer sent none. An entry the phone deleted at or
+     * after [sentUpdatedAt] is not added back: the peer's copy predates the
+     * delete. A null or non-positive [sentUpdatedAt] means the copy's real
+     * time is unknown (sent without one, blank, or clamped as too far
+     * ahead), so any deletion record holds it back. This is the one place a
+     * synced copy is compared with a deletion. Returns [KEPT_DELETED] (-2)
+     * when held back, otherwise what [insertIfAbsent] returns (-1 when an
+     * entry with that id is there).
      */
     @Transaction
-    suspend fun insertIfAbsentUnlessDeleted(password: PasswordEntity, clamped: Boolean): Long {
+    suspend fun insertIfAbsentUnlessDeleted(password: PasswordEntity, sentUpdatedAt: Long?): Long {
         val deletedAt = getDeletedAt(password.passwordId)
-        if (deletedAt != null && (clamped || password.updatedAt <= deletedAt)) return KEPT_DELETED
+        if (deletedAt != null) {
+            val sent = sentUpdatedAt?.takeIf { it > 0 }
+            if (sent == null || sent <= deletedAt) return KEPT_DELETED
+        }
         return insertIfAbsent(password)
     }
 
