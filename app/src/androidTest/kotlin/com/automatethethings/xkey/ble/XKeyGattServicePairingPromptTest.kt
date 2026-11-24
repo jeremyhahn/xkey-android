@@ -29,8 +29,10 @@ import androidx.test.rule.GrantPermissionRule
 import com.automatethethings.xkey.protocol.ErrorCodes
 import com.automatethethings.xkey.protocol.Response
 import com.automatethethings.xkey.ui.MainActivity
+import com.automatethethings.xkey.ui.PROMPT_TIMEOUT_MS
 import com.automatethethings.xkey.ui.PromptActivityTracker
 import com.automatethethings.xkey.ui.SettingsActivity
+import com.automatethethings.xkey.ui.awaitCondition
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
@@ -295,16 +297,11 @@ class XKeyGattServicePairingPromptTest {
      * is raised from another coroutine, so it may not exist on the first look.
      */
     private fun clickDialogButton(buttonId: Int, pending: Deferred<*>) {
-        val deadline = System.currentTimeMillis() + TIMEOUT_MS
-        while (System.currentTimeMillis() < deadline) {
-            if (pending.isCompleted) return
-            val clicked = runCatching {
+        awaitCondition("the pairing prompt never appeared", PROMPT_TIMEOUT_MS) {
+            pending.isCompleted || runCatching {
                 onView(withId(buttonId)).inRoot(isDialog()).perform(click())
-            }
-            if (clicked.isSuccess) return
-            Thread.sleep(POLL_MS)
+            }.isSuccess
         }
-        throw AssertionError("the pairing prompt never appeared")
     }
 
     private companion object {
@@ -313,7 +310,7 @@ class XKeyGattServicePairingPromptTest {
         /** `RemoteKeyClient.BASE_REQUEST_ID`. */
         const val REMOTE_BASE_REQUEST_ID = 1_000_000L
 
-        const val TIMEOUT_MS = 20_000L
+        const val TIMEOUT_MS = PROMPT_TIMEOUT_MS
         const val POLL_MS = 100L
     }
 }

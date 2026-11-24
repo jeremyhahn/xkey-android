@@ -17,6 +17,7 @@ package com.automatethethings.xkey.ui
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -42,6 +43,7 @@ import org.junit.Assert.assertTrue
 import org.junit.BeforeClass
 import org.junit.Test
 import org.junit.runner.RunWith
+import kotlin.math.roundToInt
 
 /**
  * Instrumented tests for [UIHelpers], the Context-only view/drawable toolkit
@@ -87,10 +89,10 @@ class UIHelpersTest {
     }
 
     @Test
-    fun dpToPxInt_truncatesToWholePixels() {
+    fun dpToPxInt_roundsToWholePixels() {
         onHost { activity ->
             val density = activity.resources.displayMetrics.density
-            assertEquals((24 * density).toInt(), UIHelpers.dpToPxInt(activity, 24))
+            assertEquals((24 * density).roundToInt(), UIHelpers.dpToPxInt(activity, 24))
         }
     }
 
@@ -111,17 +113,26 @@ class UIHelpersTest {
     }
 
     /**
-     * sp scaling depends on the user's font-size preference, so this asserts the
-     * relationship rather than a fixed factor: the conversion is linear and
-     * anchored at zero.
+     * sp scaling depends on the user's font-size preference, and since Android 14
+     * it is non-linear above a font scale of 1.0, so "16sp is twice 8sp" only
+     * holds at the default scale. This asserts what holds at every scale: the
+     * conversion is anchored at zero, increasing, and agrees with the platform's
+     * own conversion for the same display metrics.
      */
     @Test
-    fun spToPx_isLinearAndAnchoredAtZero() {
+    fun spToPx_isMonotonicAndAnchoredAtZero() {
         onHost { activity ->
+            val metrics = activity.resources.displayMetrics
             assertEquals(0f, UIHelpers.spToPx(activity, 0f), TOLERANCE_PX)
             val single = UIHelpers.spToPx(activity, 8f)
+            val double = UIHelpers.spToPx(activity, 16f)
             assertTrue("8sp should be a positive pixel value", single > 0f)
-            assertEquals(single * 2f, UIHelpers.spToPx(activity, 16f), TOLERANCE_PX)
+            assertTrue("16sp should be larger than 8sp", double > single)
+            assertEquals(
+                TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, 16f, metrics),
+                double,
+                TOLERANCE_PX
+            )
         }
     }
 
