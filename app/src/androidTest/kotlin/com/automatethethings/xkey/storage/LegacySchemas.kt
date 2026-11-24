@@ -27,7 +27,7 @@ package com.automatethethings.xkey.storage
  * shape a user of that app version would have, including the
  * `room_master_table` identity hash Room checks when it opens the file.
  *
- * Only versions 3..12 are present because only those schema JSONs were ever
+ * Only versions 3..13 are present because only those schema JSONs were ever
  * exported; schemas 1 and 2 predate `exportSchema`, so migrations 1->2 and 2->3
  * cannot be reproduced faithfully and are not covered.
  */
@@ -37,7 +37,7 @@ object LegacySchemas {
     const val OLDEST = 3
 
     /** The schema version the app currently ships. */
-    const val CURRENT = 13
+    const val CURRENT = 14
 
     /** Every version that can serve as a migration starting point. */
     val TESTABLE_VERSIONS: List<Int> get() = SCHEMAS.keys.sorted()
@@ -356,6 +356,23 @@ object LegacySchemas {
     ).let {
         // Migration 10->11 rewrites data only, so schema 11 is schema 10 verbatim
         // (11.json differs from 10.json in its version number alone).
-        it + (11 to it.getValue(10))
+        it + (11 to it.getValue(10)) + (13 to schema13(it.getValue(12)))
     }
+
+    /**
+     * Schema 13 is schema 12 with `keys.policy_revision` (13.json differs from
+     * 12.json in that column and the identity hash alone), plus the trigger
+     * MIGRATION_12_13 creates, which Room's schema does not carry.
+     */
+    private fun schema13(v12: List<String>): List<String> = v12.map { sql ->
+        when {
+            sql.startsWith("CREATE TABLE IF NOT EXISTS `keys` ") -> sql.replace(
+                "`sharing_policy` TEXT NOT NULL, ",
+                "`sharing_policy` TEXT NOT NULL, `policy_revision` INTEGER NOT NULL DEFAULT 0, "
+            )
+            sql.startsWith("INSERT OR REPLACE INTO room_master_table") ->
+                "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'e02480570d8c7a895d2410493d8e9e08')"
+            else -> sql
+        }
+    } + XKeyDatabase.CREATE_POLICY_REVISION_TRIGGER
 }
