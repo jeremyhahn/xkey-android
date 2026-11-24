@@ -176,6 +176,56 @@ class RequestIdEchoTest {
     }
 
     // -----------------------------------------------------------------
+    // RpcId
+    // -----------------------------------------------------------------
+
+    @Test
+    fun `RpcId reads and writes each id form unchanged`() {
+        for (id in listOf("\"abc\"", "\"12\"", "0", "42", UINT64_MAX, "-9223372036854775808")) {
+            val read = RpcId.read("""{"id":$id,"method":"ping"}""")!!
+            assertEquals(id, read.toString())
+            assertEquals(id, rawId(JSONObject().put("id", read.toJsonValue()).toString()))
+        }
+    }
+
+    @Test
+    fun `RpcId keeps a string of digits a string`() {
+        assertEquals("12", RpcId.read("""{"id":"12"}""")!!.toJsonValue())
+        assertEquals(null, RpcId.read("""{"id":"12"}""")!!.longValueOrNull())
+        assertEquals(RpcId.of(12), RpcId.read("""{"id":12}"""))
+    }
+
+    @Test
+    fun `RpcId reads an integer above Long MAX_VALUE digit for digit`() {
+        val id = RpcId.read("""{"id":$UINT64_MAX}""")!!
+
+        assertEquals(UINT64_MAX, id.toString())
+        assertEquals(null, id.longValueOrNull())
+    }
+
+    @Test
+    fun `RpcId caps an id at MAX_JSON_BYTES of its JSON form`() {
+        val atCap = "\"" + "x".repeat(RpcId.MAX_JSON_BYTES - 2) + "\""
+        val overCap = "\"" + "x".repeat(RpcId.MAX_JSON_BYTES - 1) + "\""
+
+        assertEquals(atCap, RpcId.read("""{"id":$atCap}""")?.toString())
+        assertEquals(null, RpcId.read("""{"id":$overCap}"""))
+        assertEquals(null, RpcId.read("""{"id":${UINT64_MAX}0}"""))
+    }
+
+    @Test
+    fun `the widest Long id is exactly MAX_JSON_BYTES`() {
+        assertEquals(RpcId.MAX_JSON_BYTES, RpcId.of(Long.MIN_VALUE).toString().toByteArray(Charsets.UTF_8).size)
+    }
+
+    @Test
+    fun `RpcId NULL writes a null id`() {
+        assertEquals("""{"id":null}""", JSONObject().put("id", RpcId.NULL.toJsonValue()).toString())
+        assertEquals(RpcId.NULL, RpcId.read("""{"id":null}"""))
+        assertEquals(null, RpcId.read("""{"method":"ping"}"""))
+    }
+
+    // -----------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------
 

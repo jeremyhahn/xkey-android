@@ -47,7 +47,7 @@ class ProtocolEnvelopeTest {
     fun `Request fromJson parses id method and params`() {
         val request = Request.fromJson("""{"id":42,"method":"local.sign","params":{"keyId":"k1"}}""")
 
-        assertEquals(42L, request.id)
+        assertEquals(RpcId.of(42), request.id)
         assertEquals("local.sign", request.method)
         assertEquals("k1", request.params!!.getString("keyId"))
     }
@@ -56,7 +56,7 @@ class ProtocolEnvelopeTest {
     fun `Request fromJson accepts a request with no params`() {
         val request = Request.fromJson("""{"id":1,"method":"ping"}""")
 
-        assertEquals(1L, request.id)
+        assertEquals(RpcId.of(1), request.id)
         assertEquals("ping", request.method)
         assertNull(request.params)
     }
@@ -72,7 +72,7 @@ class ProtocolEnvelopeTest {
     fun `Request fromJson accepts id zero`() {
         val request = Request.fromJson("""{"id":0,"method":"ping"}""")
 
-        assertEquals(0L, request.id)
+        assertEquals(RpcId.of(0), request.id)
     }
 
     @Test
@@ -81,7 +81,7 @@ class ProtocolEnvelopeTest {
 
         val request = Request.fromJson(bytes)
 
-        assertEquals(7L, request.id)
+        assertEquals(RpcId.of(7), request.id)
         assertEquals("getInfo", request.method)
     }
 
@@ -152,22 +152,22 @@ class ProtocolEnvelopeTest {
 
     @Test(expected = IllegalArgumentException::class)
     fun `Response rejects having neither result nor error`() {
-        Response(1, result = null, error = null)
+        Response(RpcId.of(1), result = null, error = null)
     }
 
     @Test
     fun `Response success factory produces a success response`() {
-        val response = Response.success(5, JSONObject().put("pong", true))
+        val response = Response.success(RpcId.of(5), JSONObject().put("pong", true))
 
         assertTrue(response.isSuccess())
         assertFalse(response.isError())
-        assertEquals(5L, response.id)
+        assertEquals(RpcId.of(5), response.id)
         assertTrue(response.result!!.getBoolean("pong"))
     }
 
     @Test
     fun `Response error factory produces an error response with code and message`() {
-        val response = Response.error(6, ErrorCodes.KEY_NOT_FOUND, "no such key")
+        val response = Response.error(RpcId.of(6), ErrorCodes.KEY_NOT_FOUND, "no such key")
 
         assertFalse(response.isSuccess())
         assertTrue(response.isError())
@@ -180,7 +180,7 @@ class ProtocolEnvelopeTest {
     fun `Response error factory accepts a prebuilt ErrorObject`() {
         val errorObject = ErrorObject(ErrorCodes.PIN_LOCKED, "locked", JSONObject().put("retries", 0))
 
-        val response = Response.error(7, errorObject)
+        val response = Response.error(RpcId.of(7), errorObject)
 
         assertEquals(errorObject, response.error)
         assertEquals(0, response.error!!.data!!.getInt("retries"))
@@ -195,7 +195,7 @@ class ProtocolEnvelopeTest {
         val response = Response.fromJson("""{"id":12,"result":{"pong":true}}""")
 
         assertTrue(response.isSuccess())
-        assertEquals(12L, response.id)
+        assertEquals(RpcId.of(12), response.id)
         assertTrue(response.result!!.getBoolean("pong"))
         assertNull(response.error)
     }
@@ -216,7 +216,7 @@ class ProtocolEnvelopeTest {
     fun `Response fromJson parses from UTF-8 bytes`() {
         val response = Response.fromJson("""{"id":14,"result":{}}""".toByteArray(Charsets.UTF_8))
 
-        assertEquals(14L, response.id)
+        assertEquals(RpcId.of(14), response.id)
         assertTrue(response.isSuccess())
     }
 
@@ -263,7 +263,7 @@ class ProtocolEnvelopeTest {
 
     @Test
     fun `Response toJsonString of a success emits exactly id and result`() {
-        val json = JSONObject(Response.success(21, JSONObject().put("ok", true)).toJsonString())
+        val json = JSONObject(Response.success(RpcId.of(21), JSONObject().put("ok", true)).toJsonString())
 
         assertEquals(setOf("id", "result"), json.keySet())
         assertEquals(21L, json.getLong("id"))
@@ -272,7 +272,7 @@ class ProtocolEnvelopeTest {
 
     @Test
     fun `Response toJsonString of an error emits exactly id and error`() {
-        val json = JSONObject(Response.error(22, ErrorCodes.INVALID_PARAMS, "bad").toJsonString())
+        val json = JSONObject(Response.error(RpcId.of(22), ErrorCodes.INVALID_PARAMS, "bad").toJsonString())
 
         assertEquals(setOf("id", "error"), json.keySet())
         assertEquals(setOf("code", "message"), json.getJSONObject("error").keySet())
@@ -283,7 +283,7 @@ class ProtocolEnvelopeTest {
     @Test
     fun `Response toJson round-trips an error response including data`() {
         val original = Response.error(
-            32,
+            RpcId.of(32),
             ErrorCodes.PIN_INCORRECT,
             "wrong pin",
             JSONObject().put("retriesLeft", 2)

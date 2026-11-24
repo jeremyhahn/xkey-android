@@ -650,9 +650,9 @@ class CosignRequestHandlerTest {
 
         screen.answer(approved = false)
         assertNull(first.await().error)
-        assertEquals(1L, first.await().id)
+        assertEquals(RpcId.of(1L), first.await().id)
         assertError(ErrorCodes.BIOMETRIC_FAILED, second.await())
-        assertEquals(2L, second.await().id)
+        assertEquals(RpcId.of(2L), second.await().id)
         coVerify(exactly = 1) { keystoreManager.signApproved(any(), any(), any(), any()) }
     }
 
@@ -673,7 +673,7 @@ class CosignRequestHandlerTest {
 
         screen.answer(approved = true)
         assertNull(second.await().error)
-        assertEquals(2L, second.await().id)
+        assertEquals(RpcId.of(2L), second.await().id)
         coVerify(exactly = 1) { keystoreManager.signApproved(any(), any(), any(), any()) }
     }
 
@@ -733,7 +733,7 @@ class CosignRequestHandlerTest {
 
         screen.answer(approved = true)
         assertNull(second.await().error)
-        assertEquals(2L, second.await().id)
+        assertEquals(RpcId.of(2L), second.await().id)
         coVerify(exactly = 1) { keystoreManager.signApproved(any(), any(), any(), any()) }
     }
 
@@ -1146,7 +1146,7 @@ class CosignRequestHandlerTest {
         assertEquals("the next co-sign's prompt is its own", secondPrompt, screen.visible)
         screen.answer(approved = true)
         assertNull(second.await().error)
-        assertEquals(2L, second.await().id)
+        assertEquals(RpcId.of(2L), second.await().id)
         coVerify(exactly = 1) { keystoreManager.signApproved(any(), any(), any(), any()) }
     }
 

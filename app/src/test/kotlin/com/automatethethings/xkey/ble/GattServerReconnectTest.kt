@@ -24,6 +24,7 @@ import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.protocol.ErrorCodes
 import com.automatethethings.xkey.protocol.RequestHandler
 import com.automatethethings.xkey.protocol.Response
+import com.automatethethings.xkey.protocol.RpcId
 import com.automatethethings.xkey.remote.BidirectionalMessageRouter
 import com.automatethethings.xkey.remote.ConnectionChangedException
 import com.automatethethings.xkey.remote.DesktopKeyShare
@@ -190,7 +191,7 @@ class GattServerReconnectTest {
         call("handleApplicationMessage", device, desktop.encrypt(BACKUP_RESPONSE))
 
         val response = withTimeout(TIMEOUT_MS) { pending.await() }
-        assertEquals(BACKUP_ID, response.id)
+        assertEquals(RpcId.of(BACKUP_ID), response.id)
         assertEquals(true, response.result?.getBoolean("stored"))
         coVerify(exactly = 0) { requestHandler.handleRawRequest(any<ByteArray>()) }
     }

@@ -290,7 +290,7 @@ class GenerationEchoTest {
 
     @Test
     fun `Response toJsonString writes the generation as a number`() {
-        val text = Response.success(1, JSONObject(), generation = ULong.MAX_VALUE).toJsonString()
+        val text = Response.success(RpcId.of(1), JSONObject(), generation = ULong.MAX_VALUE).toJsonString()
 
         assertEquals(UINT64_MAX, rawGeneration(text))
         assertEquals(ULong.MAX_VALUE, Response.fromJson(text).generation)

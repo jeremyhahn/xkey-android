@@ -29,6 +29,7 @@ import com.automatethethings.xkey.protocol.Request as ProtocolRequest
 import com.automatethethings.xkey.protocol.RequestHandler
 import com.automatethethings.xkey.protocol.TransportMethods
 import com.automatethethings.xkey.protocol.Response as ProtocolResponse
+import com.automatethethings.xkey.protocol.RpcId
 import com.automatethethings.xkey.protocol.SessionBinding
 import com.automatethethings.xkey.protocol.SessionBindingProvider
 import com.automatethethings.xkey.protocol.readGeneration
@@ -857,7 +858,7 @@ class StreamPairingSession(
     private fun refuseRepeatedConfirm(plaintext: ByteArray): ByteArray {
         val text = String(plaintext, Charsets.UTF_8)
         return ProtocolResponse.error(
-            JSONObject(text).optLong("id", -1),
+            RpcId.read(text) ?: RpcId.NULL,
             ErrorCodes.PAIRING_REJECTED,
             "Only one pairing.confirm per connection; reconnect to pair",
             generation = readGeneration(text)
@@ -881,7 +882,7 @@ class StreamPairingSession(
 
         Log.w(TAG, "[$transportLabel] refusing '$method' from an unpaired peer")
         return ProtocolResponse.error(
-            json.optLong("id", -1),
+            RpcId.read(text) ?: RpcId.NULL,
             ErrorCodes.PAIRING_REQUIRED,
             "Device is not paired; send pairing.confirm first",
             generation = readGeneration(text)
@@ -902,7 +903,7 @@ class StreamPairingSession(
         }
         if (json.getStringOrNull("method") != MethodNames.PAIRING_CONFIRM) return null
 
-        val id = json.optLong("id", -1)
+        val id = RpcId.read(text) ?: RpcId.NULL
         val generation = readGeneration(text)
         val params = json.optJSONObject("params") ?: return null
         val pairingParams = try {
@@ -1169,7 +1170,7 @@ internal fun confirmAlreadyPaired(plaintext: ByteArray): ByteArray? {
     }
     if (json.getStringOrNull("method") != MethodNames.PAIRING_CONFIRM) return null
 
-    val id = json.optLong("id", -1)
+    val id = RpcId.read(text) ?: RpcId.NULL
     val result = PairingConfirmResult(confirmed = true, deviceName = phoneModelName())
     return ProtocolResponse.success(id, result.toJson(), generation = readGeneration(text)).toJson()
 }

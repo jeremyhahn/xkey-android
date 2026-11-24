@@ -15,6 +15,7 @@
 package com.automatethethings.xkey.usb
 
 import com.automatethethings.xkey.protocol.Response
+import com.automatethethings.xkey.protocol.RpcId
 import com.automatethethings.xkey.transport.StreamMessageFraming
 import org.json.JSONArray
 import org.json.JSONObject
@@ -37,10 +38,12 @@ internal object FrameBudget {
 
     /**
      * What the JSON-RPC envelope adds around a result,
-     * `{"id":<id>,"result":<result>}`, measured with the longest id.
+     * `{"id":<id>,"result":<result>}`, measured with the widest id the phone
+     * reads: [Long.MIN_VALUE], [RpcId.MAX_JSON_BYTES] wide, as wide as any
+     * string or integer id it accepts.
      */
     private val ENVELOPE_SIZE: Int =
-        Response.success(Long.MIN_VALUE, JSONObject()).toJson().size - JSONObject().toString().length
+        Response.success(RpcId.of(Long.MIN_VALUE), JSONObject()).toJson().size - JSONObject().toString().length
 
     private const val GENERATION_KEY = "generation"
 

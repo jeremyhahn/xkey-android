@@ -21,18 +21,27 @@ import java.util.Base64
 /**
  * Represents a protocol request message.
  *
- * @property id Unique request identifier
+ * @property id The request identifier exactly as the sender wrote it: a
+ *   string or an integer (see [RpcId]); every answer echoes it
  * @property method Method name to invoke
  * @property params Optional method parameters
  * @property generation The initiator's request generation (go-xkms#128), a
  *   uint64 the response echoes verbatim; null when the request carried none
  */
 data class Request(
-    val id: Long,
+    val id: RpcId,
     val method: String,
     val params: JSONObject? = null,
     val generation: ULong? = null
 ) {
+    /**
+     * A request the phone sends itself, numbered by the phone. For outbound
+     * requests only: an inbound request keeps the id its sender wrote, which
+     * need not be a number (see [fromJson]).
+     */
+    constructor(id: Long, method: String, params: JSONObject? = null, generation: ULong? = null) :
+        this(RpcId.of(id), method, params, generation)
+
     companion object {
         /**
          * Parses a Request from JSON bytes.
@@ -46,14 +55,18 @@ data class Request(
         /**
          * Parses a Request from JSON string.
          *
+         * The id is served when it is a string or a non-negative integer
+         * (of any width up to [RpcId.MAX_JSON_BYTES]); anything else is
+         * refused.
+         *
          * @throws ProtocolException if parsing fails
          */
         fun fromJson(json: String): Request {
             try {
                 val obj = JSONObject(json)
 
-                val id = obj.optLong("id", -1)
-                if (id < 0) {
+                val id = RpcId.read(json)?.takeIf { it.isServable() }
+                if (id == null) {
                     throw ProtocolException("Missing or invalid 'id' field")
                 }
 
@@ -85,7 +98,7 @@ data class Request(
      */
     fun toJsonString(): String {
         val obj = JSONObject()
-        obj.put("id", id)
+        obj.put("id", id.toJsonValue())
         if (generation != null) {
             obj.put(GENERATION_KEY, generation.toJsonNumber())
         }
@@ -130,7 +143,17 @@ fun readGeneration(json: String): ULong? {
  * Every org.json the app runs on, the bundled one and Android's, has these
  * [JSONTokener] calls.
  */
-private fun topLevelLiteral(json: String, key: String): String? {
+private fun topLevelLiteral(json: String, key: String): String? =
+    topLevelValue(json, key)?.nextTo(",}")
+
+/**
+ * A tokener over the JSON object [json], positioned at the first character
+ * of the value of its top-level member [key]; null when the object has no
+ * such member. The members before it are walked as values, so one after
+ * them may hold anything, and a string member holding `,` or `}` does not
+ * end the walk early.
+ */
+private fun topLevelValue(json: String, key: String): JSONTokener? {
     val tokener = JSONTokener(json)
     if (tokener.nextClean() != '{') return null
     while (true) {
@@ -142,11 +165,107 @@ private fun topLevelLiteral(json: String, key: String): String? {
         if (name == key) {
             if (tokener.nextClean() == '\u0000') return null
             tokener.back()
-            return tokener.nextTo(",}")
+            return tokener
         }
         tokener.nextValue()
         if (tokener.nextClean() != ',') return null
     }
+}
+
+/** A JSON integer as an id is written: an optional sign, no leading zero, no fraction or exponent. */
+private val INTEGER_LITERAL = Regex("0|-?[1-9][0-9]*")
+
+/**
+ * A JSON-RPC request id, held as the JSON value its sender wrote: a
+ * [String], an integer kept digit for digit (a [Long] when it fits,
+ * otherwise a [BigInteger]), or JSON null. A JSON-RPC client matches an
+ * answer to its request by the id exactly as sent, so every answer the
+ * phone writes carries the request's [RpcId] unchanged; the phone never
+ * computes with it.
+ *
+ * Write it with [toJsonValue] (`put("id", id.toJsonValue())`), never as the
+ * object itself: org.json would quote its [toString].
+ */
+class RpcId private constructor(private val value: Any) {
+
+    companion object {
+        /**
+         * The widest id, as org.json writes it, that the phone reads: 20
+         * bytes, the width of [Long.MIN_VALUE] (and of uint64 max). The
+         * frame budget reserves exactly this much for the id of every
+         * answer (see [com.automatethethings.xkey.usb.FrameBudget]), so an
+         * answer always fits whatever id its request carried, and the
+         * payload limits derived from that budget (RESULT_BUDGET, the
+         * password entry limit) do not depend on the id. A wider id is not
+         * read: its request is refused and answered with a null id.
+         */
+        const val MAX_JSON_BYTES = 20
+
+        /** JSON null: the id of an answer to a message whose id cannot be read. */
+        @JvmField
+        val NULL = RpcId(JSONObject.NULL)
+
+        /** An id the phone picks for its own outbound request. */
+        fun of(id: Long): RpcId = RpcId(id)
+
+        /**
+         * The top-level `id` of the JSON message [json], read from the
+         * message text: org.json turns an integer above [Long.MAX_VALUE]
+         * into a Double, which rounds it, so the number is taken from its
+         * literal. A string, an integer or null is read; anything else (a
+         * fraction, an exponent, a boolean, an object, an array), a missing
+         * id and an id whose JSON form is over [MAX_JSON_BYTES] give null.
+         */
+        fun read(json: String): RpcId? {
+            val id = try {
+                val tokener = topLevelValue(json, "id") ?: return null
+                val first = tokener.nextClean()
+                tokener.back()
+                if (first == '"' || first == '\'') {
+                    val text = tokener.nextValue() as? String ?: return null
+                    RpcId(text)
+                } else {
+                    val literal = tokener.nextTo(",}")
+                    when {
+                        literal == "null" -> NULL
+                        !INTEGER_LITERAL.matches(literal) -> return null
+                        else -> RpcId(literal.toLongOrNull() ?: BigInteger(literal))
+                    }
+                }
+            } catch (e: JSONException) {
+                return null
+            }
+            return id.takeIf { it.toString().toByteArray(Charsets.UTF_8).size <= MAX_JSON_BYTES }
+        }
+    }
+
+    /** The id as org.json writes it: a [String], a [Long], a [BigInteger] or [JSONObject.NULL]. */
+    fun toJsonValue(): Any = value
+
+    /** The id when it is an integer that fits a [Long], otherwise null. */
+    fun longValueOrNull(): Long? = value as? Long
+
+    /**
+     * Whether a request with this id is served: a string, or a non-negative
+     * integer. Null and negative ids are refused, as they always were.
+     */
+    internal fun isServable(): Boolean = when (value) {
+        is String -> true
+        is Long -> value >= 0
+        is BigInteger -> value.signum() >= 0
+        else -> false
+    }
+
+    /** The id's JSON text, as it goes on the wire: `"abc"`, `12` or `null`. */
+    override fun toString(): String = when (value) {
+        is String -> JSONObject.quote(value)
+        else -> value.toString()
+    }
+
+    override fun equals(other: Any?): Boolean =
+        other is RpcId && (value == other.value || (value === JSONObject.NULL && other.value === JSONObject.NULL))
+
+    override fun hashCode(): Int = if (value === JSONObject.NULL) 0 else value.hashCode()
 }
 
 /**
@@ -160,14 +279,14 @@ private fun ULong.toJsonNumber(): Number =
 /**
  * Represents a protocol response message.
  *
- * @property id Request identifier this response corresponds to
+ * @property id The id of the request this answers, exactly as it was sent
  * @property result Successful result data
  * @property error Error information if request failed
  * @property generation The generation of the request this answers, copied
  *   verbatim; null when the request carried none
  */
 data class Response(
-    val id: Long,
+    val id: RpcId,
     val result: JSONObject? = null,
     val error: ErrorObject? = null,
     val generation: ULong? = null
@@ -185,7 +304,7 @@ data class Response(
         /**
          * Creates a successful response.
          */
-        fun success(id: Long, result: JSONObject, generation: ULong? = null): Response {
+        fun success(id: RpcId, result: JSONObject, generation: ULong? = null): Response {
             return Response(id, result = result, error = null, generation = generation)
         }
 
@@ -193,7 +312,7 @@ data class Response(
          * Creates an error response.
          */
         fun error(
-            id: Long,
+            id: RpcId,
             code: Int,
             message: String,
             data: JSONObject? = null,
@@ -205,7 +324,7 @@ data class Response(
         /**
          * Creates an error response from an ErrorObject.
          */
-        fun error(id: Long, error: ErrorObject, generation: ULong? = null): Response {
+        fun error(id: RpcId, error: ErrorObject, generation: ULong? = null): Response {
             return Response(id, result = null, error = error, generation = generation)
         }
 
@@ -217,13 +336,17 @@ data class Response(
         }
 
         /**
-         * Parses a Response from JSON string.
+         * Parses a Response from JSON string: the desktop's answer to one of
+         * the phone's own requests, whose ids are [Long]s.
+         *
+         * The id is accepted as it always was, by org.json's `optLong`
+         * coercion (a number, or a string holding one); see [legacyLongId].
          */
         fun fromJson(json: String): Response {
             try {
                 val obj = JSONObject(json)
 
-                val id = obj.optLong("id", -1)
+                val id = legacyLongId(obj)
                 if (id < 0) {
                     throw ProtocolException("Missing or invalid 'id' field")
                 }
@@ -238,7 +361,7 @@ data class Response(
                 val result = if (hasResult) obj.getJSONObject("result") else null
                 val error = if (hasError) ErrorObject.fromJson(obj.getJSONObject("error")) else null
 
-                return Response(id, result, error, readGeneration(json))
+                return Response(RpcId.of(id), result, error, readGeneration(json))
             } catch (e: JSONException) {
                 throw ProtocolException("Invalid JSON: ${e.message}", e)
             }
@@ -257,7 +380,7 @@ data class Response(
      */
     fun toJsonString(): String {
         val obj = JSONObject()
-        obj.put("id", id)
+        obj.put("id", id.toJsonValue())
         if (generation != null) {
             obj.put(GENERATION_KEY, generation.toJsonNumber())
         }
@@ -279,6 +402,19 @@ data class Response(
      * Returns true if this is an error response.
      */
     fun isError(): Boolean = error != null
+}
+
+/**
+ * The `id` of the parsed answer [obj] as org.json's `optLong(name, -1)`
+ * coerces it: a number truncated to a [Long], a string holding a number, or
+ * -1. Only [Response.fromJson] reads an id this way: the answers it parses
+ * are to the phone's own requests, numbered with [Long]s, and their
+ * acceptance rule is unchanged. A request's id is read with [RpcId.read].
+ */
+private fun legacyLongId(obj: JSONObject): Long = when (val raw = obj.opt("id")) {
+    is Number -> raw.toLong()
+    is String -> raw.trim().toDoubleOrNull()?.takeIf { !it.isNaN() }?.toLong() ?: -1L
+    else -> -1L
 }
 
 /**

@@ -17,6 +17,7 @@ package com.automatethethings.xkey.remote
 import com.automatethethings.xkey.protocol.ErrorCodes
 import com.automatethethings.xkey.protocol.RequestHandler
 import com.automatethethings.xkey.protocol.Response
+import com.automatethethings.xkey.protocol.RpcId
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.mockk
@@ -142,7 +143,7 @@ class BidirectionalMessageRouterTest {
 
         assertNull("responses must not produce a reply", out)
         val response = deferred.await()
-        assertEquals(42L, response.id)
+        assertEquals(RpcId.of(42), response.id)
         assertTrue(response.isSuccess())
         assertTrue(response.result!!.getBoolean("valid"))
         coVerify(exactly = 0) { requestHandler.handleRawRequest(any()) }
@@ -244,7 +245,7 @@ class BidirectionalMessageRouterTest {
 
         for ((id, deferred) in listOf(101L to a, 102L to b)) {
             val response = deferred.await()
-            assertEquals(id, response.id)
+            assertEquals(RpcId.of(id), response.id)
             assertTrue(response.isError())
             assertEquals(ErrorCodes.INTERNAL_ERROR, response.error!!.code)
             assertEquals("Connection lost", response.error!!.message)

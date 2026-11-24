@@ -218,18 +218,17 @@ class RequestHandlerErrorPathTest {
     @Test
     fun rawRequestRoundTripsASuccessfulCall() {
         val response = rawCall("""{"id":77,"method":"ping"}""")
-        assertEquals(77L, response.id)
+        assertEquals(RpcId.of(77), response.id)
         assertTrue(response.ok().getBoolean("pong"))
     }
 
     @Test
     fun rawRequestWithNonJsonBytesIsRejected() {
-        val response = rawCall("this is not json at all")
-        assertTrue(response.isError())
-        assertEquals(
-            "an unparseable frame is answered on the reserved id 0",
-            0L,
-            response.id
+        val answer = rawAnswer("this is not json at all")
+        assertTrue(answer.has("error"))
+        assertTrue(
+            "an unparseable frame is answered with a null id: $answer",
+            answer.has("id") && answer.isNull("id")
         )
     }
 
@@ -240,9 +239,9 @@ class RequestHandlerErrorPathTest {
 
     @Test
     fun rawRequestWithoutAnIdIsRejected() {
-        val response = rawCall("""{"method":"ping"}""")
-        assertTrue(response.isError())
-        assertTrue(response.errorMessage().contains("id"))
+        val answer = rawAnswer("""{"method":"ping"}""")
+        assertTrue("a missing id is answered with a null id: $answer", answer.isNull("id"))
+        assertTrue(answer.getJSONObject("error").getString("message").contains("id"))
     }
 
     @Test
@@ -259,21 +258,23 @@ class RequestHandlerErrorPathTest {
 
     @Test
     fun rawRequestWithAJsonArrayBodyIsRejected() {
-        assertTrue(rawCall("""["id",1]""").isError())
+        val answer = rawAnswer("""["id",1]""")
+        assertTrue(answer.has("error"))
+        assertTrue("an array body is answered with a null id: $answer", answer.isNull("id"))
     }
 
     @Test
     fun rawRequestForAnUnknownMethodIsAWellFormedErrorFrame() {
         val response = rawCall("""{"id":9,"method":"local.notAMethod"}""")
-        assertEquals(9L, response.id)
+        assertEquals(RpcId.of(9), response.id)
         assertEquals(ErrorCodes.METHOD_NOT_FOUND, response.errorCode())
     }
 
     @Test
     fun createErrorResponseProducesAParseableFrame() {
-        val bytes = handler.createErrorResponse(5L, ErrorCodes.RATE_LIMITED, "slow down")
+        val bytes = handler.createErrorResponse(RpcId.of(5), ErrorCodes.RATE_LIMITED, "slow down")
         val response = Response.fromJson(bytes)
-        assertEquals(5L, response.id)
+        assertEquals(RpcId.of(5), response.id)
         assertEquals(ErrorCodes.RATE_LIMITED, response.errorCode())
         assertEquals("slow down", response.errorMessage())
     }
@@ -1347,6 +1348,13 @@ class RequestHandlerErrorPathTest {
         val bytes = json.toByteArray()
         val response = runBlocking(servedCaller()) { handler.handleRawRequest(bytes) }
         return Response.fromJson(response)
+    }
+
+    /** The answer to [text] as raw JSON, for answers whose `id` is `null` and so not a [Response]. */
+    private fun rawAnswer(text: String): JSONObject {
+        val bytes = text.toByteArray()
+        val response = runBlocking(servedCaller()) { handler.handleRawRequest(bytes) }
+        return JSONObject(String(response, Charsets.UTF_8))
     }
 
     /**

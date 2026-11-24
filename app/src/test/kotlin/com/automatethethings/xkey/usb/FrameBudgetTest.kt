@@ -16,6 +16,7 @@ package com.automatethethings.xkey.usb
 
 import com.automatethethings.xkey.password.PasswordEntryLimit
 import com.automatethethings.xkey.protocol.Response
+import com.automatethethings.xkey.protocol.RpcId
 import com.automatethethings.xkey.transport.MessageTooLargeException
 import com.automatethethings.xkey.transport.StreamMessageFraming
 import org.json.JSONArray
@@ -67,7 +68,7 @@ class FrameBudgetTest {
 
     @Test
     fun `RESULT_BUDGET plus the envelope, the generation reserve and the Noise tag is exactly the frame`() {
-        val envelope = Response.success(Long.MIN_VALUE, JSONObject()).toJson().size - JSONObject().toString().length
+        val envelope = Response.success(RpcId.of(Long.MIN_VALUE), JSONObject()).toJson().size - JSONObject().toString().length
 
         assertEquals(
             StreamMessageFraming.MAX_MESSAGE_SIZE,
@@ -93,7 +94,7 @@ class FrameBudgetTest {
             put("total", Int.MAX_VALUE)
             put("has_more", false)
         }
-        val json = withWidestGeneration(Response.success(Long.MIN_VALUE, page))
+        val json = withWidestGeneration(Response.success(RpcId.of(Long.MIN_VALUE), page))
 
         assertEquals(StreamMessageFraming.MAX_MESSAGE_SIZE, json.size + FrameBudget.NOISE_TAG_SIZE)
         writeFramed(json)
@@ -103,7 +104,7 @@ class FrameBudgetTest {
     fun `a page filled exactly to RESULT_BUDGET under the longest id and the widest generation fills the frame`() {
         val page = pageOfBudget()
         assertEquals(FrameBudget.RESULT_BUDGET, FrameBudget.serializedSize(page))
-        val json = withWidestGeneration(Response.success(Long.MIN_VALUE, page))
+        val json = withWidestGeneration(Response.success(RpcId.of(Long.MIN_VALUE), page))
 
         assertEquals(StreamMessageFraming.MAX_MESSAGE_SIZE, json.size + FrameBudget.NOISE_TAG_SIZE)
         writeFramed(json)
@@ -111,7 +112,7 @@ class FrameBudgetTest {
 
     @Test
     fun `a result one byte over RESULT_BUDGET with the widest generation is refused by the frame`() {
-        val json = withWidestGeneration(Response.success(Long.MIN_VALUE, resultOfSize(FrameBudget.RESULT_BUDGET + 1)))
+        val json = withWidestGeneration(Response.success(RpcId.of(Long.MIN_VALUE), resultOfSize(FrameBudget.RESULT_BUDGET + 1)))
 
         assertThrows(MessageTooLargeException::class.java) { writeFramed(json) }
     }

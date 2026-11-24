@@ -25,6 +25,7 @@ import com.automatethethings.xkey.password.PasswordStoreLockedException
 import com.automatethethings.xkey.protocol.ErrorCodes
 import com.automatethethings.xkey.protocol.ProtocolException
 import com.automatethethings.xkey.protocol.RequestHandler
+import com.automatethethings.xkey.protocol.RpcId
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.protocol.Request
 import com.automatethethings.xkey.sync.SyncEngine
@@ -773,7 +774,7 @@ class RemoteSyncClientTest {
         stubIdleEngine()
         sender.neverReply()
         expectProtocolException { client.syncOath() }
-        val abandoned = sender.lastRequest.id
+        val abandoned = sender.lastRequest.id.longValueOrNull()!!
 
         // A late reply for the abandoned id must be discarded, not applied.
         router.processMessage("""{"id":$abandoned,"result":{"local":[]}}""".toByteArray())
@@ -781,7 +782,7 @@ class RemoteSyncClientTest {
 
         client.syncOath()
 
-        assertEquals(abandoned + 1, sender.lastRequest.id)
+        assertEquals(RpcId.of(abandoned + 1), sender.lastRequest.id)
     }
 
     // --- SyncResult ---------------------------------------------------------

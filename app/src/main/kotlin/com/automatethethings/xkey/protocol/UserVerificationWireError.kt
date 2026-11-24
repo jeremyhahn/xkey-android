@@ -36,6 +36,6 @@ internal object UserVerificationWireError {
     const val CODE = ErrorCodes.BIOMETRIC_FAILED
 
     /** Builds the error response for [requestId] from [error]. */
-    fun response(requestId: Long, error: UserVerificationRequiredException): Response =
+    fun response(requestId: RpcId, error: UserVerificationRequiredException): Response =
         Response.error(requestId, CODE, error.message ?: "User verification required")
 }

@@ -35,6 +35,7 @@ import com.automatethethings.xkey.protocol.LocalGetIAKPublicKeyResult
 import com.automatethethings.xkey.protocol.ProtocolException
 import com.automatethethings.xkey.protocol.RequestHandler
 import com.automatethethings.xkey.protocol.Response
+import com.automatethethings.xkey.protocol.RpcId
 import com.automatethethings.xkey.remote.BidirectionalMessageRouter
 import com.automatethethings.xkey.settings.AttestationBiometricPolicy
 import com.automatethethings.xkey.settings.BiometricSettingsData
@@ -230,7 +231,7 @@ class GattServerEnrollmentTest {
 
         awaitRequest(FIRST_REQUEST_ID, enrollment)
         deliverUntilConsumed(
-            Response.error(FIRST_REQUEST_ID, ErrorCodes.INTERNAL_ERROR, "no TPM present").toJson(),
+            Response.error(RpcId.of(FIRST_REQUEST_ID), ErrorCodes.INTERNAL_ERROR, "no TPM present").toJson(),
             FIRST_REQUEST_ID,
             enrollment
         )
@@ -390,7 +391,7 @@ class GattServerEnrollmentTest {
 
         awaitRequest(FIRST_REQUEST_ID, call)
         deliverUntilConsumed(
-            Response.success(FIRST_REQUEST_ID, JSONObject().put("algorithm", "ECDSA-P256")).toJson(),
+            Response.success(RpcId.of(FIRST_REQUEST_ID), JSONObject().put("algorithm", "ECDSA-P256")).toJson(),
             FIRST_REQUEST_ID,
             call
         )
@@ -493,7 +494,7 @@ class GattServerEnrollmentTest {
     /** Waits for request [id] to be issued, then answers it with [result]. */
     private suspend fun answer(id: Long, result: JSONObject, job: Deferred<*>) {
         awaitRequest(id, job)
-        deliverUntilConsumed(Response.success(id, result).toJson(), id, job)
+        deliverUntilConsumed(Response.success(RpcId.of(id), result).toJson(), id, job)
     }
 
     /**

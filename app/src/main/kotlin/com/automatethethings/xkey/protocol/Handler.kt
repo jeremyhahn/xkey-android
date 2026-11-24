@@ -526,16 +526,17 @@ class RequestHandler(
             val response = handleRequest(request)
             response.toJson()
         } catch (e: ProtocolException) {
-            // A request that does not parse still echoes its generation when
-            // the text carries one where it can be read.
+            // A request that does not parse still echoes its id and generation
+            // when the text carries them where they can be read; an id that
+            // cannot be read is answered with null, never one not sent.
             Log.e(TAG, "Protocol error: ${e.message}")
             Response.error(
-                0, e.errorCode, e.message ?: "Protocol error", generation = readGeneration(json)
+                RpcId.read(json) ?: RpcId.NULL, e.errorCode, e.message ?: "Protocol error", generation = readGeneration(json)
             ).toJson()
         } catch (e: Exception) {
             Log.e(TAG, "Unexpected error", e)
             Response.error(
-                0, ErrorCodes.INTERNAL_ERROR, "Internal error: ${e.message}", generation = readGeneration(json)
+                RpcId.read(json) ?: RpcId.NULL, ErrorCodes.INTERNAL_ERROR, "Internal error: ${e.message}", generation = readGeneration(json)
             ).toJson()
         }
     }
@@ -543,7 +544,7 @@ class RequestHandler(
     /**
      * Creates an error response as JSON bytes.
      */
-    fun createErrorResponse(id: Long, code: Int, message: String): ByteArray {
+    fun createErrorResponse(id: RpcId, code: Int, message: String): ByteArray {
         return Response.error(id, code, message).toJson()
     }
 
