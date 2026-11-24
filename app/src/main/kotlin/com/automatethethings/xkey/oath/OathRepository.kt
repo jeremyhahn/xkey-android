@@ -15,6 +15,7 @@
 package com.automatethethings.xkey.oath
 
 import android.net.Uri
+import android.util.Log
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import java.net.URLEncoder
@@ -30,11 +31,15 @@ import java.util.UUID
  * @property credential The underlying OATH credential entity.
  * @property code The current one-time password code string.
  * @property secondsRemaining Seconds until the current TOTP code expires (0 for HOTP).
+ * @property codeError True when no code could be computed for this row (its
+ *           secret cannot be decrypted, or a stored field the engine refuses);
+ *           [code] is then [OathRepository.NO_CODE].
  */
 data class OathCredentialWithCode(
     val credential: OathCredentialEntity,
     val code: String,
-    val secondsRemaining: Int
+    val secondsRemaining: Int,
+    val codeError: Boolean = false
 )
 
 /**
@@ -375,40 +380,59 @@ class OathRepository(
     fun observeAll(): Flow<List<OathCredentialWithCode>> {
         return dao.observeAll().map { credentials ->
             credentials.map { credential ->
-                val secret = secretManager.decryptSecret(credential.secretEncrypted)
-                val now = System.currentTimeMillis()
-
-                val code = when (credential.oathType) {
-                    "TOTP" -> OathEngine.generateTotpCode(
-                        secret = secret,
-                        algorithm = credential.algorithm,
-                        digits = credential.digits,
-                        periodSeconds = credential.periodSeconds,
-                        timeMs = now
+                try {
+                    withCode(credential)
+                } catch (e: Exception) {
+                    // One row (an invalidated Keystore key, a stored value the
+                    // engine refuses) must not take the whole list down: it is
+                    // shown without a code and can still be deleted. The
+                    // exception text is not logged; it can quote key material.
+                    Log.w(TAG, "No code for OATH row ${credential.oathId}: ${e.javaClass.simpleName}")
+                    OathCredentialWithCode(
+                        credential = credential,
+                        code = NO_CODE,
+                        secondsRemaining = 0,
+                        codeError = true
                     )
-                    "HOTP" -> OathEngine.generateHotpCode(
-                        secret = secret,
-                        counter = credential.counter,
-                        algorithm = credential.algorithm,
-                        digits = credential.digits
-                    )
-                    else -> "------"
                 }
-
-                val secondsRemaining = if (credential.oathType == "TOTP") {
-                    val elapsed = (now / 1000L) % credential.periodSeconds.toLong()
-                    credential.periodSeconds - elapsed.toInt()
-                } else {
-                    0
-                }
-
-                OathCredentialWithCode(
-                    credential = credential,
-                    code = code,
-                    secondsRemaining = secondsRemaining
-                )
             }
         }
+    }
+
+    /** The row with its current code; throws when the code cannot be computed. */
+    private fun withCode(credential: OathCredentialEntity): OathCredentialWithCode {
+        val secret = secretManager.decryptSecret(credential.secretEncrypted)
+        val now = System.currentTimeMillis()
+
+        val code = when (credential.oathType) {
+            "TOTP" -> OathEngine.generateTotpCode(
+                secret = secret,
+                algorithm = credential.algorithm,
+                digits = credential.digits,
+                periodSeconds = credential.periodSeconds,
+                timeMs = now
+            )
+            "HOTP" -> OathEngine.generateHotpCode(
+                secret = secret,
+                counter = credential.counter,
+                algorithm = credential.algorithm,
+                digits = credential.digits
+            )
+            else -> NO_CODE
+        }
+
+        val secondsRemaining = if (credential.oathType == "TOTP") {
+            val elapsed = (now / 1000L) % credential.periodSeconds.toLong()
+            credential.periodSeconds - elapsed.toInt()
+        } else {
+            0
+        }
+
+        return OathCredentialWithCode(
+            credential = credential,
+            code = code,
+            secondsRemaining = secondsRemaining
+        )
     }
 
     /**
@@ -441,6 +465,11 @@ class OathRepository(
     // -------------------------------------------------------------------------
 
     companion object {
+
+        private const val TAG = "OathRepository"
+
+        /** What a row shows in place of a code it cannot compute. */
+        const val NO_CODE = "------"
 
         /**
          * RFC 4648 Base32 alphabet (A-Z, 2-7).

@@ -60,6 +60,7 @@ import com.google.android.material.floatingactionbutton.ExtendedFloatingActionBu
 import com.google.android.material.snackbar.Snackbar
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flow
@@ -583,7 +584,12 @@ class OathActivity : AppCompatActivity() {
                 }
 
                 ticker.flatMapLatest {
-                    repository.observeAll()
+                    // A failure reading the table keeps the last list on
+                    // screen until the next tick, not a crash on every open.
+                    repository.observeAll().catch { e ->
+                        if (e is kotlinx.coroutines.CancellationException) throw e
+                        android.util.Log.w("OathActivity", "OATH list not refreshed: ${e.javaClass.simpleName}")
+                    }
                 }.collectLatest { credentials ->
                     updateUI(credentials)
                     updateSummaryCard(credentials)
