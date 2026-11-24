@@ -303,7 +303,7 @@ class ProtocolEnvelopeTest {
     @Test
     fun `ErrorObject fromJson reads code message and data`() {
         val error = ErrorObject.fromJson(
-            JSONObject("""{"code":-32010,"message":"bad algo","data":{"algorithm":"XX"}}""")
+            JSONObject("""{"code":-32004,"message":"bad algo","data":{"algorithm":"XX"}}""")
         )
 
         assertEquals(ErrorCodes.INVALID_ALGORITHM, error.code)
