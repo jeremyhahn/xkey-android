@@ -149,6 +149,49 @@ class SensitiveClipboardTest {
         assertEquals("hunter2", clipText())
     }
 
+    @Test
+    fun `a focus before the time is up after a sleep clears at the time left`() {
+        val asleep = awakeAndSleepingClock()
+        SensitiveClipboard.copy(clipboard, "secret", "hunter2")
+        asleep.ms = 30_000
+        idle(5)
+
+        // 35 s on the deadline clock, 5 s of uptime: the focus retry re-arms for the 10 s left.
+        SensitiveClipboard.retryPendingClears(clipboard)
+        assertEquals("hunter2", clipText())
+
+        idle(9)
+        assertEquals("hunter2", clipText())
+
+        idle(1)
+        assertTrue("clipboard still holds the secret", clipText().isNullOrEmpty())
+    }
+
+    @Test
+    fun `a re-armed clear still leaves a clip that is not ours`() {
+        val asleep = awakeAndSleepingClock()
+        SensitiveClipboard.copy(clipboard, "secret", "hunter2")
+        asleep.ms = 30_000
+        idle(5)
+        SensitiveClipboard.retryPendingClears(clipboard)
+
+        clipboard.setPrimaryClip(ClipData.newPlainText("note", "shopping list"))
+        idle(15)
+
+        assertEquals("shopping list", clipText())
+    }
+
+    /**
+     * Drives [SensitiveClipboard.clock] as uptime plus [Asleep.ms]: idling the
+     * paused looper advances awake time on both the timer and the deadline
+     * clock, while [Asleep.ms] adds deep sleep to the deadline clock only.
+     */
+    private fun awakeAndSleepingClock(): Asleep {
+        val asleep = Asleep()
+        SensitiveClipboard.clock = MonotonicClock { SystemClock.uptimeMillis() + asleep.ms }
+        return asleep
+    }
+
     /** Time the device spent asleep: counted by elapsedRealtime, not by uptime. */
     private class Asleep(var ms: Long = 0)
 
