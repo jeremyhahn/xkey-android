@@ -313,15 +313,67 @@ class BootstrapSettingsRepositoryJvmTest {
         assertEquals(BootstrapSettingsData.DEFAULT, reopened().getSettings())
     }
 
-    /**
-     * Found: [BootstrapSettingsRepository.updateSettings] writes every field
-     * without the audited path, so turning DNSSEC off or replacing a pin
-     * through it leaves no entry. This test records what main does.
-     */
-    @Test
-    fun `found - updateSettings writes no audit entry`() = runBlocking {
-        repository.updateSettings(BootstrapSettingsData(daneRequireDnssec = false, spkiPinSha256 = PIN))
+    /** The recorded changes as setting name to (old, new), failing on a setting recorded twice. */
+    private fun changes(entries: List<AuditLogEntity>): Map<String, Pair<String, String>> {
+        entries.forEach {
+            assertEquals(AuditOperationType.SETTINGS_CHANGED, it.operationType)
+            assertTrue(it.success)
+        }
+        val pairs = entries.map { entry ->
+            val details = JSONObject(entry.details!!)
+            details.getString("setting") to (details.getString("oldValue") to details.getString("newValue"))
+        }
+        assertEquals("a setting was recorded twice: $pairs", pairs.size, pairs.map { it.first }.toSet().size)
+        return pairs.toMap()
+    }
 
+    @Test
+    fun `updateSettings records each changed DNSSEC, pin and key field`() = runBlocking {
+        repository.updateSettings(
+            BootstrapSettingsData(daneRequireDnssec = false, spkiPinSha256 = PIN, noiseServerStaticKey = NOISE_KEY)
+        )
+
+        assertEquals(
+            mapOf(
+                "daneRequireDnssec" to ("true" to "false"),
+                "spkiPinSha256" to ("" to PIN),
+                "noiseServerStaticKey" to ("" to NOISE_KEY)
+            ),
+            changes(inserted)
+        )
+    }
+
+    @Test
+    fun `updateSettings records nothing for unchanged DNSSEC, pin and key`() = runBlocking {
+        repository.updateSettings(BootstrapSettingsData.DEFAULT)
+        repository.updateSettings(BootstrapSettingsData.DEFAULT.copy(directServerUrl = "https://kms.example.com"))
+
+        assertEquals(emptyList<AuditLogEntity>(), inserted)
+
+        repository.updateSettings(BootstrapSettingsData.DEFAULT.copy(spkiPinSha256 = PIN))
+        assertEquals(mapOf("spkiPinSha256" to ("" to PIN)), changes(inserted))
+    }
+
+    @Test
+    fun `resetToDefaults records each DNSSEC, pin and key change back`() = runBlocking {
+        repository.updateSettings(
+            BootstrapSettingsData(daneRequireDnssec = false, spkiPinSha256 = PIN, noiseServerStaticKey = NOISE_KEY)
+        )
+        inserted.clear()
+
+        repository.resetToDefaults()
+
+        assertEquals(
+            mapOf(
+                "daneRequireDnssec" to ("false" to "true"),
+                "spkiPinSha256" to (PIN to ""),
+                "noiseServerStaticKey" to (NOISE_KEY to "")
+            ),
+            changes(inserted)
+        )
+
+        inserted.clear()
+        repository.resetToDefaults()
         assertEquals(emptyList<AuditLogEntity>(), inserted)
     }
 
