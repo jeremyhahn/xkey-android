@@ -249,18 +249,22 @@ class BiometricSettingsRepositoryJvmTest {
         )
     }
 
-    /**
-     * Found: the read path takes any stored time window, although
-     * [BiometricSettingsRepository.updateTimeWindow] refuses one that is not
-     * positive. A window of 0 or below makes every TIME_WINDOW operation
-     * prompt; Int.MAX_VALUE is a window of about 68 years. This test records
-     * what main reads; bounding the window is left to a follow-up.
-     */
     @Test
-    fun `found - stored time windows out of range are read as stored`() = runBlocking {
-        for (stored in listOf(0, -1, Int.MAX_VALUE)) {
+    fun `stored time windows out of range are clamped to the offered range`() = runBlocking {
+        val shortest = AuthTimeWindow.SECONDS_30.seconds
+        val longest = AuthTimeWindow.MINUTES_10.seconds
+        val expected = mapOf(
+            0 to shortest,
+            -1 to shortest,
+            Int.MIN_VALUE to shortest,
+            shortest - 1 to shortest,
+            longest + 1 to longest,
+            Int.MAX_VALUE to longest,
+            45 to 45
+        )
+        for ((stored, read) in expected) {
             store.edit { it[intPreferencesKey("time_window_seconds")] = stored }
-            assertEquals(stored, repository.getSettings().timeWindowSeconds)
+            assertEquals("stored $stored", read, repository.getSettings().timeWindowSeconds)
         }
     }
 
