@@ -3771,20 +3771,27 @@ class RequestHandler(
                 db.oathCredentialDao(),
                 com.automatethethings.xkey.oath.OathSecretManager()
             )
+            // Read once, before the code: a removal landing after the code is
+            // computed must not turn expires_in into 0 or the audit entry's
+            // account into an empty one.
+            val cred = db.oathCredentialDao().getByOathId(credentialId)
+                ?: return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Credential not found: $credentialId")
             val code = try {
                 oathRepository.generateCode(credentialId)
             } catch (_: NoSuchElementException) {
                 return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Credential not found: $credentialId")
+            } catch (_: com.automatethethings.xkey.oath.OathCounterExhaustedException) {
+                return Response.error(request.id, ErrorCodes.OPERATION_DENIED, "HOTP counter exhausted")
             }
 
-            val cred = db.oathCredentialDao().getByOathId(credentialId)
             // expires_in: seconds until the current TOTP window ends (0 for HOTP).
-            val expiresIn = if (cred?.oathType == "TOTP") {
-                val period = cred.periodSeconds.toLong()
+            // A period that is not positive never produced a code above.
+            val period = cred.periodSeconds.toLong()
+            val expiresIn = if (cred.oathType == "TOTP" && period > 0) {
                 (period - (System.currentTimeMillis() / 1000 % period)).toInt()
             } else 0
 
-            AuditLogger.logOathCodeGenerated(credentialId, cred?.issuer, cred?.accountName ?: "")
+            AuditLogger.logOathCodeGenerated(credentialId, cred.issuer, cred.accountName)
 
             val result = JSONObject().apply {
                 put("code", code)
@@ -3792,8 +3799,9 @@ class RequestHandler(
             }
             Response.success(request.id, result)
         } catch (e: Exception) {
+            // The exception text stays in the log: it can name stored values.
             Log.e(TAG, "Failed to generate OATH code", e)
-            Response.error(request.id, ErrorCodes.INTERNAL_ERROR, "Failed to generate code: ${e.message}")
+            Response.error(request.id, ErrorCodes.INTERNAL_ERROR, "Failed to generate code")
         }
     }
 
