@@ -202,6 +202,12 @@ class PivSlotReplaceFailureTest {
         assertTrue("every failure, cancellation included, is caught", replace.contains("catch (e: Throwable)"))
         assertTrue("the failure path empties the slot", replace.contains("discardUnrecordedKey(slot)"))
         assertTrue("the failure path cannot be cancelled", replace.contains("withContext(NonCancellable)"))
+
+        val discard = body(text, "discardUnrecordedKey")
+        val keep = discard.indexOf("live.contentEquals(row.publicKeyDer)")
+        assertTrue("a key that is still the row's keeps its row", keep >= 0)
+        assertTrue("the keep check comes before any removal", keep < discard.indexOf("deleteBySlotId("))
+        assertTrue("the keep check comes before any key removal", keep < discard.indexOf("deleteEntry("))
     }
 
     /** The name of the function each [call] match sits in. */
