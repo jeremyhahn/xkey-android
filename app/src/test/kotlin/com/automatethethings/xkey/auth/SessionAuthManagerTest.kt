@@ -116,14 +116,37 @@ class SessionAuthManagerTest {
     }
 
     @Test
-    fun `a zero second window always requires biometric`() {
+    fun `a zero second window acts as the 30 second floor`() {
         val zeroWindow = settings(BiometricAuthMode.TIME_WINDOW, windowSeconds = 0)
         manager.recordAuthentication("device-a")
 
-        assertTrue(
-            "elapsed >= 0 holds immediately, so a zero window degrades to per-operation",
+        assertFalse(
+            "a zero window is clamped to 30 s, so it does not degrade to per-operation",
             manager.isBiometricRequired(zeroWindow, "device-a")
         )
+    }
+
+    @Test
+    fun `a stored window outside the offered range is clamped to 30-600 seconds`() {
+        val cases = listOf(0 to 30, -5 to 30, 10 to 30, 1000 to 600, Int.MAX_VALUE to 600)
+        for ((stored, effective) in cases) {
+            setUp()
+            val window = settings(BiometricAuthMode.TIME_WINDOW, windowSeconds = stored)
+            manager.recordAuthentication("device-a")
+            val start = now
+
+            now = start + effective * 1000L - 1
+            assertFalse(
+                "stored $stored s must still be open 1 ms before $effective s",
+                manager.isBiometricRequired(window, "device-a")
+            )
+
+            now = start + effective * 1000L
+            assertTrue(
+                "stored $stored s must close at $effective s",
+                manager.isBiometricRequired(window, "device-a")
+            )
+        }
     }
 
     @Test
