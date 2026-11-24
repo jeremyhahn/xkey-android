@@ -518,13 +518,76 @@ class NoiseHandshakeTest {
 
     /**
      * `BleClient` asks for the stored static key so the phone dials out under
-     * the same identity it answers on. When encrypted storage is unreachable
-     * the contract is null — never a partially decoded key.
+     * the same identity it answers on. Null means only "no key stored"; an
+     * encrypted store that cannot be opened is a reported error, never null.
      */
     @Test
-    fun storedStaticKeyPairIsNullWhenSecureStorageIsUnreachable() = runTest {
+    fun storedStaticKeyPairFailsWhenSecureStorageIsUnreachable() = runTest {
         NoiseSession.keyStoreOpener = { throw IllegalStateException("keystore unavailable") }
+        assertStoredStaticKeyPairRefused()
+    }
+
+    /** An empty store is the one case that reads as "no key stored". */
+    @Test
+    fun storedStaticKeyPairIsNullWhenNothingIsStored() = runTest {
+        NoiseSession.keyStoreOpener = { InMemorySharedPreferences() }
         assertNull(NoiseSession.getStoredStaticKeyPair(context))
+    }
+
+    /** A stored key that does not decode is a corrupt store, not "no key". */
+    @Test
+    fun storedStaticKeyPairFailsOnCorruptBase64() = runTest {
+        val store = InMemorySharedPreferences()
+        store.edit()
+            .putString("static_private_key", "!!not base64!!")
+            .putString("static_public_key", java.util.Base64.getEncoder().encodeToString(randomBytes(KEY_SIZE)))
+            .commit()
+        NoiseSession.keyStoreOpener = { store }
+        val error = assertStoredStaticKeyPairRefused()
+        // The decoder's own message quotes a character of the stored secret.
+        assertFalse("the error must not quote the stored secret", error.message.orEmpty().contains("character"))
+        assertNull("the decoder's exception must not be carried", error.cause)
+    }
+
+    /** One half of the pair stored is a corrupt store, not "no key". */
+    @Test
+    fun storedStaticKeyPairFailsOnAnIncompletePair() = runTest {
+        val store = InMemorySharedPreferences()
+        store.edit().putString("static_public_key", java.util.Base64.getEncoder().encodeToString(randomBytes(KEY_SIZE))).commit()
+        NoiseSession.keyStoreOpener = { store }
+        assertStoredStaticKeyPairRefused()
+    }
+
+    /** A stored key of the wrong size is refused, never handed to the handshake. */
+    @Test
+    fun storedStaticKeyPairFailsOnAWrongSizedKey() = runTest {
+        val store = InMemorySharedPreferences()
+        store.edit()
+            .putString("static_private_key", java.util.Base64.getEncoder().encodeToString(randomBytes(KEY_SIZE - 1)))
+            .putString("static_public_key", java.util.Base64.getEncoder().encodeToString(randomBytes(KEY_SIZE)))
+            .commit()
+        NoiseSession.keyStoreOpener = { store }
+        assertStoredStaticKeyPairRefused()
+    }
+
+    /** A stored pair written by a session reads back as that session's identity. */
+    @Test
+    fun storedStaticKeyPairReadsBackTheSessionKey() = runTest {
+        val store = InMemorySharedPreferences()
+        NoiseSession.keyStoreOpener = { store }
+        val session = NoiseSession().also { it.loadStaticKey(context) }
+        val stored = NoiseSession.getStoredStaticKeyPair(context)
+        assertArrayEquals(session.getStaticPublicKey(), stored!!.publicKey)
+    }
+
+    private suspend fun assertStoredStaticKeyPairRefused(): NoiseException {
+        try {
+            NoiseSession.getStoredStaticKeyPair(context)
+        } catch (expected: NoiseException) {
+            return expected
+        }
+        fail("expected the stored static key pair to be refused")
+        throw AssertionError("unreachable")
     }
 
     /**
