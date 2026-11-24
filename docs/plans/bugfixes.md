@@ -60,5 +60,31 @@ dropping the device-credential option, which would leave a screen-lock-only
 user unable to use a time-window passkey. Pick both, in order, once row/318
 is on main.
 
+## Fixes made on this branch
+
+- edd7f3da echoes every JSON-RPC request id exactly as sent. `RpcId` in
+  Messages.kt is the one place an id is read from a message: a string stays
+  a string (`"12"` is not turned into 12), an integer wider than a Long
+  (18446744073709551615) is kept digit for digit, and a message whose id
+  cannot be read is answered with `"id":null`. It is read from the message
+  text, because org.json rounds such an integer through a Double. Tests:
+  4885e95a (RequestIdEchoTest, RequestIdChokePointTest, StreamIdEchoTest,
+  GattServerIdEchoTest, BleClientPhoneInitiatedAttestTest) and the RpcId
+  cases in RequestIdEchoTest.
+- An id is capped at 20 bytes of JSON, the width of Long.MIN_VALUE and of
+  uint64 max. FrameBudget already reserves that much for the id of every
+  answer, so RESULT_BUDGET and the password entry limit stay as they are; a
+  wider id is refused and answered with a null id.
+- 052b39cf answers a stream reply over 65519 plaintext bytes (the 65535-byte
+  frame less the 16-byte Noise tag) with an INTERNAL_ERROR carrying the
+  request's id and generation, and `send` refuses such a plaintext before
+  admission, so no nonce is spent and the connection goes on. Test:
+  b208d6af (StreamOversizedReplyTest).
+- row/349's StreamPairingConfirmTest
+  (`aStringIdRequestBeforePairingGetsPairingRequired`, which expects `"43"`
+  back as 43) and StreamFrameLimitsTest
+  (`aResponseOverTheFrameLimitWritesNothingAndEndsTheConnection`) record the
+  old behaviour. Whichever of the two branches lands second flips them.
+
 Gradle was not run for this branch (no Android SDK where it was built); the
 carried tests were read against main's signatures.
