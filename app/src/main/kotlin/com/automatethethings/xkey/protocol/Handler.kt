@@ -651,31 +651,12 @@ class RequestHandler(
         }
 
         // A refusal is audited from the response, so one a handler returns
-        // and one it throws are recorded alike, once each. A handler that
-        // wrote the refusal's own record (a failed export) marked it, and
-        // gets no second row.
-        val recorded = refusalsRecorded.remove(request)
+        // and one it throws are recorded alike, once each.
         val error = response.error
-        if (error?.code == ErrorCodes.OPERATION_DENIED && !recorded) {
+        if (error?.code == ErrorCodes.OPERATION_DENIED) {
             auditPolicyDenied(request.method, error.message)
         }
         return response
-    }
-
-    /**
-     * Requests (by identity) whose handler already wrote the audit record of
-     * its refusal, so [dispatch] does not record it twice. A handler adds its
-     * request with [markRefusalRecorded] right after writing that record;
-     * [dispatch] removes it when the handler returns.
-     */
-    private val refusalsRecorded: MutableSet<Request> =
-        java.util.Collections.synchronizedSet(
-            java.util.Collections.newSetFromMap(java.util.IdentityHashMap<Request, Boolean>())
-        )
-
-    /** Tells [dispatch] that [request]'s refusal already has its audit record. */
-    private fun markRefusalRecorded(request: Request) {
-        refusalsRecorded.add(request)
     }
 
     /**
@@ -683,7 +664,8 @@ class RequestHandler(
      * POLICY_DENIED audit row. [dispatch] calls it on every response it
      * returns with that code, whether the handler threw the refusal or
      * returned it, so this is the one place they are recorded; a refusal
-     * site never logs its own. The row carries the requesting peer, the
+     * site never writes its own POLICY_DENIED row. (A refused export also
+     * keeps its failed KEY_EXPORTED record, written where it is refused.) The row carries the requesting peer, the
      * request method and the refusal message, which names at most a key or
      * credential id, never key material or request data. Recording never
      * changes the response.
@@ -4531,7 +4513,6 @@ class RequestHandler(
                     success = false,
                     errorMessage = message
                 )
-                markRefusalRecorded(request)
                 return Response.error(request.id, ErrorCodes.OPERATION_DENIED, message)
             }
 
