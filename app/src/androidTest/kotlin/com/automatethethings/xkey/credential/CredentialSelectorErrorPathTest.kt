@@ -196,15 +196,19 @@ class CredentialSelectorErrorPathTest {
         )
     }
 
+    /**
+     * The selector refuses only a missing id, so an empty one goes on to the
+     * credential lookup: the unknown-credential error, never the
+     * missing-request one.
+     */
     @Test
     fun getWithAnEmptyCredentialId_failsWithoutACredential() {
-        assertFailsWithoutCredential(
-            selector(
-                CredentialSelectorActivity.ACTION_GET_CREDENTIAL,
-                credentialId = "",
-                requestJson = CredentialRequestFixtures.getRequestJson(RP_ID),
-            ),
-            GET_MARKER,
+        assertFailsPastGuard(
+            CredentialSelectorActivity.ACTION_GET_CREDENTIAL,
+            credentialId = "",
+            json = CredentialRequestFixtures.getRequestJson(RP_ID),
+            type = GetCredentialUnknownException().type,
+            message = UNKNOWN_CREDENTIAL_ERROR,
         )
     }
 
