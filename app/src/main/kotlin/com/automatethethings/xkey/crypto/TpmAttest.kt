@@ -217,7 +217,9 @@ object TpmQuoteVerifier {
 
     /**
      * Verifies the quote as the overload above does and binds [pcrValues], the
-     * PCR values reported beside it, to the digest the TPM signed.
+     * PCR values reported beside it, to the digest the TPM signed. Each value
+     * must be exactly one digest of the selected bank long; a value of any
+     * other length is refused before anything is hashed.
      *
      * @param expectedBank The PCR bank this CA asked for, as [TpmAlg.bankName] names it.
      * @throws TpmQuoteException naming the first thing that did not hold.
@@ -254,6 +256,22 @@ object TpmQuoteVerifier {
                 "quote covers PCRs ${selection.indices.sorted()} but values were reported " +
                     "for PCRs ${pcrValues.keys.sorted()}"
             )
+        }
+
+        // Only the concatenation is signed, so a device could move bytes from
+        // one value to the next and keep the digest. Every value must be one
+        // digest of the selected bank long before it is hashed.
+        val bankLength = MessageDigest.getInstance(
+            TpmAlg.digestName(selection.hashAlg)
+                ?: throw TpmQuoteException("quote covers unsupported bank 0x%04x".format(selection.hashAlg))
+        ).digestLength
+        selection.indices.sorted().forEach { i ->
+            val length = pcrValues.getValue(i).size
+            if (length != bankLength) {
+                throw TpmQuoteException(
+                    "PCR $i value is $length bytes, but the $expectedBank bank holds $bankLength-byte values"
+                )
+            }
         }
 
         // TPM2_Quote digests the selected PCRs, in ascending index order within
