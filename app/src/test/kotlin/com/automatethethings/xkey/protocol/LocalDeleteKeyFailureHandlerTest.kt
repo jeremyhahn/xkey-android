@@ -22,6 +22,7 @@ import android.content.SharedPreferences
 import android.os.Looper
 import android.util.Log
 import com.automatethethings.xkey.audit.AuditLogger
+import com.automatethethings.xkey.crypto.FakeSharedPreferences
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.dao.KeyDao
@@ -90,12 +91,40 @@ class LocalDeleteKeyFailureHandlerTest {
         coVerify(exactly = 0) { keyDao.deleteByKeyId(any()) }
     }
 
+    @Test
+    fun aRetryAfterARemovalThatDidNotCommitStillKeepsTheRow() = runBlocking<Unit> {
+        val keyDao = mockk<KeyDao>(relaxed = true)
+        coEvery { keyDao.exists("edretry") } returns true
+        coEvery { keyDao.deleteByKeyId(any()) } returns 1
+        // Like Android's, the fake drops the key from its in-memory map even
+        // though the write to disk fails.
+        val prefs = FakeSharedPreferences(mapOf("xkey_key_edretry" to "secret"))
+        prefs.diskFails = true
+        val handler = realHandler(keyDao, prefs)
+
+        for (attempt in 1..2) {
+            val request = JSONObject().put("jsonrpc", "2.0").put("id", attempt)
+                .put("method", MethodNames.LOCAL_DELETE_KEY)
+                .put("params", JSONObject().put("keyId", "edretry"))
+            val response = JSONObject(String(handler.handleRawRequest(request.toString().toByteArray())))
+
+            assertTrue(
+                "attempt $attempt must never answer deleted=true, got $response",
+                response.optJSONObject("result")?.optBoolean("deleted") != true
+            )
+            assertNotNull("attempt $attempt must answer an error, got $response", response.optJSONObject("error"))
+        }
+        coVerify(exactly = 0) { keyDao.deleteByKeyId(any()) }
+        assertTrue("the key is still on disk", "xkey_key_edretry" in prefs.disk)
+    }
+
     /**
      * The real [RequestHandler] and a real [KeystoreManager] on an API 33+
      * device, whose software Ed25519 key `xkey_key_ed` is stored and whose
-     * removal does not commit; only the Android and storage edges are mocked.
+     * removal does not commit (or whose store is [prefs]); only the Android
+     * and storage edges are mocked.
      */
-    private fun realHandler(keyDao: KeyDao): RequestHandler {
+    private fun realHandler(keyDao: KeyDao, prefs: SharedPreferences = failingCommitPrefs()): RequestHandler {
         mockkStatic(Looper::class)
         every { Looper.getMainLooper() } returns mockk(relaxed = true)
         val database = mockk<XKeyDatabase>(relaxed = true)
@@ -111,16 +140,21 @@ class LocalDeleteKeyFailureHandlerTest {
         every { context.getSystemService(NotificationManager::class.java) } returns
             mockk<NotificationManager>(relaxed = true)
 
+        val keystore = spyk(KeystoreManager(context))
+        every { keystore.softwareEd25519Supported() } returns true
+        every { keystore.ed25519Prefs() } returns prefs
+
+        return RequestHandler(context, keystore, biometricLauncher = null, sessionAuthManager = null)
+    }
+
+    /** Software Ed25519 key `xkey_key_ed` is stored, and removing it does not commit. */
+    private fun failingCommitPrefs(): SharedPreferences {
         val editor = mockk<SharedPreferences.Editor>()
         every { editor.remove(any()) } returns editor
         every { editor.commit() } returns false
         val prefs = mockk<SharedPreferences>()
         every { prefs.contains(any()) } answers { firstArg<String>() == "xkey_key_ed" }
         every { prefs.edit() } returns editor
-        val keystore = spyk(KeystoreManager(context))
-        every { keystore.softwareEd25519Supported() } returns true
-        every { keystore.ed25519Prefs() } returns prefs
-
-        return RequestHandler(context, keystore, biometricLauncher = null, sessionAuthManager = null)
+        return prefs
     }
 }

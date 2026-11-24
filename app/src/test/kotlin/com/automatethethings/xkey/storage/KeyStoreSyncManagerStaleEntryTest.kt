@@ -18,6 +18,8 @@ package com.automatethethings.xkey.storage
 import android.content.Context
 import android.content.SharedPreferences
 import android.util.Log
+import com.automatethethings.xkey.crypto.FakeSharedPreferences
+import com.automatethethings.xkey.crypto.KeyDeletionException
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.storage.dao.CredentialMetadataDao
 import com.automatethethings.xkey.storage.dao.KeyDao
@@ -34,6 +36,8 @@ import java.security.KeyStore
 import java.util.Collections
 import kotlinx.coroutines.runBlocking
 import org.junit.After
+import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 
@@ -104,5 +108,29 @@ class KeyStoreSyncManagerStaleEntryTest {
         KeyStoreSyncManager(manager, credentialDao, keyDao).syncAll()
 
         coVerify { keyDao.deleteByKeyId("gone") }
+    }
+
+    @Test
+    fun `sync keeps a key row whose key removal did not commit`() = runBlocking<Unit> {
+        // Like Android's, the fake drops the key from its in-memory map even
+        // though the write to disk fails, so the cache alone reads it absent.
+        val prefs = FakeSharedPreferences(mapOf("xkey_key_edsync" to "secret"))
+        prefs.diskFails = true
+        val manager = spyk(KeystoreManager(mockk<Context>(relaxed = true)))
+        every { manager.softwareEd25519Supported() } returns true
+        every { manager.ed25519Prefs() } returns prefs
+        assertThrows(KeyDeletionException::class.java) { manager.deleteByAlias("xkey_key_edsync") }
+        val credentialDao = mockk<CredentialMetadataDao>(relaxed = true)
+        coEvery { credentialDao.getAll() } returns emptyList()
+        val keyDao = mockk<KeyDao>(relaxed = true)
+        val key = mockk<KeyEntity>(relaxed = true)
+        every { key.keyId } returns "edsync"
+        every { key.source } returns "local"
+        coEvery { keyDao.getAll() } returns listOf(key)
+
+        KeyStoreSyncManager(manager, credentialDao, keyDao).syncAll()
+
+        coVerify(exactly = 0) { keyDao.deleteByKeyId(any()) }
+        assertTrue("the key is still on disk", "xkey_key_edsync" in prefs.disk)
     }
 }
