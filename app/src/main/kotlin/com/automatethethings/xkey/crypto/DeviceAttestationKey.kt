@@ -184,12 +184,16 @@ class DeviceAttestationKey {
         }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            try {
-                return attestedChain(spec().setIsStrongBoxBacked(true).build())
-            } catch (e: Exception) {
-                Log.w(TAG, "StrongBox unavailable for the device attestation key, falling back to TEE", e)
-                if (keyStore.containsAlias(ALIAS)) keyStore.deleteEntry(ALIAS)
-            }
+            // Only a StrongBox-unavailable failure takes the TEE path; any
+            // other failure propagates.
+            return StrongBoxFallback.generate(
+                strongBox = { attestedChain(spec().setIsStrongBoxBacked(true).build()) },
+                onUnavailable = { e ->
+                    Log.w(TAG, "StrongBox unavailable for the device attestation key, falling back to TEE", e)
+                    if (keyStore.containsAlias(ALIAS)) keyStore.deleteEntry(ALIAS)
+                },
+                tee = { attestedChain(spec().build()) }
+            )
         }
         return attestedChain(spec().build())
     }
