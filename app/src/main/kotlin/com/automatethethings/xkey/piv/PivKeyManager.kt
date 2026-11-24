@@ -560,7 +560,7 @@ class PivKeyManager(
             if (keyStore.containsAlias(alias)) {
                 keyStore.deleteEntry(alias)
             }
-            // A software ML-DSA slot key lives in the store, not the Keystore.
+            // A software ML-DSA slot key lives in the store; a removal that throws keeps the row and skips the audit.
             mlDsaStore?.delete(alias)
 
             // Remove metadata from Room

@@ -172,11 +172,19 @@ class PqcSoftwareKeyStore(
         }
     }
 
-    /** Deletes the key under [alias]; true when there was one. */
+    /**
+     * Deletes the key under [alias]; true when there was one, false when
+     * there was none.
+     *
+     * @throws IOException when a record exists and cannot be removed: the
+     *   key is still usable, so a caller must keep its slot row or metadata.
+     */
     @Synchronized
     fun delete(alias: String): Boolean {
         val file = fileFor(alias)
-        return file.exists() && removeFile(file)
+        if (!file.exists()) return false
+        if (removeFile(file) || !file.exists()) return true
+        throw IOException("Cannot delete ML-DSA key")
     }
 
     /** Removes a record file; a test swaps in one that fails. */
