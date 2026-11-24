@@ -888,6 +888,12 @@ object AuditLogger {
     data class SettingChange(val oldValue: String?, val newValue: String)
 
     /**
+     * The named change for [editAuditedSettings], or null when [oldValue] equals [newValue].
+     */
+    fun changeOf(settingName: String, oldValue: String, newValue: String): Pair<String, SettingChange>? =
+        if (oldValue == newValue) null else settingName to SettingChange(oldValue, newValue)
+
+    /**
      * The one path for an audited settings write: runs [dataStore]'s edit
      * with [transform] and then records the [SettingChange] it returns, both
      * under [NonCancellable]. DataStore can commit a write while a caller
@@ -908,14 +914,32 @@ object AuditLogger {
         settingName: String,
         transform: (MutablePreferences) -> SettingChange?
     ) {
+        editAuditedSettings(dataStore) { preferences ->
+            listOfNotNull(transform(preferences)?.let { settingName to it })
+        }
+    }
+
+    /**
+     * [editAuditedSetting] for a write that changes several settings: runs
+     * [dataStore]'s edit with [transform] and records one entry per named
+     * [SettingChange] it returns, both under [NonCancellable]. Leave an
+     * unchanged setting out of the list and it records nothing.
+     *
+     * @param dataStore The settings DataStore to write.
+     * @param transform Applies the write and returns the setting names and changes to audit.
+     */
+    suspend fun editAuditedSettings(
+        dataStore: DataStore<Preferences>,
+        transform: (MutablePreferences) -> List<Pair<String, SettingChange>>
+    ) {
         withContext(NonCancellable) {
-            var change: SettingChange? = null
-            dataStore.edit { preferences -> change = transform(preferences) }
-            change?.let {
+            var changes: List<Pair<String, SettingChange>> = emptyList()
+            dataStore.edit { preferences -> changes = transform(preferences) }
+            for ((settingName, change) in changes) {
                 logSettingsChanged(
                     settingName = settingName,
-                    oldValue = it.oldValue,
-                    newValue = it.newValue
+                    oldValue = change.oldValue,
+                    newValue = change.newValue
                 )
             }
         }

@@ -550,7 +550,8 @@ public class BootstrapSettingsRepository internal constructor(
      * @param settings The new settings to persist.
      */
     public suspend fun updateSettings(settings: BootstrapSettingsData) {
-        dataStore.edit { preferences ->
+        AuditLogger.editAuditedSettings(dataStore) { preferences ->
+            val old = mapPreferencesToSettings(preferences)
             // Auto-bootstrap
             preferences[KEY_AUTO_BOOTSTRAP_ENABLED] = settings.autoBootstrapEnabled
             preferences[KEY_METHOD_ORDER] = settings.methodOrder.joinToString(",") { it.name }
@@ -576,6 +577,17 @@ public class BootstrapSettingsRepository internal constructor(
             // Direct HTTPS
             preferences[KEY_DIRECT_ENABLED] = settings.directEnabled
             preferences[KEY_DIRECT_SERVER_URL] = settings.directServerUrl
+
+            // The fields the single setters audit.
+            listOfNotNull(
+                AuditLogger.changeOf(
+                    "daneRequireDnssec",
+                    old.daneRequireDnssec.toString(),
+                    settings.daneRequireDnssec.toString()
+                ),
+                AuditLogger.changeOf("noiseServerStaticKey", old.noiseServerStaticKey, settings.noiseServerStaticKey),
+                AuditLogger.changeOf("spkiPinSha256", old.spkiPinSha256, settings.spkiPinSha256)
+            )
         }
     }
 
