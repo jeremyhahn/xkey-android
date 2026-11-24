@@ -60,8 +60,8 @@ class OathRepositoryHardeningTest {
         secretManager = mockk()
         every { secretManager.encryptSecret(any()) } answers { firstArg() }
         every { secretManager.decryptSecret(any()) } answers { firstArg() }
-        every { secretManager.decryptSecret(match { it.contentEquals(CORRUPT) }) } throws
-            javax.crypto.AEADBadTagException("tag mismatch")
+        val corrupt = javax.crypto.AEADBadTagException("tag mismatch")
+        every { secretManager.decryptSecret(match { it.contentEquals(CORRUPT) }) } throws corrupt
         repository = OathRepository(dao, secretManager)
     }
 
