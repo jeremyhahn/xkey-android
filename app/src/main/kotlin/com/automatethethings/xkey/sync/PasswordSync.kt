@@ -7,6 +7,7 @@
 package com.automatethethings.xkey.sync
 
 import android.util.Log
+import com.automatethethings.xkey.crypto.MalformedSyncValueException
 import com.automatethethings.xkey.crypto.SyncCodec
 import com.automatethethings.xkey.password.PasswordEntryTooLargeException
 import com.automatethethings.xkey.password.PasswordNotNewerException
@@ -111,8 +112,9 @@ class PasswordSync(
      *
      * An existing entry is overwritten last-writer-wins: only by an incoming
      * copy whose `updated_at` is strictly newer than the stored one. An older
-     * or equal copy, or one without a parseable `updated_at`, keeps the local
-     * entry and is counted as skipped.
+     * or equal copy, or one without an `updated_at`, keeps the local entry and
+     * is counted as skipped. A copy whose `updated_at` is present but not
+     * RFC 3339 is rejected (counted as skipped) whether or not the entry exists.
      *
      * An entry the phone deleted ([PasswordRepository.deletedAt]) is not added
      * back by a copy whose `updated_at` is the deletion time or earlier: the
@@ -152,7 +154,15 @@ class PasswordSync(
                 skipped++
                 continue
             }
-            val sentUpdatedAt = SyncCodec.parseRfc3339(obj.optString("updated_at", ""))
+            // A blank updated_at is 0 (no timestamp); a malformed one rejects
+            // the item instead of merging it as if it were the oldest copy.
+            val sentUpdatedAt = try {
+                SyncCodec.parseRfc3339(obj.optString("updated_at", ""))
+            } catch (e: MalformedSyncValueException) {
+                Log.w(TAG, "Rejected incoming password entry $i: ${e.message}")
+                skipped++
+                continue
+            }
             // A peer clock this far ahead cannot be trusted: the copy is stored at the phone's time.
             val isClamped = sentUpdatedAt > now + MAX_CLOCK_SKEW_MS
             if (isClamped) clamped++

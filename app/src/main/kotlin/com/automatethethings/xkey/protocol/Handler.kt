@@ -4338,8 +4338,11 @@ class RequestHandler(
         }
         val peerPublicKeyHex = requireConfirmedPeer("sharePublicKey")
         return try {
-            val der = com.automatethethings.xkey.crypto.SyncCodec.pemToDer(pem)
-                ?: return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Invalid public_key_pem")
+            val der = try {
+                com.automatethethings.xkey.crypto.SyncCodec.pemToDer(pem)
+            } catch (e: com.automatethethings.xkey.crypto.MalformedSyncValueException) {
+                return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Invalid public_key_pem")
+            }
             val fingerprint = com.automatethethings.xkey.crypto.SyncCodec.sha256Hex(der)
             val keyId = params.optString("key_id", "")
             val label = params.optString("label", "").ifBlank { keyId.ifBlank { "shared-key" } }

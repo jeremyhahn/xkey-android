@@ -15,13 +15,16 @@
 package com.automatethethings.xkey.sync
 
 import android.content.Context
+import android.util.Log
 import com.automatethethings.xkey.crypto.SyncCodec
 import com.automatethethings.xkey.truststore.TrustStoreRepository
 import com.automatethethings.xkey.truststore.TrustedCA
 import io.mockk.coEvery
 import io.mockk.coVerify
+import io.mockk.every
 import io.mockk.mockk
 import io.mockk.mockkConstructor
+import io.mockk.mockkStatic
 import io.mockk.slot
 import io.mockk.unmockkAll
 import kotlinx.coroutines.test.runTest
@@ -48,10 +51,24 @@ class SyncEngineTrustStoreTest {
 
     private lateinit var engine: SyncEngine
 
+    private val warnings = mutableListOf<String>()
+
     @Before
     fun setUp() {
         mockkConstructor(TrustStoreRepository::class)
+        mockkStatic(Log::class)
+        every { Log.w(any<String>(), capture(warnings)) } returns 0
         engine = SyncEngine(mockk<Context>())
+    }
+
+    @Test
+    fun `a rejected certificate is logged without its pem`() = runTest {
+        coEvery { anyConstructed<TrustStoreRepository>().hasCertificate(any()) } returns false
+
+        engine.mergeCertificates(incoming(syncCertificate("aa11", pem = "secretbody!!!")))
+
+        assertEquals(1, warnings.size)
+        assertTrue(warnings.none { it.contains("secretbody") })
     }
 
     @After
