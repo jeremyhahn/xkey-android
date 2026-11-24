@@ -513,7 +513,15 @@ class KeyShareAuditTest {
         val refused = Response.fromJson(served(importSharedKey(), peer = USB_PEER))
         assertEquals(ErrorCodes.OPERATION_DENIED, refused.error?.code)
 
-        assertEquals(listOf(true to PEER, false to USB_PEER), entries.map { it.success to it.deviceId })
+        // B's refusal writes its failed export, then the dispatcher's denial row.
+        assertEquals(
+            listOf(
+                Triple(AuditOperationType.KEY_EXPORTED, true, PEER),
+                Triple(AuditOperationType.KEY_EXPORTED, false, USB_PEER),
+                Triple(AuditOperationType.POLICY_DENIED, false, USB_PEER)
+            ),
+            entries.map { Triple(it.operationType, it.success, it.deviceId) }
+        )
     }
 
     /**
@@ -1009,7 +1017,10 @@ class KeyShareAuditTest {
 
     /** Exactly one POLICY_DENIED row, naming the caller's peer and [method]. */
     private fun assertOneDenial(method: String) {
-        val denial = single(AuditOperationType.POLICY_DENIED)
+        // Not single(POLICY_DENIED): a refusal also writes its own failed row.
+        val denials = entries.filter { it.operationType == AuditOperationType.POLICY_DENIED }
+        assertEquals("one denial expected: $entries", 1, denials.size)
+        val denial = denials.single()
         assertFalse(denial.success)
         assertEquals(PEER, denial.deviceId)
         assertEquals(method, JSONObject(denial.details!!).getString("operation"))
