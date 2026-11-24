@@ -15,6 +15,7 @@
 package com.automatethethings.xkey.oath
 
 import android.net.Uri
+import com.automatethethings.xkey.audit.AuditLogger
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import java.net.URLEncoder
@@ -171,6 +172,9 @@ class OathRepository(
         )
 
         dao.insert(entity)
+        // Every add (QR scan, manual entry, local.oathAdd) passes here: the
+        // one place it is audited. The row names the credential, never its secret.
+        AuditLogger.logOathCredentialCreated(oathId, issuer, accountName, entity.oathType)
         return oathId
     }
 
@@ -437,6 +441,9 @@ class OathRepository(
         }
 
         dao.recordUsage(oathId, System.currentTimeMillis())
+        // A generation the user or desktop asked for (an HOTP copy advances
+        // the counter); list refreshes go through observeAll and are not audited.
+        AuditLogger.logOathCodeGenerated(oathId, credential.issuer, credential.accountName)
 
         return code
     }
@@ -499,10 +506,18 @@ class OathRepository(
      * Removes the credential and its encrypted secret from the database.
      * This operation is irreversible.
      *
+     * Audited here, so a delete on the phone and local.oathRemove write the
+     * same single row; nothing is deleted or audited when no credential has
+     * [oathId].
+     *
      * @param oathId The unique identifier of the credential to delete.
+     * @return true if a credential was deleted, false if none had [oathId].
      */
-    suspend fun deleteCredential(oathId: String) {
+    suspend fun deleteCredential(oathId: String): Boolean {
+        val credential = dao.getByOathId(oathId) ?: return false
         dao.deleteByOathId(oathId)
+        AuditLogger.logOathCredentialDeleted(oathId, credential.issuer, credential.accountName)
+        return true
     }
 
     /**

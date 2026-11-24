@@ -3782,8 +3782,7 @@ class RequestHandler(
                 (period - (System.currentTimeMillis() / 1000 % period)).toInt()
             } else 0
 
-            AuditLogger.logOathCodeGenerated(credentialId, cred?.issuer, cred?.accountName ?: "")
-
+            // OathRepository.generateCode wrote the audit row.
             val result = JSONObject().apply {
                 put("code", code)
                 put("expires_in", expiresIn)
@@ -3836,8 +3835,7 @@ class RequestHandler(
                 period = credential.optInt("period", 30),
                 counter = credential.optLong("counter", 0)
             )
-
-            AuditLogger.logOathCredentialCreated(name, issuer, accountName, type.uppercase())
+            // OathRepository.addCredential wrote the audit row, under credentialId.
 
             val result = JSONObject().apply {
                 put("success", true)
@@ -3864,16 +3862,15 @@ class RequestHandler(
 
         return try {
             val db = XKeyDatabase.getInstance(context)
-            val cred = db.oathCredentialDao().getByOathId(credentialId)
-            if (cred == null) {
-                // Nothing has that id: say so rather than claim a deletion.
-                return Response.success(request.id, JSONObject().apply { put("deleted", false) })
-            }
-            db.oathCredentialDao().deleteByOathId(credentialId)
+            val oathRepository = com.automatethethings.xkey.oath.OathRepository(
+                db.oathCredentialDao(),
+                com.automatethethings.xkey.oath.OathSecretManager()
+            )
+            // Nothing has that id: say so rather than claim a deletion. The
+            // repository writes the audit row, as for a delete on the phone.
+            val deleted = oathRepository.deleteCredential(credentialId)
 
-            AuditLogger.logOathCredentialDeleted(credentialId, cred.issuer, cred.accountName)
-
-            val result = JSONObject().apply { put("deleted", true) }
+            val result = JSONObject().apply { put("deleted", deleted) }
             Response.success(request.id, result)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to remove OATH credential", e)
