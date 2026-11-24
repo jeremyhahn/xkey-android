@@ -78,6 +78,10 @@ class DesktopBackupDialogs(
         val oath = toggle(R.string.desktop_backup_include_oath)
         val passwords = toggle(R.string.desktop_backup_include_passwords)
         val form = column(password, confirm, trustStore, oath, passwords)
+        // The nothing-selected error sits on the first toggle; any change of choice clears it.
+        listOf(trustStore, oath, passwords).forEach { box ->
+            box.setOnCheckedChangeListener { _, _ -> trustStore.error = null }
+        }
 
         val dialog = MaterialAlertDialogBuilder(activity)
             .setTitle(R.string.desktop_backup_create_title)
@@ -95,7 +99,12 @@ class DesktopBackupDialogs(
                 )
                 val problem = DesktopBackupForm.checkCreate(password.text, confirm.text, include)
                 if (problem != null) {
-                    (if (password.text.isEmpty()) password else confirm).error = activity.getString(problem)
+                    val field = when {
+                        problem == R.string.desktop_backup_error_nothing_selected -> trustStore
+                        password.text.isEmpty() -> password
+                        else -> confirm
+                    }
+                    field.error = activity.getString(problem)
                     return@setOnClickListener
                 }
                 if (desktopGone(dialog)) return@setOnClickListener
