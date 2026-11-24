@@ -145,9 +145,7 @@ class OathImportIntegrityTest {
         assertTrue(storedSecret(plain).contentEquals(storedSecret(decorated)))
     }
 
-    // -------------------------------------------------------------------------
     // The HOTP counter is part of the credential
-    // -------------------------------------------------------------------------
 
     @Test
     fun importFromUri_storesTheHotpCounterInTheSameWriteAsTheCredential() = runBlocking {

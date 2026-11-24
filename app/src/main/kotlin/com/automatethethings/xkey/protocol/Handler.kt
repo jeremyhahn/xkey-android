@@ -50,6 +50,7 @@ import com.automatethethings.xkey.crypto.UserCancelledException
 import com.automatethethings.xkey.crypto.UserVerificationKey
 import com.automatethethings.xkey.crypto.UserVerificationPrompt
 import com.automatethethings.xkey.crypto.XKeyCryptoException
+import com.automatethethings.xkey.crypto.publicKeySizeBits
 import com.automatethethings.xkey.remote.SharePermissionLedger
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.dao.KeyDao
@@ -1541,12 +1542,12 @@ class RequestHandler(
         if (isSymmetric) {
             // Symmetric or HMAC key
             if (algorithmName.startsWith("AES")) {
-                val bits = if (algorithmName.contains("128")) 128 else 256
+                val bits = genParams.resolvedKeySizeBits() ?: 256
                 keystoreManager.generateSymmetricKey(genParams.keyId, bits, authDurationSeconds)
                 keySizeBits = bits
             } else {
                 keystoreManager.generateHMACKey(genParams.keyId, algorithmName)
-                keySizeBits = if (algorithmName.contains("512")) 512 else 256
+                keySizeBits = genParams.resolvedKeySizeBits() ?: 256
             }
             publicKeyDer = ByteArray(0) // No public key for symmetric/HMAC
             // The exact alias just generated (xkey_key_<id>), never a
@@ -1597,9 +1598,14 @@ class RequestHandler(
             keyId = genParams.keyId,
             algorithm = algorithmName,
             authDurationSeconds = authDurationSeconds,
-            preferStrongBox = genParams.preferStrongBox
+            preferStrongBox = genParams.preferStrongBox,
+            keySizeBits = if (CoseAlgorithms.isRsa(genParams.algorithm)) genParams.keySizeBits else null
         )
-        keySizeBits = CoseAlgorithms.getKeySizeBits(genParams.algorithm)
+        // The size of the key that was made, read off its public key; only a
+        // key with no readable size (EdDSA) falls back to the algorithm's own.
+        keySizeBits = generatedKeySize(genParams, publicKeyDer)
+            ?: genParams.resolvedKeySizeBits()
+            ?: CoseAlgorithms.getKeySizeBits(genParams.algorithm)
         val level = generatedKeyLevel(
             genParams.keyId,
             read = { keystoreManager.generalKeySecurityLevel(genParams.keyId) },
@@ -1674,6 +1680,26 @@ class RequestHandler(
     }
 
     /**
+     * The size of the asymmetric key local.generateKey just made, read off
+     * [publicKeyDer] by [publicKeySizeBits], or null when it has no readable
+     * size (EdDSA). A key whose size is not the one asked for (an RSA
+     * modulus from keySizeBits, else the algorithm's own) is discarded and
+     * the request fails before anything is stored: the row and the response
+     * never describe a key that was not produced.
+     */
+    private fun generatedKeySize(genParams: LocalGenerateKeyParams, publicKeyDer: ByteArray): Int? {
+        val made = publicKeySizeBits(publicKeyDer) ?: return null
+        val requested = genParams.resolvedKeySizeBits()
+        if (made == requested) return made
+        runCatching { keystoreManager.deleteGeneralKey(genParams.keyId) }
+        Log.e(TAG, "Generated key ${genParams.keyId} is $made bits, $requested were requested")
+        throw ProtocolException(
+            "Generated key ${genParams.keyId} is $made bits, not the $requested requested",
+            errorCode = ErrorCodes.INTERNAL_ERROR
+        )
+    }
+
+    /**
      * The security level of the key generateKey or local.generateKey just
      * made, read by [read] from its exact alias. A missing key or a KeyInfo
      * read that fails is an error, never a software-backed key: the key is
@@ -1724,11 +1750,7 @@ class RequestHandler(
             )
         }
 
-        val keySizeBits = when {
-            algorithmName.startsWith("AES") -> if (algorithmName.contains("128")) 128 else 256
-            algorithmName.contains("512") -> 512
-            else -> 256
-        }
+        val keySizeBits = genParams.resolvedKeySizeBits() ?: 256
         val material = ByteArray(keySizeBits / 8).also { java.security.SecureRandom().nextBytes(it) }
 
         com.automatethethings.xkey.crypto.SoftwareKeyStore(context).put(
@@ -2247,6 +2269,12 @@ class RequestHandler(
     private suspend fun auditCaller(): AuditCaller {
         val peer = attestingPeerPublicKeyHex()
         return AuditCaller(peer, auditPeerName(peer))
+    }
+
+    /** [auditCaller] in the form OathRepository's audit rows take. */
+    private suspend fun oathAuditCaller(): com.automatethethings.xkey.oath.OathAuditCaller {
+        val caller = auditCaller()
+        return com.automatethethings.xkey.oath.OathAuditCaller(caller.peerPublicKeyHex, caller.deviceName)
     }
 
     /**
@@ -3771,9 +3799,27 @@ class RequestHandler(
     // -------------------------------------------------------------------------
 
     /**
+     * The OATH methods hand out one-time codes and change the credential
+     * store, so they are key use: a paired desktop whose settings require a
+     * current attestation for key use is refused until it attests, and a
+     * paired-device store that cannot be read refuses, as for the key
+     * operations ([isDeviceAttestationCurrent]). Called before each handler's
+     * own try block, so the refusal reaches dispatch as its error code.
+     */
+    private suspend fun requireOathAttestation() {
+        if (!isDeviceAttestationCurrent(forKeyUse = true)) {
+            throw ProtocolException(
+                "Device attestation required before key use",
+                errorCode = ErrorCodes.DEVICE_ATTESTATION_REQUIRED
+            )
+        }
+    }
+
+    /**
      * Lists all local OATH credentials (without secrets).
      */
     private suspend fun handleOathList(request: Request): Response {
+        requireOathAttestation()
         return try {
             val db = XKeyDatabase.getInstance(context)
             val credentials = db.oathCredentialDao().getAll()
@@ -3795,7 +3841,7 @@ class RequestHandler(
             Response.success(request.id, result)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to list OATH credentials", e)
-            Response.error(request.id, ErrorCodes.INTERNAL_ERROR, "Failed to list OATH credentials: ${e.message}")
+            Response.error(request.id, ErrorCodes.INTERNAL_ERROR, "Failed to list OATH credentials")
         }
     }
 
@@ -3803,6 +3849,7 @@ class RequestHandler(
      * Generates and returns the current OTP code for a credential.
      */
     private suspend fun handleOathGenerate(request: Request): Response {
+        requireOathAttestation()
         val params = request.params
             ?: return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Missing params")
 
@@ -3817,28 +3864,36 @@ class RequestHandler(
                 db.oathCredentialDao(),
                 com.automatethethings.xkey.oath.OathSecretManager()
             )
+            // Read once, before the code: a removal landing after the code is
+            // computed must not turn expires_in into 0 or the audit entry's
+            // account into an empty one.
+            val cred = db.oathCredentialDao().getByOathId(credentialId)
+                ?: return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Credential not found: $credentialId")
             val code = try {
-                oathRepository.generateCode(credentialId)
+                oathRepository.generateCode(credentialId, oathAuditCaller())
             } catch (_: NoSuchElementException) {
                 return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Credential not found: $credentialId")
+            } catch (_: com.automatethethings.xkey.oath.OathCounterExhaustedException) {
+                return Response.error(request.id, ErrorCodes.OPERATION_DENIED, "HOTP counter exhausted")
             }
 
-            val cred = db.oathCredentialDao().getByOathId(credentialId)
             // expires_in: seconds until the current TOTP window ends (0 for HOTP).
-            val expiresIn = if (cred?.oathType == "TOTP") {
-                val period = cred.periodSeconds.toLong()
+            // A period that is not positive never produced a code above.
+            val period = cred.periodSeconds.toLong()
+            val expiresIn = if (cred.oathType == "TOTP" && period > 0) {
                 (period - (System.currentTimeMillis() / 1000 % period)).toInt()
             } else 0
 
-            // OathRepository.generateCode wrote the audit row.
+            // OathRepository.generateCode wrote the audit row, naming this caller.
             val result = JSONObject().apply {
                 put("code", code)
                 put("expires_in", expiresIn)
             }
             Response.success(request.id, result)
         } catch (e: Exception) {
+            // The exception text stays in the log: it can name stored values.
             Log.e(TAG, "Failed to generate OATH code", e)
-            Response.error(request.id, ErrorCodes.INTERNAL_ERROR, "Failed to generate code: ${e.message}")
+            Response.error(request.id, ErrorCodes.INTERNAL_ERROR, "Failed to generate code")
         }
     }
 
@@ -3846,6 +3901,7 @@ class RequestHandler(
      * Adds (imports) an OATH credential pushed from the desktop (local.oathAdd).
      */
     private suspend fun handleOathAdd(request: Request): Response {
+        requireOathAttestation()
         val params = request.params
             ?: return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Missing params")
 
@@ -3881,18 +3937,23 @@ class RequestHandler(
                 algorithm = credential.optString("algorithm", "SHA1"),
                 digits = credential.optInt("digits", 6),
                 period = credential.optInt("period", 30),
-                counter = credential.optLong("counter", 0)
+                counter = credential.optLong("counter", 0),
+                caller = oathAuditCaller()
             )
-            // OathRepository.addCredential wrote the audit row, under credentialId.
+            // OathRepository.addCredential wrote the audit row, under credentialId, naming this caller.
 
             val result = JSONObject().apply {
                 put("success", true)
                 put("credential_id", credentialId)
             }
             Response.success(request.id, result)
+        } catch (e: IllegalArgumentException) {
+            // The importer's validation: its messages never name the secret.
+            Log.w(TAG, "Refused OATH credential: ${e.message}")
+            Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Invalid credential: ${e.message}")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to add OATH credential", e)
-            Response.error(request.id, ErrorCodes.INTERNAL_ERROR, "Failed to add: ${e.message}")
+            Response.error(request.id, ErrorCodes.INTERNAL_ERROR, "Failed to add credential")
         }
     }
 
@@ -3900,6 +3961,7 @@ class RequestHandler(
      * Removes an OATH credential (local.oathRemove).
      */
     private suspend fun handleOathRemove(request: Request): Response {
+        requireOathAttestation()
         val params = request.params
             ?: return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Missing params")
 
@@ -3918,13 +3980,13 @@ class RequestHandler(
             // repository writes the audit row, as for a delete on the phone,
             // and records the deletion with the delete in one transaction, so
             // no sync with another paired device adds it back.
-            val deleted = oathRepository.deleteCredential(credentialId)
+            val deleted = oathRepository.deleteCredential(credentialId, oathAuditCaller())
 
             val result = JSONObject().apply { put("deleted", deleted) }
             Response.success(request.id, result)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to remove OATH credential", e)
-            Response.error(request.id, ErrorCodes.INTERNAL_ERROR, "Failed to remove: ${e.message}")
+            Response.error(request.id, ErrorCodes.INTERNAL_ERROR, "Failed to remove credential")
         }
     }
 
@@ -4986,16 +5048,7 @@ class RequestHandler(
      * Reads a PIV algorithm, accepting go-xkms spellings ("ECDSA-P256",
      * "RSA-2048") alongside the [PivAlgorithm] enum names.
      */
-    private fun pivAlgorithmOf(name: String): PivAlgorithm? {
-        if (name.isBlank()) return null
-        runCatching { return PivAlgorithm.valueOf(name) }
-        return when (name.uppercase().replace("_", "-")) {
-            "ECDSA-P256", "EC-P256", "P256" -> PivAlgorithm.ES256
-            "ECDSA-P384", "EC-P384", "P384" -> PivAlgorithm.ES384
-            "RSA-2048", "RSA2048" -> PivAlgorithm.RS2048
-            else -> null
-        }
-    }
+    private fun pivAlgorithmOf(name: String): PivAlgorithm? = PivAlgorithm.fromWireName(name)
 
     private suspend fun handlePivListSlots(request: Request): Response {
         val pkm = pivKeyManager ?: return Response.error(request.id, ErrorCodes.FEATURE_UNAVAILABLE, "PIV support is not available on this transport")

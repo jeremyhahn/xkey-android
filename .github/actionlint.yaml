@@ -1,12 +1,19 @@
 # Self-hosted runner labels for actionlint.
 #
-# Every job runs on GitHub-hosted ubuntu-latest, which actionlint knows,
-# except the code-review.yml review jobs, which run on the self-hosted `codex`
-# and `qwen` runners. Without this file actionlint reports those labels as
-# unknown runners (runner-label); with it, a misspelled label is still caught. Adding
-# a self-hosted label to a workflow means adding it here in the same change.
+# Jobs run on GitHub-hosted ubuntu-latest, which actionlint knows, except:
+# - the code-review.yml review jobs, which run on the self-hosted `codex` and
+#   `qwen` runners;
+# - the ci.yml jobs that read preflight's runner outputs, which take the
+#   self-hosted bigdisk pool once its repository variables are set: the label sets
+#   [self-hosted, linux, x64, bigdisk] and [self-hosted, linux, x64,
+#   bigdisk-docker] (self-hosted, linux and x64 are actionlint built-ins).
+# Without this file actionlint reports those labels as unknown runners
+# (runner-label); with it, a misspelled label is still caught. Adding a
+# self-hosted label to a workflow means adding it here in the same change.
 self-hosted-runner:
   labels:
+    - bigdisk
+    - bigdisk-docker
     - codex
     - qwen
 paths:

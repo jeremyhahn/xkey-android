@@ -639,7 +639,10 @@ class RequestHandlerErrorPathTest {
         assertEquals(ErrorCodes.ENCRYPTION_FAILED, response.errorCode())
     }
 
-    /** HMAC-SHA384 has a COSE id but no Keystore support: UnsupportedAlgorithmException. */
+    /**
+     * EdDSA has a COSE id but no Keystore key behind local.generateKey (only
+     * the name Ed25519 makes one): UnsupportedAlgorithmException.
+     */
     @Test
     fun unsupportedAlgorithmMapsToInvalidAlgorithm() {
         val keyId = "unsupported-$runId"
@@ -648,8 +651,8 @@ class RequestHandlerErrorPathTest {
             "local.generateKey",
             JSONObject()
                 .put("keyId", keyId)
-                .put("keyType", "hmac")
-                .put("algorithm", "HMAC-SHA384")
+                .put("keyType", "signing")
+                .put("algorithm", "EdDSA")
                 .put("requireUserVerification", false)
                 .put("preferStrongBox", false)
         )

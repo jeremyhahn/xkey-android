@@ -176,7 +176,8 @@ class OathRepository(
         algorithm: String = "SHA1",
         digits: Int = 6,
         periodSeconds: Int = 30,
-        counter: Long = 0L
+        counter: Long = 0L,
+        caller: OathAuditCaller = OathAuditCaller.LOCAL
     ): String {
         val oathId = UUID.randomUUID().toString()
         val encryptedSecret = secretManager.encryptSecret(secret)
@@ -201,7 +202,9 @@ class OathRepository(
         // the insert commits. The row names the credential, never its secret.
         auditedWrite(
             write = { dao.insert(entity) },
-            audit = { AuditLogger.logOathCredentialCreated(oathId, issuer, accountName, entity.oathType) }
+            audit = { AuditLogger.logOathCredentialCreated(
+                oathId, issuer, accountName, entity.oathType, caller.deviceId, caller.deviceName
+            ) }
         )
         return oathId
     }
@@ -258,7 +261,8 @@ class OathRepository(
         algorithm: String = "SHA1",
         digits: Int = 6,
         period: Int = 30,
-        counter: Long? = null
+        counter: Long? = null,
+        caller: OathAuditCaller = OathAuditCaller.LOCAL
     ): String {
         val otpType = type.lowercase()
         val uri = otpauthUri(
@@ -271,7 +275,7 @@ class OathRepository(
             period = period,
             counter = if (otpType == "hotp") counter ?: 0L else null
         )
-        return importParsed(uri, structuredLabel = true)
+        return importParsed(uri, structuredLabel = true, caller = caller)
     }
 
     /**
@@ -379,7 +383,9 @@ class OathRepository(
                         entity.oathId,
                         entity.issuer,
                         entity.accountName,
-                        entity.oathType
+                        entity.oathType,
+                        null,
+                        null
                     )
                 }
             }
@@ -417,7 +423,11 @@ class OathRepository(
         }
     }
 
-    private suspend fun importParsed(uri: String, structuredLabel: Boolean): String {
+    private suspend fun importParsed(
+        uri: String,
+        structuredLabel: Boolean,
+        caller: OathAuditCaller = OathAuditCaller.LOCAL
+    ): String {
         val parsed = parseOathUri(uri, structuredLabel)
         return addCredential(
             issuer = parsed.issuer,
@@ -427,7 +437,8 @@ class OathRepository(
             algorithm = parsed.algorithm,
             digits = parsed.digits,
             periodSeconds = parsed.periodSeconds,
-            counter = parsed.counter
+            counter = parsed.counter,
+            caller = caller
         )
     }
 
@@ -541,7 +552,7 @@ class OathRepository(
      *         counter has not moved past the value tried, or no claim succeeds
      *         within [MAX_COUNTER_ATTEMPTS] attempts.
      */
-    suspend fun generateCode(oathId: String): String {
+    suspend fun generateCode(oathId: String, caller: OathAuditCaller = OathAuditCaller.LOCAL): String {
         var credential = dao.getByOathId(oathId)
             ?: throw NoSuchElementException("No OATH credential found with oathId: $oathId")
         var attempt = 0
@@ -554,22 +565,34 @@ class OathRepository(
             // code is computed before the claim, so a decrypt or engine
             // failure never burns a counter value.
             val code = when (credential.oathType) {
-                "TOTP" -> OathEngine.generateTotpCode(
-                    secret = secretManager.decryptSecret(credential.secretEncrypted),
-                    algorithm = credential.algorithm,
-                    digits = credential.digits,
-                    periodSeconds = credential.periodSeconds
-                )
+                "TOTP" -> {
+                    val secret = secretManager.decryptSecret(credential.secretEncrypted)
+                    try {
+                        OathEngine.generateTotpCode(
+                            secret = secret,
+                            algorithm = credential.algorithm,
+                            digits = credential.digits,
+                            periodSeconds = credential.periodSeconds
+                        )
+                    } finally {
+                        secret.fill(0)
+                    }
+                }
                 "HOTP" -> {
                     if (credential.counter == HOTP_COUNTER_MAX) {
                         throw OathCounterExhaustedException(oathId)
                     }
-                    OathEngine.generateHotpCode(
-                        secret = secretManager.decryptSecret(credential.secretEncrypted),
-                        counter = credential.counter,
-                        algorithm = credential.algorithm,
-                        digits = credential.digits
-                    )
+                    val secret = secretManager.decryptSecret(credential.secretEncrypted)
+                    try {
+                        OathEngine.generateHotpCode(
+                            secret = secret,
+                            counter = credential.counter,
+                            algorithm = credential.algorithm,
+                            digits = credential.digits
+                        )
+                    } finally {
+                        secret.fill(0)
+                    }
                 }
                 else -> throw IllegalStateException(
                     "Unknown OATH type: ${credential.oathType}"
@@ -589,7 +612,11 @@ class OathRepository(
                     claimed
                 },
                 audit = { claimed ->
-                    if (claimed) AuditLogger.logOathCodeGenerated(oathId, credential.issuer, credential.accountName)
+                    if (claimed) {
+                        AuditLogger.logOathCodeGenerated(
+                            oathId, credential.issuer, credential.accountName, caller.deviceId, caller.deviceName
+                        )
+                    }
                 }
             )
             if (won) return code
@@ -681,13 +708,15 @@ class OathRepository(
      * @return true if this call deleted the credential, false if none had
      *         [oathId] or a concurrent delete removed it first.
      */
-    suspend fun deleteCredential(oathId: String): Boolean {
+    suspend fun deleteCredential(oathId: String, caller: OathAuditCaller = OathAuditCaller.LOCAL): Boolean {
         val credential = dao.getByOathId(oathId) ?: return false
         val deleted = auditedWrite(
             write = { dao.deleteAndRecordDeletion(oathId, System.currentTimeMillis()) },
             audit = { rows ->
                 if (rows > 0) {
-                    AuditLogger.logOathCredentialDeleted(oathId, credential.issuer, credential.accountName)
+                    AuditLogger.logOathCredentialDeleted(
+                        oathId, credential.issuer, credential.accountName, caller.deviceId, caller.deviceName
+                    )
                 }
             }
         )
@@ -829,3 +858,17 @@ class OathRepository(
  */
 class OathCounterExhaustedException(oathId: String) :
     IllegalStateException("HOTP counter exhausted for OATH credential $oathId")
+
+/**
+ * The device an OATH audit row names: the requesting desktop for a protocol
+ * request, none for an action on the phone itself.
+ *
+ * @property deviceId the peer's static key hex, or null when unknown or local
+ * @property deviceName its paired-device name, when it is paired
+ */
+data class OathAuditCaller(val deviceId: String?, val deviceName: String?) {
+    companion object {
+        /** An action taken on the phone: no requesting device. */
+        val LOCAL = OathAuditCaller(null, null)
+    }
+}

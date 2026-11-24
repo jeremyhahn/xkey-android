@@ -115,11 +115,12 @@ class DeviceIdentity(private val context: Context) {
      *
      * The expiry is the CA's, taken from the certificate rather than from any
      * local setting: how often this device must prove itself is the relying
-     * party's decision, not the device's.
+     * party's decision, not the device's. notAfter is inclusive (RFC 5280), as
+     * in [X509Certificate.checkValidity]: the credential lapses only after it.
      */
     fun isCredentialExpired(now: Long = System.currentTimeMillis()): Boolean {
         val cert = credential() ?: return true
-        return cert.notAfter.time <= now
+        return cert.notAfter.time < now
     }
 
     /**

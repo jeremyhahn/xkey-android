@@ -66,7 +66,7 @@ import java.util.concurrent.atomic.AtomicReference
 import kotlin.concurrent.thread
 
 /**
- * The service's USB server slot (#134): a detach delivered through the
+ * The service's USB server slot: a detach delivered through the
  * production [BroadcastAccessoryDetachWatcher] receiver reaches the slot's
  * close wiring, the slot drops its closed server, and the next attach starts
  * a new one without a service restart.

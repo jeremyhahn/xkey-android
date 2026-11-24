@@ -90,9 +90,7 @@ object SignerVerification {
             return Result(status, matchedName, claimed)
         }
 
-        // The content hash comes first: on a mismatch the signatures cover
-        // other content, so every signer fails, known or not. Returning
-        // UNKNOWN here would let a copied block read as merely unrecognised.
+        // Check the content hash first: on a mismatch every signer fails, known or not.
         if (!contentHashMatches) {
             Log.w(TAG, "Content hash mismatch: stored=$storedContentHash")
             return result(Status.FAILED)

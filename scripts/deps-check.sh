@@ -1,39 +1,5 @@
 #!/usr/bin/env bash
-# The latest-version check, `make deps-check`. Fails when a library or Gradle plugin is behind a release
-# older than 7 days; reports, without failing, one younger than that.
-#
-#   usage: scripts/deps-check.sh               run Gradle, then evaluate
-#          scripts/deps-check.sh --report FILE evaluate a dependencyUpdates JSON report
-#          scripts/deps-check.sh --order V...  exit 1 unless V... ascend in Maven's order
-#          scripts/deps-check.sh --equal V...  exit 1 unless V... are one version
-#
-# This is the one stage that needs the network: Gradle asks the repositories
-# for newer versions, and each candidate's release date is the Last-Modified of
-# its POM on Google Maven, Maven Central or the Gradle plugin portal. It runs
-# Gradle without --offline, whatever GRADLE_OFFLINE says.
-#
-# How a candidate is chosen: a stable version is compared with stable releases
-# only (the init script and STABLE_RE agree), even when the report's newest is
-# a pre-release, which the plugin passes when its rule did not run: the newest
-# stable release is checked instead, and none newer is reported, not failed.
-# One already on a pre-release is compared with every release. Every release in maven-metadata.xml newer than
-# the current version and not newer than the newest, by Maven's version order
-# (MAVEN_JQ, a port of ComparableVersion), is dated; one older than DEPS_CHECK_GRACE_DAYS (7) fails the check.
-# The newest must be among them. A report that is not a dependencyUpdates
-# report, a repository that cannot be read, metadata without versions and a
-# release without a date all fail the check: nothing is passed unread.
-#
-# Exemptions (a pin held below latest carries its reason):
-# scripts/deps-check-exempt.txt, one line per library, '#' starts a comment:
-#
-#   group:name  reason, who decided, YYYY-MM-DD
-#
-# An exempt library is reported with its reason and never fails the check. A
-# line without a reason is refused.
-#
-# Environment: GRADLEW (the Makefile's), DEPS_CHECK_REPOS (space-separated
-# repository URLs), DEPS_CHECK_EXEMPT, DEPS_CHECK_GRACE_DAYS, DEPS_CHECK_PROTO
-# (curl's --proto; the test sets it to allow file://).
+# `make deps-check`: fails when a dependency is behind a stable release older than DEPS_CHECK_GRACE_DAYS (7); exemptions in scripts/deps-check-exempt.txt. Usage: scripts/deps-check.sh [--report FILE | --order V... | --equal V...]
 set -euo pipefail
 export LC_ALL=C
 
@@ -70,17 +36,7 @@ exempt_reason() {
 	return 1
 }
 
-# Maven's version order: org.apache.maven.artifact.versioning.ComparableVersion
-# (Maven 3.8/3.9), ported to jq, which has the recursion it needs. A version
-# is a list of items: '.' separates items, and '-' or a change between digit
-# and letter opens a nested list for the rest. Numbers compare as numbers; a
-# qualifier ranks alpha < beta < milestone < rc (= cr) < snapshot < "" (= ga
-# = final = release) < sp < any other, the others alphabetically; a, b and m
-# directly before a digit are alpha, beta and milestone. Against a missing
-# item a number is 0 and a qualifier is "". A number is newer than a list,
-# which is newer than a qualifier. Each list drops its trailing nulls (0, "",
-# an empty list), looking past nested lists, so 1.0 = 1 and 1.0-ga = 1.
-# scripts/deps-check-test.sh holds Maven's own ComparableVersionTest orders.
+# Maven's ComparableVersion order ported to jq; scripts/deps-check-test.sh holds Maven's own test orders.
 # shellcheck disable=SC2016  # a jq program: $a and the rest are jq's
 MAVEN_JQ='
 def mv_q: . as $q | (["alpha", "beta", "milestone", "rc", "snapshot", "", "sp"] | index($q)) as $i
@@ -328,11 +284,7 @@ fetch -o "${JAR}" "https://plugins.gradle.org/m2/com/github/ben-manes/gradle-ver
 echo "${DEPS_CHECK_PLUGIN_SHA256}  ${JAR}" | sha256sum -c --quiet - \
 	|| { echo "deps-check: CHECKSUM MISMATCH for the gradle-versions-plugin jar" >&2; rm -f "${JAR}"; exit 1; }
 rm -f "${OUT}/report.json"
-# GRADLEW is a command line (e.g. "gradle --no-daemon"): split on purpose.
-# gradle.properties turns on parallel execution and the configuration cache
-# for every other build; dependencyUpdates supports neither. It fails under
-# parallel execution ("run this task with --no-parallel"), and it reads
-# Task.project at execution time, so Gradle discards its cache entry anyway.
+# GRADLEW is split on purpose; dependencyUpdates needs --no-parallel and no configuration cache.
 # shellcheck disable=SC2086
 DEPS_CHECK_PLUGIN_JAR="${JAR}" DEPS_CHECK_OUT="${OUT}" \
 	${GRADLEW:-./gradlew} --no-parallel --no-configuration-cache \

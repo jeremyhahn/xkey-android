@@ -1,33 +1,5 @@
-# signatures-template: v1 (ci-template v1.35.2) — the commit signature gate.
-#
-# v1 (2026-11-11): the verifier ci.yml v1.35/v1.35.1 ran as a job of the pull request's own
-# workflow, so the pull request's tree held the script that judged it: a PR
-# could edit ci.yml and pass its own Signatures job. This workflow runs on
-# `pull_request_target`, so GitHub reads it from the BASE branch, never from
-# the pull request. It checks out the base only, fetches the pull request's
-# commits as objects, and reads them with git (`verify-commit`, `log`,
-# `cat-file`). It never checks out, builds or runs anything from the pull
-# request. Its token is `contents: read` and is not persisted in the clone.
-#
-# The rules are v1.35.1's: the registry is .github/allowed_signers read from
-# the base commit (synced from the shared template's
-# registry for this repository); a commit passes when
-# `git verify-commit` (gpg.format=ssh, gpg.ssh.allowedSignersFile) accepts it
-# AND the key's registered principal is the committer email; a commit GitHub
-# made (committer noreply@github.com) passes when the API reports it verified
-# with committer web-flow. It fails closed on an unsigned commit, an unknown
-# key, a principal mismatch, an unreadable base, an unreadable head and an
-# unreadable API. One change from v1.35.1: there is no head fallback. A base
-# with no registry fails, because under pull_request_target the head is
-# untrusted input.
-#
-# Adoption (one CI-file PR per repository): this file as
-# .github/workflows/signatures.yml, .github/allowed_signers, and ci.yml
-# v1.35.2 (no `signatures` job). That PR has no Signatures run, because the
-# workflow is not on the base yet. Once it lands, every later pull request
-# and push to main gets the `Signatures / Signatures` check, and the
-# repository ruleset requires that context beside CI Gate (a ruleset change,
-# made by its owner, not by the adoption PR).
+# Commit signature gate, read from the base branch: every PR commit must verify against .github/allowed_signers with its committer email as principal.
+# It checks out only the base, runs nothing from the PR and fails closed.
 name: Signatures
 
 on:

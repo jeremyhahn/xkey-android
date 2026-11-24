@@ -131,9 +131,9 @@ class SyncEngineMergeOathTest {
         // Every add, a synced one included, writes a created row from the
         // repository; the logger is not initialized on the JVM.
         mockkObject(AuditLogger)
-        every { AuditLogger.logOathCredentialCreated(any(), any(), any(), any()) } returns Unit
+        every { AuditLogger.logOathCredentialCreated(any(), any(), any(), any(), any(), any()) } returns Unit
         every { AuditLogger.logOathSyncConflict(any()) } returns Unit
-        every { AuditLogger.logOathCredentialDeleted(any(), any(), any()) } returns Unit
+        every { AuditLogger.logOathCredentialDeleted(any(), any(), any(), any(), any()) } returns Unit
 
         engine = SyncEngine(mockk<Context>())
     }
@@ -240,7 +240,7 @@ class SyncEngineMergeOathTest {
         assertEquals(1, inserted.size)
         assertNull(inserted[0].issuer)
         assertEquals("host:user", inserted[0].accountName)
-        verify(exactly = 1) { AuditLogger.logOathCredentialCreated(any(), null, "host:user", "TOTP") }
+        verify(exactly = 1) { AuditLogger.logOathCredentialCreated(any(), null, "host:user", "TOTP", any(), any()) }
     }
 
     @Test

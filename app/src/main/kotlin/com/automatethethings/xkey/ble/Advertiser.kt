@@ -236,8 +236,7 @@ class Advertiser(
             .setIncludeDeviceName(false) // Device name in scan response
             .setIncludeTxPowerLevel(false)
             .addServiceUuid(ParcelUuid(serviceUuid))
-            // The FIDO service, so CTAP2 BLE clients find the phone. Flags (3) +
-            // the 128-bit list (18) + the 16-bit list (4) fit the 31-byte PDU.
+            // The FIDO service UUID; flags, the 128-bit and 16-bit lists fit the 31-byte PDU.
             .addServiceUuid(ParcelUuid(FidoBle.SERVICE_UUID))
             .build()
 

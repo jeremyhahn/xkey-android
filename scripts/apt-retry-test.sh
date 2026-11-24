@@ -1,24 +1,5 @@
 #!/usr/bin/env bash
-# apt-retry-test: the image builds' apt retry setting, checked two ways.
-#
-# build/docker/devcontainer/apt-retries.conf holds the one Acquire::Retries
-# value. The Dockerfile copies it into /etc/apt/apt.conf.d/ in each stage
-# FROM an external image (fetch, base); the stages FROM those inherit it, so
-# one transient mirror error (an HTTP 500 during apt-get update) is retried
-# instead of failing the image build and turning main red (#287).
-#
-# 1. Static: every Dockerfile stage that runs apt-get has the setting, written
-#    (Acquire::Retries, or a COPY of apt-retries.conf into apt.conf.d) before
-#    its first apt-get, or inherits it from the stage it is built FROM. A copy
-#    of the Dockerfile with either stage's write removed fails the check.
-# 2. Behaviour: apt-get update, reading apt-retries.conf itself, against
-#    scripts/apt-stub-mirror.java, a loopback mirror serving an empty trusted
-#    flat repository. It passes when the first requests get HTTP 500 and the
-#    rest succeed; it fails when every request gets 500, and with
-#    Acquire::Retries 0 when the first ones do. apt runs unprivileged with a
-#    private state, cache, sources and config directory: never as root, never
-#    against a real mirror. Needs bash, apt-get and java (the toolchain image's
-#    /opt/jbr). `make apt-retry-test` (make lint-gates).
+# Checks every apt-get stage has Acquire::Retries and that apt recovers from transient 500s against a stub mirror. `make apt-retry-test`.
 set -uo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -47,11 +28,7 @@ check() {
 	fi
 }
 
-# retries_covered <dockerfile>: every stage that runs apt-get sets
-# Acquire::Retries (in a RUN, or by COPYing apt-retries.conf into
-# /etc/apt/apt.conf.d/) before its first apt-get, or is FROM a stage that set
-# it. Comment lines are skipped and continuation lines joined. Prints each
-# uncovered stage; at least one stage must run apt-get.
+# retries_covered <dockerfile>: prints each apt-get stage without the retry setting.
 retries_covered() {
 	local file=$1 line logical='' stage='' parent words n=0 bad=0
 	local -A has=() runs=()
@@ -147,9 +124,7 @@ mkdir -p "${REPO}" "${T}/parts" "${T}/prefs"
 } > "${REPO}/Release"
 : > "${T}/empty.conf"
 
-# stub <fail_n>: start the stub mirror; sets PORT and STUB_PID. Fails, with
-# PORT empty, unless the stub writes a port within 60 s and accepts a TCP
-# connection on it: a stub that never starts is a failure, never a skip.
+# stub <fail_n>: start the stub mirror, set PORT and STUB_PID; failing to start is a failure.
 stub() {
 	[ -z "${STUB_PID}" ] || { kill "${STUB_PID}" 2> /dev/null; wait "${STUB_PID}" 2> /dev/null; }
 	STUB_PID=
@@ -171,8 +146,7 @@ stub() {
 	fi
 }
 
-# with_stub <fail_n> <name> <command...>: start a stub mirror and check the
-# command against it; a stub that does not start is a FAIL line for name.
+# with_stub <fail_n> <name> <command...>: run the command against a stub mirror.
 with_stub() {
 	local fail_n=$1 name=$2
 	shift 2
@@ -184,9 +158,7 @@ with_stub() {
 	check "${name}" "$@"
 }
 
-# stub_cannot_start: with a stub path that does not exist, stub fails and
-# with_stub prints a FAIL line and sets FAILED, even for a command that
-# would pass (true). Runs in a subshell, so the real FAILED is untouched.
+# stub_cannot_start: a missing stub must produce a FAIL line, in a subshell.
 stub_cannot_start() (
 	STUB=${T}/no-such-stub.java STUB_PID='' FAILED=0
 	! stub 0 || exit 1

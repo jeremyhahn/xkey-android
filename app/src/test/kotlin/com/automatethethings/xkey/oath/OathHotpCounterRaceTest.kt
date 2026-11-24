@@ -166,9 +166,9 @@ class OathHotpCounterRaceTest {
 /** The repository audits every add, delete and generation; the logger is not initialized on the JVM. */
 private fun stubAuditLogger() {
     mockkObject(AuditLogger)
-    every { AuditLogger.logOathCredentialCreated(any(), any(), any(), any()) } returns Unit
-    every { AuditLogger.logOathCredentialDeleted(any(), any(), any()) } returns Unit
-    every { AuditLogger.logOathCodeGenerated(any(), any(), any()) } returns Unit
+    every { AuditLogger.logOathCredentialCreated(any(), any(), any(), any(), any(), any()) } returns Unit
+    every { AuditLogger.logOathCredentialDeleted(any(), any(), any(), any(), any()) } returns Unit
+    every { AuditLogger.logOathCodeGenerated(any(), any(), any(), any(), any()) } returns Unit
 }
 
 /** An android [Uri] answering what the importer reads, from [URI]. */

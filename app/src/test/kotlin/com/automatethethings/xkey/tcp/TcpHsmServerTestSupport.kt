@@ -24,7 +24,7 @@ import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 
 /**
- * Closes [desktop] and waits for the server to finish with it (#64): the
+ * Closes [desktop] and waits for the server to finish with it: the
  * connection's last log comes before the server is back to listening, so no
  * connection is mid-serve, still logging, when the test unmocks `Log`.
  */
@@ -34,7 +34,7 @@ internal suspend fun TcpHsmServer.closeAndAwaitListening(desktop: DesktopPeer, t
 }
 
 /**
- * Stops the server and waits until its accept loop has finished (#69). A
+ * Stops the server and waits until its accept loop has finished. A
  * test calls it in tearDown, before it unmocks.
  *
  * `stop()` cancels the server's scope but does not wait for it. A connection

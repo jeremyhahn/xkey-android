@@ -38,7 +38,7 @@ fun interface PromptHost {
  *
  * An activity going away (paused or destroyed) clears the record only when it
  * is the one held: an old instance finishing after a newer one resumed must
- * not take the newer one's place away (#320).
+ * not take the newer one's place away.
  *
  * With no resumed activity [current] is null, and callers refuse: a prompt is
  * never raised from the background.

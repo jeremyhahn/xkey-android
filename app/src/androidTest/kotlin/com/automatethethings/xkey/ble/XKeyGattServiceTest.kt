@@ -517,7 +517,7 @@ class XKeyGattServiceTest {
     /**
      * The service holds no activity of its own: the pairing dialog is hosted
      * by the app-wide record of the screen in front, so no screen's
-     * onPause/onDestroy can take another screen's place away (#320).
+     * onPause/onDestroy can take another screen's place away.
      */
     @Test
     fun thePairingPromptHostIsTheAppWideTracker() {

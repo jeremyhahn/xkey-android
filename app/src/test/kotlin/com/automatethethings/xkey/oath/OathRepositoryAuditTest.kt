@@ -61,9 +61,9 @@ class OathRepositoryAuditTest {
         every { Log.e(any(), any<String>(), any()) } returns 0
 
         mockkObject(AuditLogger)
-        every { AuditLogger.logOathCredentialCreated(any(), any(), any(), any()) } returns Unit
-        every { AuditLogger.logOathCredentialDeleted(any(), any(), any()) } returns Unit
-        every { AuditLogger.logOathCodeGenerated(any(), any(), any()) } returns Unit
+        every { AuditLogger.logOathCredentialCreated(any(), any(), any(), any(), any(), any()) } returns Unit
+        every { AuditLogger.logOathCredentialDeleted(any(), any(), any(), any(), any()) } returns Unit
+        every { AuditLogger.logOathCodeGenerated(any(), any(), any(), any(), any()) } returns Unit
 
         dao = mockk(relaxed = true)
         coEvery { dao.insert(any()) } answers { inserted += firstArg<OathCredentialEntity>(); 1L }
@@ -92,24 +92,24 @@ class OathRepositoryAuditTest {
     fun `a manual add writes one created row under the stored id`() = runTest {
         val id = repository.addCredential(issuer = "Acme", accountName = "alice", secret = SECRET_BYTES, type = "hotp")
 
-        verify(exactly = 1) { AuditLogger.logOathCredentialCreated(id, "Acme", "alice", "HOTP") }
-        verify(exactly = 1) { AuditLogger.logOathCredentialCreated(any(), any(), any(), any()) }
+        verify(exactly = 1) { AuditLogger.logOathCredentialCreated(id, "Acme", "alice", "HOTP", any(), any()) }
+        verify(exactly = 1) { AuditLogger.logOathCredentialCreated(any(), any(), any(), any(), any(), any()) }
     }
 
     @Test
     fun `a scanned uri import writes one created row`() = runTest {
         val id = repository.importFromUri("otpauth://totp/GitHub:alice?secret=$SECRET&issuer=GitHub")
 
-        verify(exactly = 1) { AuditLogger.logOathCredentialCreated(id, "GitHub", "alice", "TOTP") }
-        verify(exactly = 1) { AuditLogger.logOathCredentialCreated(any(), any(), any(), any()) }
+        verify(exactly = 1) { AuditLogger.logOathCredentialCreated(id, "GitHub", "alice", "TOTP", any(), any()) }
+        verify(exactly = 1) { AuditLogger.logOathCredentialCreated(any(), any(), any(), any(), any(), any()) }
     }
 
     @Test
     fun `a structured import writes one created row`() = runTest {
         val id = repository.importStructured(type = "totp", issuer = null, accountName = "host:user", secret = SECRET)
 
-        verify(exactly = 1) { AuditLogger.logOathCredentialCreated(id, null, "host:user", "TOTP") }
-        verify(exactly = 1) { AuditLogger.logOathCredentialCreated(any(), any(), any(), any()) }
+        verify(exactly = 1) { AuditLogger.logOathCredentialCreated(id, null, "host:user", "TOTP", any(), any()) }
+        verify(exactly = 1) { AuditLogger.logOathCredentialCreated(any(), any(), any(), any(), any(), any()) }
     }
 
     @Test
@@ -118,8 +118,8 @@ class OathRepositoryAuditTest {
 
         assertTrue(deleted)
         coVerify(exactly = 1) { dao.deleteAndRecordDeletion(HOTP_ID, any()) }
-        verify(exactly = 1) { AuditLogger.logOathCredentialDeleted(HOTP_ID, ISSUER, ACCOUNT) }
-        verify(exactly = 1) { AuditLogger.logOathCredentialDeleted(any(), any(), any()) }
+        verify(exactly = 1) { AuditLogger.logOathCredentialDeleted(HOTP_ID, ISSUER, ACCOUNT, any(), any()) }
+        verify(exactly = 1) { AuditLogger.logOathCredentialDeleted(any(), any(), any(), any(), any()) }
     }
 
     @Test
@@ -128,7 +128,7 @@ class OathRepositoryAuditTest {
 
         assertFalse(deleted)
         coVerify(exactly = 0) { dao.deleteAndRecordDeletion(any(), any()) }
-        verify(exactly = 0) { AuditLogger.logOathCredentialDeleted(any(), any(), any()) }
+        verify(exactly = 0) { AuditLogger.logOathCredentialDeleted(any(), any(), any(), any(), any()) }
     }
 
     @Test
@@ -151,8 +151,8 @@ class OathRepositoryAuditTest {
         coVerify(exactly = 2) { dao.deleteAndRecordDeletion(HOTP_ID, any()) }
         assertEquals(true, first)
         assertEquals(false, second)
-        verify(exactly = 1) { AuditLogger.logOathCredentialDeleted(HOTP_ID, ISSUER, ACCOUNT) }
-        verify(exactly = 1) { AuditLogger.logOathCredentialDeleted(any(), any(), any()) }
+        verify(exactly = 1) { AuditLogger.logOathCredentialDeleted(HOTP_ID, ISSUER, ACCOUNT, any(), any()) }
+        verify(exactly = 1) { AuditLogger.logOathCredentialDeleted(any(), any(), any(), any(), any()) }
     }
 
     @Test
@@ -160,8 +160,8 @@ class OathRepositoryAuditTest {
         repository.generateCode(HOTP_ID)
 
         coVerify(exactly = 1) { dao.claimCounter(HOTP_ID, 5L) }
-        verify(exactly = 1) { AuditLogger.logOathCodeGenerated(HOTP_ID, ISSUER, ACCOUNT) }
-        verify(exactly = 1) { AuditLogger.logOathCodeGenerated(any(), any(), any()) }
+        verify(exactly = 1) { AuditLogger.logOathCodeGenerated(HOTP_ID, ISSUER, ACCOUNT, any(), any()) }
+        verify(exactly = 1) { AuditLogger.logOathCodeGenerated(any(), any(), any(), any(), any()) }
     }
 
     @Test
@@ -170,7 +170,7 @@ class OathRepositoryAuditTest {
 
         assertEquals(2, repository.observeAll().first().size)
 
-        verify(exactly = 0) { AuditLogger.logOathCodeGenerated(any(), any(), any()) }
+        verify(exactly = 0) { AuditLogger.logOathCodeGenerated(any(), any(), any(), any(), any()) }
     }
 
     // -----------------------------------------------------------------------
@@ -203,8 +203,8 @@ class OathRepositoryAuditTest {
 
         assertEquals("the add must have committed", 1, inserted.size)
         val id = inserted.single().oathId
-        verify(exactly = 1) { AuditLogger.logOathCredentialCreated(id, "Acme", "alice", "HOTP") }
-        verify(exactly = 1) { AuditLogger.logOathCredentialCreated(any(), any(), any(), any()) }
+        verify(exactly = 1) { AuditLogger.logOathCredentialCreated(id, "Acme", "alice", "HOTP", any(), any()) }
+        verify(exactly = 1) { AuditLogger.logOathCredentialCreated(any(), any(), any(), any(), any(), any()) }
     }
 
     @Test
@@ -221,8 +221,8 @@ class OathRepositoryAuditTest {
         advanceUntilIdle()
 
         assertTrue("the delete must have committed", committed)
-        verify(exactly = 1) { AuditLogger.logOathCredentialDeleted(HOTP_ID, ISSUER, ACCOUNT) }
-        verify(exactly = 1) { AuditLogger.logOathCredentialDeleted(any(), any(), any()) }
+        verify(exactly = 1) { AuditLogger.logOathCredentialDeleted(HOTP_ID, ISSUER, ACCOUNT, any(), any()) }
+        verify(exactly = 1) { AuditLogger.logOathCredentialDeleted(any(), any(), any(), any(), any()) }
     }
 
     @Test
@@ -237,8 +237,8 @@ class OathRepositoryAuditTest {
         advanceUntilIdle()
 
         coVerify(exactly = 1) { dao.claimCounter(HOTP_ID, 5L) }
-        verify(exactly = 1) { AuditLogger.logOathCodeGenerated(HOTP_ID, ISSUER, ACCOUNT) }
-        verify(exactly = 1) { AuditLogger.logOathCodeGenerated(any(), any(), any()) }
+        verify(exactly = 1) { AuditLogger.logOathCodeGenerated(HOTP_ID, ISSUER, ACCOUNT, any(), any()) }
+        verify(exactly = 1) { AuditLogger.logOathCodeGenerated(any(), any(), any(), any(), any()) }
     }
 
     private fun stored(id: String, type: String) = OathCredentialEntity(

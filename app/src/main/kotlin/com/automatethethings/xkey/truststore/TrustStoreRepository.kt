@@ -392,11 +392,7 @@ public class TrustStoreRepository(
             "$METADATA_NOT_UPDATED: ${e.message}"
         }
 
-        // The failed rewrite left the previous metadata, rows of the removed
-        // certificates included: write their files back so they stay trusted
-        // everywhere (listed and chain anchors). One whose file is not on disk
-        // anchors no chain, so it counts as removed; its stale row is left
-        // for a later delete or clear.
+        // After a failed rewrite, restore the removed certificates' files so they stay trusted.
         val restored = if (metadataError == null) {
             emptyList()
         } else {
@@ -735,10 +731,7 @@ public class TrustStoreRepository(
             }
             val scheme = uri.scheme
             if (uri.isOpaque || scheme == null) return UNPARSEABLE_URL
-            // No host: a registry-based authority (e.g. a host with "_") keeps
-            // the userinfo in its raw text, and a hostless URI such as
-            // "https:///user:secret@host/" puts it in the path, which OkHttp
-            // still fetches from that host. Record nothing of either.
+            // No host: record nothing, since the userinfo may sit in the raw authority or the path.
             val host = uri.host ?: return UNPARSEABLE_URL
             val port = if (uri.port != -1) ":${uri.port}" else ""
             return "$scheme://$host$port${uri.path.orEmpty()}"
@@ -762,11 +755,7 @@ public class TrustStoreRepository(
                 }
             )
         }
-        // Write a temp file and rename it over the metadata, so a write that
-        // fails part-way leaves the previous document in place. The temp file
-        // is this writer's own: created exclusively under a unique name, it is
-        // written, renamed and removed by this call alone. Callers hold the
-        // store lock, so no other writer reads or replaces the metadata between.
+        // Write an exclusive temp file and rename it over the metadata; callers hold the store lock.
         val metadataFile = File(trustStoreDir, "metadata.json")
         val tempFile = File.createTempFile("metadata.json.", ".tmp", trustStoreDir)
         try {

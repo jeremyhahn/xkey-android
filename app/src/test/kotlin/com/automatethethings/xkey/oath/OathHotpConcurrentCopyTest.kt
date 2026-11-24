@@ -68,7 +68,7 @@ class OathHotpConcurrentCopyTest {
     @Before
     fun setUp() {
         mockkObject(AuditLogger)
-        every { AuditLogger.logOathCodeGenerated(any(), any(), any()) } returns Unit
+        every { AuditLogger.logOathCodeGenerated(any(), any(), any(), any(), any()) } returns Unit
     }
 
     @After
@@ -80,7 +80,8 @@ class OathHotpConcurrentCopyTest {
     fun `two overlapping HOTP copies get two counters`() = runTest {
         val dao = OneRowDao(hotpRow(counter = 5L))
         val secretManager = mockk<OathSecretManager>()
-        every { secretManager.decryptSecret(any()) } answers { firstArg() }
+        // A copy: generateCode zeroes the decrypted secret after use.
+        every { secretManager.decryptSecret(any()) } answers { firstArg<ByteArray>().copyOf() }
         val repository = OathRepository(dao, secretManager)
 
         val first = async { repository.generateCode(HOTP_ID) }

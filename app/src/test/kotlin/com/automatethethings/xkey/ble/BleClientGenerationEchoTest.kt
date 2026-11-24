@@ -18,6 +18,7 @@ package com.automatethethings.xkey.ble
 import android.util.Log
 import com.automatethethings.xkey.protocol.ErrorCodes
 import com.automatethethings.xkey.protocol.MethodNames
+import com.automatethethings.xkey.protocol.Response
 import com.automatethethings.xkey.protocol.SessionBindingProvider
 import io.mockk.every
 import io.mockk.mockkStatic
@@ -74,7 +75,7 @@ class BleClientGenerationEchoTest {
     fun noHandlerIsRefusedWithTheGeneration(): Unit = runBlocking {
         val h = connected(null)
 
-        h.desktopSends(attestRequest(id = 6, generation = 60))
+        h.desktopSends(attestRequest(id = 6, generation = 60uL))
 
         val answer = String(h.awaitResponses(1)[0], Charsets.UTF_8)
         assertEquals("60", rawGeneration(answer))
@@ -85,10 +86,43 @@ class BleClientGenerationEchoTest {
     fun aFailingHandlerIsAnsweredWithTheGeneration(): Unit = runBlocking {
         val h = connected(ThrowingHandler())
 
-        h.desktopSends(attestRequest(id = 7, generation = 70))
+        h.desktopSends(attestRequest(id = 7, generation = 70uL))
 
         val answer = String(h.awaitResponses(1)[0], Charsets.UTF_8)
         assertEquals("70", rawGeneration(answer))
+        assertEquals(ErrorCodes.INTERNAL_ERROR, errorCode(answer))
+    }
+
+    @Test
+    fun anUnservedMethodIsRefusedWithTheMaxGeneration(): Unit = runBlocking {
+        val h = connected(ThrowingHandler())
+
+        h.desktopSends("""{"jsonrpc":"2.0","id":21,"generation":$UINT64_MAX,"method":"local.listKeys"}""".toByteArray())
+
+        val answer = String(h.awaitResponses(1)[0], Charsets.UTF_8)
+        assertMaxGeneration(answer)
+        assertEquals(ErrorCodes.METHOD_NOT_FOUND, errorCode(answer))
+    }
+
+    @Test
+    fun noHandlerIsRefusedWithTheMaxGeneration(): Unit = runBlocking {
+        val h = connected(null)
+
+        h.desktopSends(attestRequest(id = 22, generation = ULong.MAX_VALUE))
+
+        val answer = String(h.awaitResponses(1)[0], Charsets.UTF_8)
+        assertMaxGeneration(answer)
+        assertEquals(ErrorCodes.METHOD_NOT_FOUND, errorCode(answer))
+    }
+
+    @Test
+    fun aFailingHandlerIsAnsweredWithTheMaxGeneration(): Unit = runBlocking {
+        val h = connected(ThrowingHandler())
+
+        h.desktopSends(attestRequest(id = 23, generation = ULong.MAX_VALUE))
+
+        val answer = String(h.awaitResponses(1)[0], Charsets.UTF_8)
+        assertMaxGeneration(answer)
         assertEquals(ErrorCodes.INTERNAL_ERROR, errorCode(answer))
     }
 
@@ -110,7 +144,13 @@ class BleClientGenerationEchoTest {
         ): ByteArray = throw IllegalStateException("attestation unavailable")
     }
 
-    private fun attestRequest(id: Long, generation: Long): ByteArray =
+    /** Asserts [answer] carries generation 2^64-1 digit for digit and parses back to [ULong.MAX_VALUE]. */
+    private fun assertMaxGeneration(answer: String) {
+        assertEquals(UINT64_MAX, rawGeneration(answer))
+        assertEquals(ULong.MAX_VALUE, Response.fromJson(answer).generation)
+    }
+
+    private fun attestRequest(id: Long, generation: ULong): ByteArray =
         ("""{"jsonrpc":"2.0","id":$id,"generation":$generation,""" +
             """"method":"${MethodNames.LOCAL_ATTEST_DEVICE}","params":{"purpose":"pair"}}""").toByteArray()
 
@@ -119,6 +159,9 @@ class BleClientGenerationEchoTest {
             ?: throw AssertionError("expected an error, got $answer")
 
     private companion object {
+        /** 2^64-1, the largest uint64 generation, above [Long.MAX_VALUE]. */
+        const val UINT64_MAX = "18446744073709551615"
+
         /** The `generation` member's number exactly as written, or null when absent. */
         fun rawGeneration(json: String): String? =
             Regex(""""generation":(\d+)[,}]""").find(json)?.groupValues?.get(1)

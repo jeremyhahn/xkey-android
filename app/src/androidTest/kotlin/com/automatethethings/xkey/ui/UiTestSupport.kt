@@ -308,12 +308,7 @@ fun <T : View> switchForLabel(root: View, label: String, switchType: Class<T>): 
     val labelView = collectViews(root) { it is TextView && it.text?.toString() == label }
         .firstOrNull() ?: return null
 
-    // Walk up from the label, looking only at each ancestor's DIRECT children.
-    // Searching the whole subtree returns the first switch anywhere under that
-    // ancestor, which — once the walk reaches a section container holding
-    // several rows — is some other row's switch. That silently pointed the
-    // Settings tests at the wrong control: they toggled it, saw it flip, and
-    // then found nothing persisted for the setting they meant.
+    // Look only at each ancestor's direct children: a subtree search finds another row's switch.
     var candidate: View = labelView
     while (true) {
         val parent = candidate.parent as? ViewGroup ?: return null

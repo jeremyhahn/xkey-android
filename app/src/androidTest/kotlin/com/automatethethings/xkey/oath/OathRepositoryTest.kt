@@ -248,9 +248,7 @@ class OathRepositoryTest {
         assertEquals(30, stored.periodSeconds)
     }
 
-    // -------------------------------------------------------------------------
     // importFromUri: HOTP counter
-    // -------------------------------------------------------------------------
 
     @Test
     fun importFromUri_ignoresAnUnparseableCounter() = runBlocking {

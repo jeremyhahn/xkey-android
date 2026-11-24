@@ -186,9 +186,7 @@ class ProtocolConstantsTest {
         assertEquals("remote.attestDevice", MethodNames.REMOTE_ATTEST_DEVICE)
     }
 
-    // -------------------------------------------------------------------------
     // OATH, sync, backup and sharing families
-    // -------------------------------------------------------------------------
 
     @Test
     fun `OATH method names match the go-xkms spelling on both sides of the link`() {

@@ -59,7 +59,7 @@ import org.junit.Test
 
 /**
  * Unpairing a desktop revokes its live BLE session, and a phone-initiated
- * send to a peer that is no longer paired is refused before encryption (#59).
+ * send to a peer that is no longer paired is refused before encryption.
  *
  * A [GattServer] is given a connected device, an established [NoiseSession]
  * and a mocked server handle by reflection, as `onConnectionStateChange`,

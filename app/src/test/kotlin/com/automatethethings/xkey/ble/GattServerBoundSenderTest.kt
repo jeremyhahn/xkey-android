@@ -53,8 +53,7 @@ import org.junit.Test
  * A [com.automatethethings.xkey.remote.ConnectedDesktop] from
  * [GattServer.connectedDesktop] encrypts only on the session whose handshake
  * authenticated its key: once paired desktop B's session replaces desktop
- * A's, a send captured for A fails and nothing is notified to B (ruling 554,
- * #141). The connection state is installed by reflection, as in
+ * A's, a send captured for A fails and nothing is notified to B. The connection state is installed by reflection, as in
  * [GattServerReconnectTest].
  */
 @Suppress("DEPRECATION")
@@ -127,7 +126,7 @@ class GattServerBoundSenderTest {
             captured.sender.sendEncryptedMessage(REQUEST)
             fail("a send captured for A must not go out on B's session")
         } catch (e: IOException) {
-            // A's session is no longer the server's.
+            // A's session is not the server's now.
         }
         assertTrue("nothing may be notified to B", fragments.isEmpty())
     }

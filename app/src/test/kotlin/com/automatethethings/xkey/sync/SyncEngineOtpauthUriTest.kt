@@ -23,7 +23,7 @@ import java.net.URLDecoder
 
 /**
  * [otpauthUri] percent-encodes the issuer and account it puts in the label
- * and the `issuer` query parameter (#133), so a synced credential whose
+ * and the `issuer` query parameter, so a synced credential whose
  * issuer or account holds a space, `&`, `?`, `#` or `/` keeps its label and
  * query intact when `OathRepository.importStructured` parses it.
  */
