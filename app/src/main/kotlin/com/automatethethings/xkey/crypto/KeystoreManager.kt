@@ -1217,8 +1217,9 @@ class KeystoreManager(
      *
      * SharedPreferences drops a removed key from its in-memory map before it
      * writes to disk, and keeps it dropped when the write fails, so after a
-     * removal that did not commit the cache says "absent" while the key is
-     * still on disk. Such an alias is in [uncommittedSoftwareRemovals] and
+     * removal that is in flight or did not commit the cache says "absent"
+     * while the key is still on disk. Such an alias is in
+     * [uncommittedSoftwareRemovals] from before its commit starts and
      * reads as present here until a retry of its removal reaches disk
      * ([removalStillUncommitted], [removeSoftwareEd25519Key]).
      *
@@ -1238,9 +1239,10 @@ class KeystoreManager(
     }
 
     /**
-     * Removes [alias] from the software Ed25519 store and commits. A removal
-     * that does not commit (or throws part-way) is recorded in
-     * [uncommittedSoftwareRemovals]; one that commits clears the record.
+     * Removes [alias] from the software Ed25519 store and commits. The alias
+     * is recorded in [uncommittedSoftwareRemovals] before the commit starts
+     * and cleared only once it reaches disk, so the key reads as present
+     * while the removal is in flight and after one that did not commit.
      * Call it inside `withAliasGate(alias)`.
      *
      * @return true if the removal reached disk.
@@ -1253,13 +1255,14 @@ class KeystoreManager(
         } catch (e: Exception) {
             throw KeyDeletionException("The software key store could not be read to delete $alias", e)
         }
+        // Pending before the cache drops the key, so no read sees it absent before disk does.
+        uncommittedSoftwareRemovals.add(alias)
         val committed = try {
             prefs.edit().remove(alias).commit()
         } catch (e: Exception) {
-            uncommittedSoftwareRemovals.add(alias)
             throw KeyDeletionException("Deleting software key $alias failed", e)
         }
-        if (committed) uncommittedSoftwareRemovals.remove(alias) else uncommittedSoftwareRemovals.add(alias)
+        if (committed) uncommittedSoftwareRemovals.remove(alias)
         return committed
     }
 
@@ -1271,7 +1274,7 @@ class KeystoreManager(
      * @throws KeyDeletionException if the store cannot be opened.
      */
     private fun removalStillUncommitted(alias: String): Boolean {
-        if (alias !in uncommittedSoftwareRemovals) return false
+        // Under the gate, so a removal in flight ends before this reads.
         return withAliasGate(alias) {
             alias in uncommittedSoftwareRemovals && !commitSoftwareRemovalLocked(alias)
         }
@@ -2012,7 +2015,9 @@ class KeystoreManager(
         if (resolveKeystoreAlias(keyId) != null) return false
         // Ask the software store again, failing loudly where
         // resolveKeystoreAlias answered "no key" for an unreadable store.
-        return softwareAliases.none { softwareEd25519KeyStored(it, strict = true) }
+        return softwareAliases.none { alias ->
+            withAliasGate(alias) { softwareEd25519KeyStored(alias, strict = true) }
+        }
     }
 
     /**
