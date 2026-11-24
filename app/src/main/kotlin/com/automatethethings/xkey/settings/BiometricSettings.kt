@@ -392,7 +392,7 @@ public class BiometricSettingsRepository internal constructor(
         AuditLogger.editAuditedSetting(dataStore, "userVerificationPolicy") { preferences ->
             val oldValue = mapPreferencesToSettings(preferences).uvPolicy.name
             preferences[KEY_UV_POLICY] = policy.name
-            AuditLogger.SettingChange(oldValue, policy.name)
+            if (oldValue == policy.name) null else AuditLogger.SettingChange(oldValue, policy.name)
         }
     }
 
@@ -405,7 +405,7 @@ public class BiometricSettingsRepository internal constructor(
         AuditLogger.editAuditedSetting(dataStore, "authMode") { preferences ->
             val oldValue = mapPreferencesToSettings(preferences).authMode.name
             preferences[KEY_AUTH_MODE] = mode.name
-            AuditLogger.SettingChange(oldValue, mode.name)
+            if (oldValue == mode.name) null else AuditLogger.SettingChange(oldValue, mode.name)
         }
     }
 
@@ -439,7 +439,7 @@ public class BiometricSettingsRepository internal constructor(
         AuditLogger.editAuditedSetting(dataStore, "attestationBiometricPolicy") { preferences ->
             val oldValue = mapPreferencesToSettings(preferences).attestationBiometricPolicy.name
             preferences[KEY_ATTESTATION_BIOMETRIC_POLICY] = policy.name
-            AuditLogger.SettingChange(oldValue, policy.name)
+            if (oldValue == policy.name) null else AuditLogger.SettingChange(oldValue, policy.name)
         }
     }
 
