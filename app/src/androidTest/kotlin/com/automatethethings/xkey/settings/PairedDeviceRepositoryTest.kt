@@ -115,6 +115,20 @@ class PairedDeviceRepositoryTest {
     }
 
     @Test
+    fun addDevice_keepsADifferentDesktopWithTheSameName() {
+        // Two laptops can share a host name; the name identifies neither.
+        repository.addDevice(primaryKey, primaryName, bleAddress = "AA:BB:CC:DD:EE:02")
+
+        repository.addDevice(secondaryKey, primaryName, bleAddress = "AA:BB:CC:DD:EE:03")
+        repository.addDevice(tertiaryKey, primaryName)
+
+        assertTrue(repository.isDeviceKnown(primaryKey))
+        assertTrue(repository.isDeviceKnown(secondaryKey))
+        assertTrue(repository.isDeviceKnown(tertiaryKey))
+        assertEquals(3, repository.getAllDevices().count { it.deviceName == primaryName })
+    }
+
+    @Test
     fun updateDeviceBleAddress_persists() {
         repository.addDevice(primaryKey, primaryName)
 
