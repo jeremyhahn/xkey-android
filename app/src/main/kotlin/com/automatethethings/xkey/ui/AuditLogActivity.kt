@@ -919,8 +919,7 @@ class AuditLogActivity : AppCompatActivity() {
             .setPositiveButton(getString(R.string.key_delete_confirm)) { _, _ ->
                 lifecycleScope.launch {
                     if (!authenticated(getString(R.string.audit_clear_all))) return@launch
-                    val deleted = auditLogDao.deleteAll()
-                    AuditLogger.logAuditLogCleared(auditLogDao, deleted)
+                    AuditLogger.clearAuditLog(auditLogDao)
                     Snackbar.make(rootLayout, getString(R.string.audit_logs_cleared), Snackbar.LENGTH_SHORT).show()
                 }
             }
@@ -946,8 +945,7 @@ class AuditLogActivity : AppCompatActivity() {
                 lifecycleScope.launch {
                     if (!authenticated(getString(R.string.audit_delete_older))) return@launch
                     val cutoff = System.currentTimeMillis() - DELETE_OLDER_THAN_MS
-                    val deleted = auditLogDao.deleteOlderThan(cutoff)
-                    AuditLogger.logAuditLogPruned(auditLogDao, deleted, cutoff)
+                    val deleted = AuditLogger.pruneAuditLog(auditLogDao, cutoff)
                     Snackbar.make(rootLayout, getString(R.string.audit_old_logs_deleted, deleted), Snackbar.LENGTH_SHORT).show()
                 }
             }
