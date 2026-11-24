@@ -109,6 +109,7 @@ class PinManagementActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        SecureScreens.protect(window)
 
         pinSettingsRepository = PinSettingsRepository(this)
         pinManager = PinManager(pinSettingsRepository)
