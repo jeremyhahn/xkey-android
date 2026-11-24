@@ -32,6 +32,8 @@ class XKeyApplication : Application() {
         registerGrantCleanup()
         // Finish a copied secret's pending clipboard clear from any screen.
         registerActivityLifecycleCallbacks(ClipboardFocusRetry)
+        // Media signatures the app may not write into the file (API 30+).
+        com.automatethethings.xkey.media.XmpMetadataHelper.usePrivateStore(this)
     }
 
     /**

@@ -68,14 +68,14 @@ sequenceDiagram
 The service returns without signing, and without an audit entry, when:
 
 - auto-sign is off, or the item's type (photo or video) is switched off;
-- no signing key is set, or the key's row is gone;
-- `MediaStore` gives no file path for the URI. The URI is not marked as
-  done, so a later change event for it tries again.
+- no signing key is set, or the key's row is gone.
 
-A JPEG over 32 MiB is refused. The service logs a failed
-`media_auto_sign` key use in the audit log and marks the URI as done. Any
-other exception, a missing Keystore key included, is written to logcat and
-the item stays unsigned.
+The URI is not marked as done, so a later change event for it tries again.
+The same holds when the content cannot be read yet (a pending capture).
+
+A JPEG over 32 MiB is refused. Any later failure (signing, or storing the
+signature) is final for that capture too. In both cases the service logs a
+failed `media_auto_sign` key use in the audit log and marks the URI as done.
 
 The key signs with no prompt. `signApproved` checks that the public key under
 the alias is the one it just read and holds the alias gate while it signs;
@@ -98,5 +98,12 @@ later. For a JPEG it is the canonical hash, which skips the `APPn` and `COM`
 segments, so writing the EXIF block does not change it. For anything else it
 is the whole-file hash, which the sidecar leaves untouched.
 
-Both are written through a plain file path, so the service needs write access
-to the file the camera app created.
+Without a file path, a JPEG is written through the `ContentResolver`, and
+other media have nowhere to go in the file.
+
+On API 30+ the app may not write to another app's media, so the in-file
+write is refused. The signature is then kept in app-private storage
+(`noBackupFilesDir/media-signatures/<content hash>.json`).
+`readSignatureFromUri` hashes the content it is shown and looks the hash up
+there when the file carries no signature. Such a signature is verifiable on
+this device only; it does not travel with a shared copy of the file.

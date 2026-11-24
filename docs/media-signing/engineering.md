@@ -26,7 +26,7 @@ and signed at the same time. `onDestroy` cancels all of them.
 |--------|-------|
 | Observed URIs | `MediaStore.Images.Media.EXTERNAL_CONTENT_URI`, `MediaStore.Video.Media.EXTERNAL_CONTENT_URI`, with descendants |
 | Wait before hashing | 500 ms (`SIGN_DELAY_MS`), so the camera can finish writing |
-| Duplicate guard | `processedUris`, a concurrent in-memory set of URI strings |
+| Duplicate guard | `AutoSignQueue` claims a URI when its first event arrives, before the wait, so a burst of events for one capture starts one signing job; a skipped attempt releases the claim |
 | Set size | When it passes 1000 entries, 500 are removed in iteration order. The set is hash-based, so these are not the oldest |
 
 The set lives in memory only. A restarted service can sign a URI again if
