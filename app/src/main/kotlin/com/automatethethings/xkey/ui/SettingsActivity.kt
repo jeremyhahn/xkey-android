@@ -2278,19 +2278,27 @@ class SettingsActivity : AppCompatActivity() {
 
     private fun saveCurrentNoiseConfig() {
         lifecycleScope.launch {
-            bootstrapSettingsRepository.updateNoiseSettings(
+            val saved = bootstrapSettingsRepository.updateNoiseSettings(
                 serverAddr = editTextNoiseServerAddress?.text?.toString()?.trim(),
                 serverStaticKey = editTextNoiseStaticKey?.text?.toString()?.trim()
             )
+            // A refused key writes nothing; the typed text stays so the user can correct it.
+            if (!saved) {
+                Snackbar.make(binding.root, getString(R.string.bootstrap_noise_key_refused), Snackbar.LENGTH_LONG).show()
+            }
         }
     }
 
     private fun saveCurrentSpkiConfig() {
         lifecycleScope.launch {
-            bootstrapSettingsRepository.updateSpkiSettings(
+            val saved = bootstrapSettingsRepository.updateSpkiSettings(
                 serverUrl = editTextSpkiServerUrl?.text?.toString()?.trim(),
                 pinSha256 = editTextSpkiPinSha256?.text?.toString()?.trim()
             )
+            // A refused pin writes nothing; the typed text stays so the user can correct it.
+            if (!saved) {
+                Snackbar.make(binding.root, getString(R.string.bootstrap_spki_pin_refused), Snackbar.LENGTH_LONG).show()
+            }
         }
     }
 
