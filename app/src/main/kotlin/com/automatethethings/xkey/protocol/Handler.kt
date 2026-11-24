@@ -1212,18 +1212,32 @@ class RequestHandler(
      * A paired-device store that cannot be read fails closed: the peer's
      * settings may require an attestation the phone cannot check.
      *
-     * @return True if attestation is current or not required, false if attestation is required but expired
-     *   or the peer's record cannot be read.
+     * Every request reaches this handler from a desktop connection, so for
+     * key use a request with no authenticated peer, a peer with no paired
+     * record or a handler with no paired-device store is refused: no device
+     * policy can be checked for it. Key attestation still allows them.
+     *
+     * @return True if attestation is current or not required, false if attestation is required but expired,
+     *   the peer's record cannot be read, or (for key use) the peer is unknown or not paired.
      */
     private suspend fun isDeviceAttestationCurrent(forKeyUse: Boolean): Boolean {
-        val publicKeyHex = attestingPeerPublicKeyHex() ?: return true  // Unknown device, allow
-        val repo = pairedDeviceRepository ?: return true
+        val publicKeyHex = attestingPeerPublicKeyHex() ?: run {
+            if (forKeyUse) Log.w(TAG, "Key use with no authenticated peer; refusing")
+            return !forKeyUse
+        }
+        val repo = pairedDeviceRepository ?: run {
+            if (forKeyUse) Log.w(TAG, "Key use with no paired-device store; refusing")
+            return !forKeyUse
+        }
         val found = repo.lookupDevice(publicKeyHex)
         if (found is DeviceLookup.Unreadable) {
             Log.w(TAG, "Paired-device store unreadable; refusing until attestation can be checked", found.cause)
             return false
         }
-        val device = (found as? DeviceLookup.Paired)?.device ?: return true  // Not in repo, no device policy
+        val device = (found as? DeviceLookup.Paired)?.device ?: run {
+            if (forKeyUse) Log.w(TAG, "Key use from a peer that is not paired; refusing")
+            return !forKeyUse
+        }
 
         val requiresAttestation = if (forKeyUse) {
             device.requireAttestationForKeyUse
