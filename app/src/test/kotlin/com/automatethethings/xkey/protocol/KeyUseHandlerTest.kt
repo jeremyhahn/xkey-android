@@ -613,6 +613,17 @@ class KeyUseHandlerTest {
     }
 
     @Test
+    fun `a software symmetric encrypt and decrypt each write one entry naming the key and the desktop`() = runTest {
+        gatedRequests().filter { (method, params) ->
+            method != MethodNames.LOCAL_HMAC && JSONObject(params).getString("keyId") == SW_AES
+        }.also { assertEquals(2, it.size) }
+            .forEach { (method, params) ->
+                assertOneKeyUseEntry(method, params)
+                assertEquals(method, "symmetric", inserted.single { it.success && it.keyId != null }.keyType)
+            }
+    }
+
+    @Test
     fun `found - getPublicKey writes no audit entry`() = runTest {
         servedBy(PEER_OK) { result(call(MethodNames.LOCAL_GET_PUBLIC_KEY, """{"keyId":"$HW_EC","format":"der"}""")) }
         val keyUse = setOf(
