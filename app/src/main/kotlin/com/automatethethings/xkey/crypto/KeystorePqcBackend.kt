@@ -50,14 +50,15 @@ import java.util.concurrent.atomic.AtomicReference
  * hardware and `keyBacking: "hardware"` is refused.
  *
  * @param sdkInt the device API level; injected by tests.
- * @param probe generates, reads back and deletes a probe key of a set and
+ * @param probe generates, reads back and deletes a probe key of a set, in
+ *   StrongBox when its second argument is true and the TEE otherwise, and
  *   returns its `KeyProperties.SECURITY_LEVEL_*`, or null or a throw when the
- *   set cannot be made; injected by tests.
+ *   set cannot be made there; injected by tests.
  * @param ioDispatcher where the probe runs, never the main thread.
  */
 class KeystorePqcBackend(
     private val sdkInt: Int = Build.VERSION.SDK_INT,
-    private val probe: (MlDsaParameterSet) -> Int? = ::probeOnce,
+    private val probe: (MlDsaParameterSet, Boolean) -> Int? = ::probeOnce,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO
 ) : PqcHardwareBackend {
 
@@ -82,7 +83,9 @@ class KeystorePqcBackend(
         scope.launch(ioDispatcher) {
             try {
                 val found = MlDsaParameterSet.entries.filterTo(LinkedHashSet()) { set ->
-                    probeLevel(set)?.let { it in HARDWARE_LEVELS } == true
+                    // The TEE first, then StrongBox: either one in hardware keeps the set.
+                    probeLevel(set, strongBox = false) in HARDWARE_LEVELS ||
+                        probeLevel(set, strongBox = true) in HARDWARE_LEVELS
                 }
                 supported.set(found.toSet())
             } finally {
@@ -138,9 +141,9 @@ class KeystorePqcBackend(
     /** `"ML-DSA"`: the platform's `KeyProperties.KEY_ALGORITHM_ML_DSA`, for every set. */
     override fun jcaSignatureAlgorithm(set: MlDsaParameterSet): String = ML_DSA
 
-    /** The probe's level for [set]; null when it throws, so a failing set is unsupported. */
-    private fun probeLevel(set: MlDsaParameterSet): Int? = try {
-        probe(set)
+    /** The probe's level for [set] in StrongBox or the TEE; null when it throws. */
+    private fun probeLevel(set: MlDsaParameterSet, strongBox: Boolean): Int? = try {
+        probe(set, strongBox)
     } catch (e: CancellationException) {
         throw e
     } catch (e: Exception) {
@@ -197,17 +200,17 @@ private const val ANDROID_KEYSTORE = "AndroidKeyStore"
 private fun androidKeyStore(): KeyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
 
 /**
- * The default probe: generates [set] in the TEE under its probe alias with
+ * The default probe: generates [set] in StrongBox when [strongBox], else in the TEE, under its probe alias with
  * no user authentication, checks the public key, reads the private key's
  * [KeyInfo] level and deletes the key whatever happened.
  */
-private fun probeOnce(set: MlDsaParameterSet): Int? {
+private fun probeOnce(set: MlDsaParameterSet, strongBox: Boolean): Int? {
     if (Build.VERSION.SDK_INT < KeystorePqcBackend.MIN_SDK) return null
     val alias = KeystorePqcBackend.probeAlias(set)
     val keyStore = androidKeyStore()
     try {
         if (keyStore.containsAlias(alias)) keyStore.deleteEntry(alias)
-        val pair = generateWith(alias, set, authDurationSeconds = -1, strongBox = false)
+        val pair = generateWith(alias, set, authDurationSeconds = -1, strongBox = strongBox)
         KeystorePqcBackend.checkSpki(set, pair.public.encoded)
         val info = KeyFactory.getInstance(pair.private.algorithm, ANDROID_KEYSTORE)
             .getKeySpec(pair.private, KeyInfo::class.java)
