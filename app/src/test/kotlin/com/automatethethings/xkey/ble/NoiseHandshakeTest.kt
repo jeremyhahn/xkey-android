@@ -16,11 +16,14 @@
 package com.automatethethings.xkey.ble
 
 import android.content.Context
+import android.content.SharedPreferences
 import android.util.Log
+import com.automatethethings.xkey.settings.InMemorySharedPreferences
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.mockkStatic
 import io.mockk.unmockkAll
+import io.mockk.verify
 import java.security.MessageDigest
 import java.security.SecureRandom
 import kotlinx.coroutines.test.runTest
@@ -50,9 +53,8 @@ import org.junit.Test
  *
  *  - [NoiseInitiatorSession] is pure `java.security` / `javax.crypto`.
  *  - [NoiseSession.loadStaticKey] cannot reach `EncryptedSharedPreferences`
- *    off-device, and its documented fallback is to generate a fresh static key
- *    in-memory. That fallback is exactly what a unit test wants, and exercising
- *    it also covers the recovery path a device with a wiped keystore takes.
+ *    off-device and fails closed without it, so [NoiseTestKeyStore] puts an
+ *    in-memory store in its place: each session generates a fresh static key.
  *
  * Only `android.util.Log` has to be stubbed.
  */
@@ -72,13 +74,14 @@ class NoiseHandshakeTest {
     }
 
     /**
-     * Only ever used to reach [NoiseSession.loadStaticKey]'s in-memory
-     * fallback; no framework call on it is expected to succeed.
+     * Only ever passed to [NoiseSession.loadStaticKey], which reads the
+     * [NoiseTestKeyStore]; no framework call on it is expected to succeed.
      */
     private lateinit var context: Context
 
     @Before
     fun setUp() {
+        NoiseTestKeyStore.install()
         mockkStatic(Log::class)
         every { Log.v(any(), any<String>()) } returns 0
         every { Log.d(any(), any<String>()) } returns 0
@@ -323,6 +326,77 @@ class NoiseHandshakeTest {
         }
     }
 
+    /**
+     * A msg1 whose ephemeral key is a small-order point (u = 0 or u = 1) would
+     * make DH(e, re) all zeros, a secret the peer knows without any key. The
+     * responder must refuse it rather than mix it in (RFC 7748 §6.1).
+     */
+    @Test
+    fun responderRefusesASmallOrderEphemeralInMsg1() = runTest {
+        for (u in listOf(ByteArray(KEY_SIZE), ByteArray(KEY_SIZE).also { it[0] = 1 })) {
+            val responder = newResponder()
+            try {
+                responder.processHandshakeMessage(u)
+                fail("expected a small-order ephemeral to be refused")
+            } catch (expected: NoiseException) {
+                assertFalse(responder.isHandshakeComplete())
+            }
+        }
+    }
+
+    /**
+     * A msg3 whose static key is a small-order point makes DH(e, rs) all
+     * zeros: the responder must refuse it with a [NoiseException] before it
+     * splits, on either X25519 path.
+     */
+    @Test
+    fun responderRefusesASmallOrderStaticKeyInMsg3() = runTest {
+        for (fallback in listOf(false, true)) {
+            X25519.forceFallbackForTest = fallback
+            try {
+                val initiator = NoiseInitiatorSession(randomBytes(KEY_SIZE))
+                initiator.staticKeyOnWireForTest = ByteArray(KEY_SIZE).also { it[0] = 1 }
+                val responder = newResponder()
+                initiator.processHandshakeMessage2(
+                    responder.processHandshakeMessage(initiator.createHandshakeMessage1())!!
+                )
+                try {
+                    responder.processHandshakeMessage(initiator.createHandshakeMessage3())
+                    fail("expected a small-order static key to be refused (fallback=$fallback)")
+                } catch (expected: NoiseException) {
+                    assertFalse(responder.isHandshakeComplete())
+                }
+            } finally {
+                X25519.forceFallbackForTest = false
+            }
+        }
+    }
+
+    /**
+     * msg3 is the encrypted static key (48) plus the encrypted payload (at
+     * least its 16-byte tag): flynn/noise always sends 64 bytes or more. A
+     * shorter msg3 (the old 48-byte "legacy" form, or one byte short) is
+     * refused, never completed without its payload authenticated.
+     */
+    @Test
+    fun responderRefusesAShortFinalMessage() = runTest {
+        for (size in listOf(48, 63)) {
+            val initiator = NoiseInitiatorSession(randomBytes(KEY_SIZE))
+            val responder = newResponder()
+            initiator.processHandshakeMessage2(
+                responder.processHandshakeMessage(initiator.createHandshakeMessage1())!!
+            )
+            val msg3 = initiator.createHandshakeMessage3()
+            assertEquals(MSG3_SIZE, msg3.size)
+            try {
+                responder.processHandshakeMessage(msg3.copyOf(size))
+                fail("expected a $size-byte msg3 to be refused")
+            } catch (expected: NoiseException) {
+                assertFalse("a $size-byte msg3 must not complete", responder.isHandshakeComplete())
+            }
+        }
+    }
+
     // -----------------------------------------------------------------
     // Transport phase
     // -----------------------------------------------------------------
@@ -446,12 +520,196 @@ class NoiseHandshakeTest {
 
     /**
      * `BleClient` asks for the stored static key so the phone dials out under
-     * the same identity it answers on. When encrypted storage is unreachable
-     * the contract is null — never a partially decoded key.
+     * the same identity it answers on. Null means only "no key stored"; an
+     * encrypted store that cannot be opened is a reported error, never null.
      */
     @Test
-    fun storedStaticKeyPairIsNullWhenSecureStorageIsUnreachable() = runTest {
+    fun storedStaticKeyPairFailsWhenSecureStorageIsUnreachable() = runTest {
+        NoiseSession.keyStoreOpener = { throw IllegalStateException("keystore unavailable") }
+        assertStoredStaticKeyPairRefused()
+    }
+
+    /** An empty store is the one case that reads as "no key stored". */
+    @Test
+    fun storedStaticKeyPairIsNullWhenNothingIsStored() = runTest {
+        NoiseSession.keyStoreOpener = { InMemorySharedPreferences() }
         assertNull(NoiseSession.getStoredStaticKeyPair(context))
+    }
+
+    /** A stored key that does not decode is a corrupt store, not "no key". */
+    @Test
+    fun storedStaticKeyPairFailsOnCorruptBase64() = runTest {
+        val store = InMemorySharedPreferences()
+        store.edit()
+            .putString("static_private_key", "!!not base64!!")
+            .putString("static_public_key", java.util.Base64.getEncoder().encodeToString(randomBytes(KEY_SIZE)))
+            .commit()
+        NoiseSession.keyStoreOpener = { store }
+        val error = assertStoredStaticKeyPairRefused()
+        // The decoder's own message quotes a character of the stored secret.
+        assertFalse("the error must not quote the stored secret", error.message.orEmpty().contains("character"))
+        assertNull("the decoder's exception must not be carried", error.cause)
+    }
+
+    /** One half of the pair stored is a corrupt store, not "no key". */
+    @Test
+    fun storedStaticKeyPairFailsOnAnIncompletePair() = runTest {
+        val store = InMemorySharedPreferences()
+        store.edit().putString("static_public_key", java.util.Base64.getEncoder().encodeToString(randomBytes(KEY_SIZE))).commit()
+        NoiseSession.keyStoreOpener = { store }
+        assertStoredStaticKeyPairRefused()
+    }
+
+    /** A stored key of the wrong size is refused, never handed to the handshake. */
+    @Test
+    fun storedStaticKeyPairFailsOnAWrongSizedKey() = runTest {
+        val store = InMemorySharedPreferences()
+        store.edit()
+            .putString("static_private_key", java.util.Base64.getEncoder().encodeToString(randomBytes(KEY_SIZE - 1)))
+            .putString("static_public_key", java.util.Base64.getEncoder().encodeToString(randomBytes(KEY_SIZE)))
+            .commit()
+        NoiseSession.keyStoreOpener = { store }
+        assertStoredStaticKeyPairRefused()
+    }
+
+    /** A stored pair written by a session reads back as that session's identity. */
+    @Test
+    fun storedStaticKeyPairReadsBackTheSessionKey() = runTest {
+        val store = InMemorySharedPreferences()
+        NoiseSession.keyStoreOpener = { store }
+        val session = NoiseSession().also { it.loadStaticKey(context) }
+        val stored = NoiseSession.getStoredStaticKeyPair(context)
+        assertArrayEquals(session.getStaticPublicKey(), stored!!.publicKey)
+    }
+
+    private suspend fun assertStoredStaticKeyPairRefused(): NoiseException {
+        try {
+            NoiseSession.getStoredStaticKeyPair(context)
+        } catch (expected: NoiseException) {
+            return expected
+        }
+        fail("expected the stored static key pair to be refused")
+        throw AssertionError("unreachable")
+    }
+
+    /**
+     * An encrypted store that cannot be opened (a wiped or locked keystore)
+     * fails the session closed: no fresh in-memory identity that no paired
+     * desktop knows, and no handshake.
+     */
+    @Test
+    fun loadStaticKeyFailsClosedWhenSecureStorageIsUnreachable() = runTest {
+        NoiseSession.keyStoreOpener = { throw IllegalStateException("keystore unavailable") }
+        val responder = NoiseSession()
+        try {
+            responder.loadStaticKey(context)
+            fail("expected loadStaticKey to refuse an unreachable store")
+        } catch (expected: NoiseException) {
+            // fails closed
+        }
+        assertNull("no static key may be left behind", responder.getStaticPublicKey())
+        try {
+            responder.processHandshakeMessage(NoiseInitiatorSession(randomBytes(KEY_SIZE)).createHandshakeMessage1())
+            fail("a session without a static key must not answer msg1")
+        } catch (expected: NoiseException) {
+            // refused
+        }
+    }
+
+    /** A store holding only one half of the key pair is refused, not overwritten. */
+    @Test
+    fun loadStaticKeyRefusesAnIncompleteStoredPair() = runTest {
+        val store = InMemorySharedPreferences()
+        store.edit().putString("static_public_key", java.util.Base64.getEncoder().encodeToString(randomBytes(KEY_SIZE))).commit()
+        NoiseSession.keyStoreOpener = { store }
+        try {
+            NoiseSession().loadStaticKey(context)
+            fail("expected an incomplete stored pair to be refused")
+        } catch (expected: NoiseException) {
+            // refused
+        }
+        assertNull("the incomplete pair must not be replaced", store.getString("static_private_key", null))
+    }
+
+    /** A stored pair is the identity every later session answers under. */
+    @Test
+    fun aStoredStaticKeyIsReloadedBySecondSession() = runTest {
+        val store = InMemorySharedPreferences()
+        NoiseSession.keyStoreOpener = { store }
+        val first = NoiseSession().also { it.loadStaticKey(context) }
+        val second = NoiseSession().also { it.loadStaticKey(context) }
+        assertArrayEquals(first.getStaticPublicKey(), second.getStaticPublicKey())
+    }
+
+    /**
+     * A freshly generated static key the store refuses to commit is not the
+     * device identity: the session fails closed instead of answering under a
+     * key no paired desktop knows and the next connection would replace.
+     */
+    @Test
+    fun loadStaticKeyFailsClosedWhenANewKeyCannotBeCommitted() = runTest {
+        val editor = mockk<SharedPreferences.Editor>()
+        every { editor.putString(any(), any()) } returns editor
+        every { editor.commit() } returns false
+        val store = emptyStoreWith(editor)
+        NoiseSession.keyStoreOpener = { store }
+
+        assertNewKeyRefused(editor)
+    }
+
+    /** A store whose editor throws while saving a new key fails the session closed. */
+    @Test
+    fun loadStaticKeyFailsClosedWhenSavingANewKeyThrows() = runTest {
+        val editor = mockk<SharedPreferences.Editor>()
+        every { editor.putString(any(), any()) } returns editor
+        every { editor.commit() } throws IllegalStateException("keystore write failed")
+        val store = emptyStoreWith(editor)
+        NoiseSession.keyStoreOpener = { store }
+
+        assertNewKeyRefused(editor)
+    }
+
+    /** The same, when the editor throws on the first `putString`. */
+    @Test
+    fun loadStaticKeyFailsClosedWhenPuttingANewKeyThrows() = runTest {
+        val editor = mockk<SharedPreferences.Editor>()
+        every { editor.putString(any(), any()) } throws IllegalStateException("keystore write failed")
+        val store = emptyStoreWith(editor)
+        NoiseSession.keyStoreOpener = { store }
+
+        assertNewKeyRefused(editor)
+    }
+
+    /** A store holding no key pair, whose edits go to [editor]. */
+    private fun emptyStoreWith(editor: SharedPreferences.Editor): SharedPreferences {
+        val store = mockk<SharedPreferences>()
+        every { store.getString(any(), any()) } returns null
+        every { store.edit() } returns editor
+        return store
+    }
+
+    /**
+     * Asserts that [NoiseSession.loadStaticKey] generated a key and tried to
+     * save it through [editor], then refused: it throws [NoiseException], no
+     * static key is left on the session and the session will not answer msg1.
+     */
+    private suspend fun assertNewKeyRefused(editor: SharedPreferences.Editor) {
+        val responder = NoiseSession()
+        try {
+            responder.loadStaticKey(context)
+            fail("expected loadStaticKey to refuse a key it could not save")
+        } catch (expected: NoiseException) {
+            // fails closed
+        }
+        // The failure came from saving a generated key, not from reading the store.
+        verify { editor.putString("static_private_key", any()) }
+        assertNull("no unsaved static key may be left behind", responder.getStaticPublicKey())
+        try {
+            responder.processHandshakeMessage(NoiseInitiatorSession(randomBytes(KEY_SIZE)).createHandshakeMessage1())
+            fail("a session whose static key was not saved must not answer msg1")
+        } catch (expected: NoiseException) {
+            // refused
+        }
     }
 
     // -----------------------------------------------------------------
@@ -459,9 +717,8 @@ class NoiseHandshakeTest {
     // -----------------------------------------------------------------
 
     /**
-     * Builds the responder the phone would build. `loadStaticKey` falls back to
-     * an in-memory key when encrypted storage is unavailable, which is the case
-     * off-device — see the class KDoc.
+     * Builds the responder the phone would build, its static key in the
+     * [NoiseTestKeyStore] — see the class KDoc.
      */
     private suspend fun newResponder(): NoiseSession =
         NoiseSession().also { it.loadStaticKey(context) }

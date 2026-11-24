@@ -1,9 +1,19 @@
 # User verification architecture
 
-> **Status: REFERENCE** · Last verified: 2026-11-13
-> As-built description of how the BLE service raises the biometric prompt in xKey.
+> Status: reference. Last checked against main on 2026-11-23.
+> This page describes how xKey raises the biometric prompt from a background
+> service, how prompts share the one screen, and how the session time window
+> is measured.
 
-## Inter-Process Communication
+## Overview
+
+A request that reaches a key needing user authentication can arrive while no
+xKey screen is open. The service then starts a transparent activity that shows
+`BiometricPrompt`, and every prompt in the app waits its turn in one queue.
+The `local.verifyUser` RPC and its user verification key are covered in
+[FIDO2 built-in UV](../fido2-built-in-uv/architecture.md).
+
+## Inter-process communication
 
 ### XKeyGattService to TransparentBiometricActivity
 
@@ -19,8 +29,8 @@ sequenceDiagram
     participant BIO as BiometricPrompt
 
     RH->>RH: Key requires biometric auth
-    RH->>BAL: authenticate(title, subtitle)
-    BAL->>TBA: startActivity(Intent) with PendingResult
+    RH->>BAL: requestAuthentication(title, subtitle)
+    BAL->>TBA: startActivity(Intent) when the entry is ACTIVE
     TBA->>BIO: Show biometric prompt
     BIO-->>TBA: Success / Failure
     TBA-->>BAL: Result via broadcast
@@ -46,7 +56,12 @@ order. Every prompt in the app is raised from an ACTIVE entry, and
 | `CredentialPendingIntentHelper` | none | pending intents for the system Credential Manager; the activity they open waits its turn |
 
 A turn that has not come within the queue deadline (120 s) settles expired
-and raises nothing; the caller gets `BiometricPrompt.ERROR_TIMEOUT`.
+and raises nothing; the caller gets `BiometricPrompt.ERROR_TIMEOUT`. The value
+is `PendingAuthentications.QUEUE_DEADLINE_MILLIS` in
+`auth/BiometricActivityLauncher.kt`. A launched request whose prompt has not
+come up within `ACTIVE_DEADLINE_MILLIS` (60 s) also settles with a timeout.
+That is longer than the 30 s lock-screen notification and shorter than the
+queue deadline.
 
 ## The time window and its clock
 

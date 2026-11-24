@@ -15,6 +15,8 @@
 package com.automatethethings.xkey.ui
 
 import android.content.Context
+import android.content.pm.PackageManager
+import android.os.Build
 import android.view.View
 import android.view.ViewGroup
 import android.widget.TextView
@@ -234,15 +236,16 @@ class KeyDetailAttestationReportTest {
     /**
      * A leaf with no attestation extension falls back to the device heuristic.
      *
-     * The emulator advertises no StrongBox, so the fallback is "TEE"; the
-     * optional rows are all skipped because there is no extension to read.
+     * The fallback is "StrongBox" on a device that advertises a StrongBox
+     * Keystore and "TEE" otherwise (an emulator); the optional rows are all
+     * skipped because there is no extension to read.
      */
     @Test
     fun aLeafWithoutTheExtension_fallsBackToTheDeviceSecurityLevel() {
         displayResult(chainOf(1, null), CHALLENGE.toByteArray())
 
         awaitText(scenario, context.getString(R.string.attest_verified))
-        assertRowValue(context.getString(R.string.attest_security_level), "TEE")
+        assertRowValue(context.getString(R.string.attest_security_level), deviceSecurityLevel())
         // No extension means no authorization list at all.
         awaitTextAbsent(scenario, "Key Properties")
     }
@@ -264,9 +267,23 @@ class KeyDetailAttestationReportTest {
             byteArrayOf(0x04, 0x84.toByte(), 0x00, 0x00, 0x00)
         ).forEach { extension ->
             displayResult(chainOf(1, extension), CHALLENGE.toByteArray())
-            assertRowValue(context.getString(R.string.attest_security_level), "TEE")
+            assertRowValue(context.getString(R.string.attest_security_level), deviceSecurityLevel())
         }
     }
+
+    /**
+     * The device heuristic the activity falls back to without an extension:
+     * the same StrongBox feature check [com.automatethethings.xkey.crypto.KeystoreManager]
+     * makes, so the expectation holds on an emulator and on a StrongBox phone.
+     */
+    private fun deviceSecurityLevel(): String =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P &&
+            context.packageManager.hasSystemFeature(PackageManager.FEATURE_STRONGBOX_KEYSTORE)
+        ) {
+            "StrongBox"
+        } else {
+            "TEE"
+        }
 
     /**
      * A security level the lookup table does not know is reported verbatim

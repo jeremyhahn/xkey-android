@@ -285,7 +285,7 @@ class DeviceDetailActivityUiTest {
         assertShownTextInTree(scenario, PLAIN_NAME)
 
         clickTextInTree(scenario, withString(scenario, R.string.device_unpair_button))
-        onView(withText(R.string.device_unpair_confirm)).inRoot(isDialog()).perform(click())
+        DialogFlowSupport.clickInDialog(R.string.device_unpair_confirm)
 
         assertNull(
             "Confirming the unpair dialog must remove the device",

@@ -241,14 +241,13 @@ class TrustStoreActivityUiTest {
         assertShownTextInTree(scenario, VALID_CN)
 
         clickTextInTree(scenario, VALID_CN)
-        onView(withText(R.string.trust_store_delete)).inRoot(isDialog()).perform(click())
-
         // Wait for the bottom sheet to give way to the confirmation dialog before
         // clicking its positive button, which carries the same "Delete" label.
-        onView(withText(R.string.trust_store_delete_title))
-            .inRoot(isDialog())
-            .check(matches(isDisplayed()))
-        onView(withText(R.string.trust_store_delete)).inRoot(isDialog()).perform(click())
+        DialogFlowSupport.chooseFromSheet(
+            R.string.trust_store_delete,
+            next = withText(R.string.trust_store_delete_title)
+        )
+        DialogFlowSupport.clickInDialog(R.string.trust_store_delete)
 
         assertTrue(
             "Confirming the delete dialog must remove the certificate",

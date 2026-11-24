@@ -87,6 +87,13 @@ class TcpHsmServer(
             pairingSession.handshakeTimeoutMs = value
         }
 
+    /** Test seam: the pairing session's confirm deadline for an unapproved peer. */
+    internal var confirmTimeoutMs: Long
+        get() = pairingSession.confirmTimeoutMs
+        set(value) {
+            pairingSession.confirmTimeoutMs = value
+        }
+
     /** Test seam: runs when a send starts, before it waits on the send lock. */
     internal var beforeSendLockForTest: (suspend () -> Unit)?
         get() = pairingSession.beforeSendLockForTest
