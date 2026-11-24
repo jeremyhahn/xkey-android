@@ -496,7 +496,11 @@ public class BiometricSettingsRepository internal constructor(
             authMode = authModeName?.let { name ->
                 runCatching { BiometricAuthMode.valueOf(name) }.getOrNull()
             } ?: BiometricAuthMode.PER_OPERATION,
-            timeWindowSeconds = timeWindowSeconds ?: AuthTimeWindow.MINUTES_2.seconds,
+            // A stored window outside the offered range is clamped into it.
+            timeWindowSeconds = timeWindowSeconds?.coerceIn(
+                AuthTimeWindow.SECONDS_30.seconds,
+                AuthTimeWindow.MINUTES_10.seconds
+            ) ?: AuthTimeWindow.MINUTES_2.seconds,
             attestationBiometricPolicy = attestationBiometricPolicyName?.let { name ->
                 runCatching { AttestationBiometricPolicy.valueOf(name) }.getOrNull()
             } ?: AttestationBiometricPolicy.ALWAYS,
