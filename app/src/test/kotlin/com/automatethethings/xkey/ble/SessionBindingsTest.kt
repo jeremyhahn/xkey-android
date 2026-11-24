@@ -268,6 +268,44 @@ class SessionBindingsTest {
         assertSameBinding(responderBefore, responder.sessionBinding()!!)
     }
 
+    /**
+     * The responder's binding is built from copies of its keys; the initiator's
+     * must be too. A binding that shares the session's own arrays lets a caller
+     * that edits it rewrite the keys the session authenticated.
+     */
+    @Test
+    fun initiatorBindingDoesNotAliasTheSessionKeys() = runTest {
+        val initiator = NoiseInitiatorSession(randomBytes(KEY_SIZE))
+        val responder = newResponder()
+        handshake(initiator, responder)
+        val localKey = initiator.getLocalStaticPublicKey().copyOf()
+        val remoteKey = initiator.getRemoteStaticKey()!!.copyOf()
+
+        val binding = initiator.sessionBinding()!!
+        binding.initiatorStaticPublicKey.fill(0)
+        binding.responderStaticPublicKey.fill(0)
+
+        assertArrayEquals("the initiator's own key", localKey, initiator.getLocalStaticPublicKey())
+        assertArrayEquals("the authenticated responder key", remoteKey, initiator.getRemoteStaticKey())
+        assertArrayEquals(localKey, initiator.sessionBinding()!!.initiatorStaticPublicKey)
+    }
+
+    @Test
+    fun responderBindingDoesNotAliasTheSessionKeys() = runTest {
+        val initiator = NoiseInitiatorSession(randomBytes(KEY_SIZE))
+        val responder = newResponder()
+        handshake(initiator, responder)
+        val localKey = responder.getStaticPublicKey()!!.copyOf()
+        val remoteKey = responder.getRemoteStaticKey()!!.copyOf()
+
+        val binding = responder.sessionBinding()!!
+        binding.initiatorStaticPublicKey.fill(0)
+        binding.responderStaticPublicKey.fill(0)
+
+        assertArrayEquals(localKey, responder.getStaticPublicKey())
+        assertArrayEquals(remoteKey, responder.getRemoteStaticKey())
+    }
+
     // -----------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------
