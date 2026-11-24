@@ -3767,7 +3767,7 @@ class RequestHandler(
             Response.success(request.id, result)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to list OATH credentials", e)
-            Response.error(request.id, ErrorCodes.INTERNAL_ERROR, "Failed to list OATH credentials: ${e.message}")
+            Response.error(request.id, ErrorCodes.INTERNAL_ERROR, "Failed to list OATH credentials")
         }
     }
 
@@ -3923,7 +3923,7 @@ class RequestHandler(
             Response.success(request.id, result)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to remove OATH credential", e)
-            Response.error(request.id, ErrorCodes.INTERNAL_ERROR, "Failed to remove: ${e.message}")
+            Response.error(request.id, ErrorCodes.INTERNAL_ERROR, "Failed to remove credential")
         }
     }
 
