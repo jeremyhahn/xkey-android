@@ -789,7 +789,8 @@ public class BootstrapSettingsRepository internal constructor(
      */
     private fun mapPreferencesToSettings(preferences: Preferences): BootstrapSettingsData {
         val methodOrderStr = preferences[KEY_METHOD_ORDER] ?: ""
-        val methodOrder = BootstrapMethod.fromCommaSeparated(methodOrderStr)
+        // A method stored twice is tried once, at its first position.
+        val methodOrder = BootstrapMethod.fromCommaSeparated(methodOrderStr).distinct()
 
         return BootstrapSettingsData(
             // Auto-bootstrap
