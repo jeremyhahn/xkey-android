@@ -399,6 +399,38 @@ class OathHandlerWireTest {
         assertTrue(inserted.isEmpty())
     }
 
+
+    @Test
+    fun `oathAdd refuses an invalid credential with INVALID_PARAMS and stores nothing`() = runTest {
+        val invalid = mapOf(
+            "unknown type" to credential().put("type", "motp"),
+            "blank secret" to credential(secret = "   "),
+            "secret shorter than 10 bytes" to credential(secret = "JBSWY3DP"),
+            "invalid base32" to credential(secret = "JBSWY3DPEHPK3PX1"),
+            "unsupported algorithm" to credential().put("algorithm", "MD5"),
+            "digits 5" to credential().put("digits", 5),
+            "digits 9" to credential().put("digits", 9),
+            "TOTP period 0" to credential().put("type", "totp").put("period", 0)
+        )
+
+        for ((case, credential) in invalid) {
+            val response = add(credential)
+            assertEquals("$case: $response", ErrorCodes.INVALID_PARAMS, errorCode(response))
+            assertFalse("$case: $response", errorMessage(response).contains(credential.getString("secret").trim().ifEmpty { "\u0000" }))
+        }
+        assertTrue("nothing stored: $inserted", inserted.isEmpty())
+        assertTrue("nothing audited: $audit", audit.isEmpty())
+    }
+
+    @Test
+    fun `oathAdd audits the id the credential was stored under`() = runTest {
+        val id = result(add(credential())).getString("credential_id")
+
+        val entry = audit.single { it.operationType == AuditOperationType.OATH_CREDENTIAL_CREATED }
+        assertEquals(id, entry.keyId)
+        assertEquals("Acme:alice", entry.keyLabel)
+    }
+
     // -------------------------------------------------------------------------
     // local.oathRemove
     // -------------------------------------------------------------------------
