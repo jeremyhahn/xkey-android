@@ -218,7 +218,7 @@ class PasswordStoreMethodsTest {
                 update(salt)
                 digest(passphrase.toByteArray(Charsets.UTF_8))
             }
-        })
+        }, clock = com.automatethethings.xkey.pin.FakeLockoutClock())
         repository = PasswordRepository(dao, cipher)
         methods = PasswordStoreMethods(repository, vault, clock = { createdAt })
     }
