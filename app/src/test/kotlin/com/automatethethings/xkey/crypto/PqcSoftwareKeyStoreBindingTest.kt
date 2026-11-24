@@ -136,6 +136,20 @@ class PqcSoftwareKeyStoreBindingTest {
         assertTrue("the private key's own public key is checked", body.contains("derivedSpki.contentEquals(record.spki)"))
     }
 
+    @Test
+    fun `delete writes a generation past the removed record and generate writes it after the record`() {
+        val root = listOf(File("src/main/kotlin"), File("app/src/main/kotlin")).first { it.isDirectory }
+        val text = File(root, "com/automatethethings/xkey/crypto/PqcSoftwareKeyStore.kt").readText()
+        val start = text.indexOf("fun delete(alias: String)")
+        assertTrue("delete exists", start >= 0)
+        val body = text.substring(start, text.indexOf("\n    }\n", start))
+        val removed = body.indexOf("removeFile(file)")
+        val advanced = body.indexOf("write(generationFileFor(alias)")
+        assertTrue("delete removes the record", removed >= 0)
+        assertTrue("delete advances the generation after removing the record", advanced > removed)
+        assertTrue("the generation moves past the stored one", body.contains("storedGeneration(alias)") && body.contains("+ 1"))
+    }
+
     private fun assertRefused(alias: String) {
         assertNull("publicKeyDer", store.publicKeyDer(alias))
         assertThrows(GeneralSecurityException::class.java) { store.authDurationSeconds(alias) }
