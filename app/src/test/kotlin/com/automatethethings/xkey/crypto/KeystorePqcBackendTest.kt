@@ -172,7 +172,8 @@ class KeystorePqcBackendTest {
         backend.awaitProbeBlocking(5_000)
         backend.startProbe(scope)
         backend.awaitProbeBlocking(5_000)
-        assertEquals(MlDsaParameterSet.entries.size, calls.get())
+        // One probe per set in the TEE and one in StrongBox.
+        assertEquals(2 * MlDsaParameterSet.entries.size, calls.get())
     }
 
     @Test

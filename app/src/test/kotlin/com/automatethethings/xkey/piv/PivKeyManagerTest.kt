@@ -98,10 +98,13 @@ class PivKeyManagerTest {
         every { AuditLogger.logKeyDeleted(any(), any(), any()) } returns Unit
         every { AuditLogger.logKeyCreated(any(), any(), any(), any()) } returns Unit
         every { AuditLogger.logPivCertImported(any(), any()) } returns Unit
+        // No shared software ML-DSA store from another test class.
+        PqcSoftwareKeyStore.clearSharedForTest()
     }
 
     @After
     fun tearDown() {
+        PqcSoftwareKeyStore.clearSharedForTest()
         unmockkAll()
     }
 
@@ -457,13 +460,14 @@ class PivKeyManagerTest {
         val alias = PivSlot.AUTHENTICATION.keystoreAlias
         store.generate(alias, MlDsaParameterSet.ML_DSA_44)
         val usageGate = CompletableDeferred<Unit>()
-        coEvery { pivSlotDao.recordUsage("9A") } coAnswers { usageGate.await() }
+        coEvery { pivSlotDao.recordUsage(any(), any()) } coAnswers { usageGate.await() }
 
         val sign = async {
             PivKeyManager(pivSlotDao, pqcStore = store)
                 .sign(PivSlot.AUTHENTICATION, byteArrayOf(1), PivAlgorithm.ML_DSA_44)
         }
         runCurrent()
+        assertFalse("sign ended before it recorded its use: ${runCatching { sign.getCompleted() }}", sign.isCompleted)
         val generate = launch {
             PivKeyManager(pivSlotDao, pqcStore = store)
                 .generateKey(PivSlot.AUTHENTICATION, PivAlgorithm.ML_DSA_87, PqcBacking.SOFTWARE)
