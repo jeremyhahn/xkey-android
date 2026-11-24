@@ -19,7 +19,11 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.os.Looper
+import android.os.SystemClock
 import androidx.test.core.app.ApplicationProvider
+import io.mockk.every
+import io.mockk.mockkStatic
+import io.mockk.unmockkAll
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -52,6 +56,7 @@ class SensitiveClipboardTest {
 
     @After
     fun tearDown() {
+        unmockkAll()
         readable()
     }
 
@@ -109,6 +114,49 @@ class SensitiveClipboardTest {
         SensitiveClipboard.retryPendingClears(clipboard)
 
         assertEquals("hunter2", clipText())
+    }
+
+    @Test
+    fun `a copy left asleep past its time is cleared on the next retry`() {
+        val asleep = sleepingClock()
+        unreadable()
+        SensitiveClipboard.copy(clipboard, "secret", "hunter2")
+
+        // The looper is not idled: no awake time passes, only time asleep.
+        asleep.ms = 60_000
+        readable()
+        SensitiveClipboard.retryPendingClears(clipboard)
+
+        assertTrue("clipboard still holds the secret", clipText().isNullOrEmpty())
+    }
+
+    @Test
+    fun `a copy asleep for less than its time is kept on the next retry`() {
+        val asleep = sleepingClock()
+        unreadable()
+        SensitiveClipboard.copy(clipboard, "secret", "hunter2")
+
+        asleep.ms = 10_000
+        readable()
+        SensitiveClipboard.retryPendingClears(clipboard)
+
+        assertEquals("hunter2", clipText())
+    }
+
+    /** Time the device spent asleep: counted by elapsedRealtime, not by uptime. */
+    private class Asleep(var ms: Long = 0)
+
+    /**
+     * Stubs only the sleep-inclusive clock to run [Asleep.ms] ahead of the
+     * real one. Uptime is left alone: the paused looper runs on it.
+     */
+    private fun sleepingClock(): Asleep {
+        val baseNanos = SystemClock.elapsedRealtimeNanos()
+        val asleep = Asleep()
+        mockkStatic(SystemClock::class)
+        every { SystemClock.elapsedRealtimeNanos() } answers { baseNanos + asleep.ms * 1_000_000 }
+        every { SystemClock.elapsedRealtime() } answers { baseNanos / 1_000_000 + asleep.ms }
+        return asleep
     }
 
     private fun unreadable() {

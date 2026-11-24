@@ -53,6 +53,12 @@ class OathChokePointsTest {
     }
 
     @Test
+    fun deadlinesUseTheSleepInclusiveClock() {
+        val found = occurrences(Regex("""uptimeMillis\(|System\.nanoTime\(""")).filterKeys { it.startsWith("ui/") }
+        assertTrue("a ui deadline reads a clock that stops in deep sleep: $found", found.isEmpty())
+    }
+
+    @Test
     fun codesAreComputedOnlyAtTheirChokePoints() {
         val found = occurrences(Regex("""OathEngine\.generate"""))
         val allowed = setOf("oath/OathEngine.kt", "oath/OathCurrentCode.kt", "oath/OathRepository.kt")
