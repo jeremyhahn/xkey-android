@@ -229,6 +229,12 @@ class StreamPairingSession(
         /** The handshake did not complete by the deadline, which ended the connection. */
         @Volatile var handshakeExpired = false
 
+        /** The peer has sent its one pairing.confirm; see [beginConfirm]. */
+        @Volatile var confirmAttempted = false
+
+        /** The handshake was not followed by pairing.confirm in time, which ended the connection. */
+        @Volatile var confirmExpired = false
+
         /** The request the message loop is waiting on, if any. */
         @Volatile var request: Job? = null
 
@@ -350,6 +356,30 @@ class StreamPairingSession(
             end()
         }
 
+        /**
+         * Ends a connection that is still unapproved and has sent no
+         * pairing.confirm by the confirm deadline. Under [state], so a confirm
+         * that arrived first is left to run: its prompt is the user's.
+         */
+        fun expireConfirm() {
+            synchronized(state) {
+                if (confirmed || confirmAttempted || ended) return
+                confirmExpired = true
+                ended = true
+            }
+            end()
+        }
+
+        /**
+         * Records that the peer's pairing.confirm has arrived, which stops the
+         * confirm deadline, unless the deadline ended the connection first.
+         */
+        fun beginConfirm(): Boolean = synchronized(state) {
+            if (ended) return false
+            confirmAttempted = true
+            true
+        }
+
         /** Marks the connection ended, stops its request and closes its streams. */
         fun end() {
             synchronized(state) { ended = true }
@@ -430,7 +460,21 @@ class StreamPairingSession(
             Log.i(TAG, "[$transportLabel] Noise handshake complete")
             onConnected()
 
-            messageLoop(connection, isActive)
+            // A peer the user has not approved must ask for approval in
+            // time, or it would hold a one-at-a-time transport by idling. A
+            // confirmed peer keeps no deadline.
+            val confirmDeadline = if (connection.confirmed) null else teardownScope.launch {
+                delay(confirmTimeoutMs)
+                connection.expireConfirm()
+                if (connection.confirmExpired) {
+                    Log.w(TAG, "[$transportLabel] no pairing.confirm within $confirmTimeoutMs ms of the handshake; closing the connection")
+                }
+            }
+            try {
+                messageLoop(connection, isActive)
+            } finally {
+                confirmDeadline?.cancel()
+            }
         } finally {
             withContext(NonCancellable) {
                 PairedDeviceRepository.removeRemovalListener(connection)
@@ -686,6 +730,7 @@ class StreamPairingSession(
         // A session without a paired-device store cannot approve anyone, so it
         // is gated like any other: nothing it serves runs unpaired.
         if (connection?.confirmed != true) {
+            if (connection != null && isPairingConfirm(plaintext) && !connection.beginConfirm()) return null
             handlePairingConfirm(plaintext, connection)?.let { return it }
             // A request that outlived its connection answers nothing.
             if (connection != null && !connection.isCurrent) return null
@@ -779,6 +824,13 @@ class StreamPairingSession(
         connection.confirmed = true
         requestHandler.setConnectedDevicePublicKeyHex(peerKeyHex, owner = connection)
         true
+    }
+
+    /** Whether [plaintext] is a pairing.confirm request, well formed or not. */
+    private fun isPairingConfirm(plaintext: ByteArray): Boolean = try {
+        JSONObject(String(plaintext, Charsets.UTF_8)).getStringOrNull("method") == MethodNames.PAIRING_CONFIRM
+    } catch (e: JSONException) {
+        false
     }
 
     /**
