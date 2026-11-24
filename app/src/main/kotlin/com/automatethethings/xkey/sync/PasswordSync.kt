@@ -8,14 +8,15 @@ package com.automatethethings.xkey.sync
 
 import android.util.Log
 import com.automatethethings.xkey.crypto.SyncCodec
-import com.automatethethings.xkey.password.PasswordEntity
 import com.automatethethings.xkey.password.PasswordEntryTooLargeException
 import com.automatethethings.xkey.password.PasswordNotNewerException
+import com.automatethethings.xkey.password.PasswordNotSyncableException
 import com.automatethethings.xkey.password.PasswordPatch
 import com.automatethethings.xkey.password.PasswordRecord
 import com.automatethethings.xkey.password.PasswordRepository
 import com.automatethethings.xkey.password.PasswordUpdateConflictException
 import com.automatethethings.xkey.password.PasswordVaultFactorStore
+import com.automatethethings.xkey.password.hasSyncablePolicy
 import com.automatethethings.xkey.password.requirePasswordStoreUnlocked
 import org.json.JSONArray
 import org.json.JSONObject
@@ -38,12 +39,14 @@ class PasswordSync(
      * What [mergeWithDetail] did: the [counts] [merge] answers with, and how
      * many of the skipped entries were held back because the phone deleted
      * them ([keptDeleted]), and how many incoming copies were dated beyond
-     * [MAX_CLOCK_SKEW_MS] ahead of the phone's clock ([clamped]).
+     * [MAX_CLOCK_SKEW_MS] ahead of the phone's clock ([clamped]), and how
+     * many skipped entries have a policy sync does not carry ([notSyncable]).
      */
     data class MergeResult(
         val counts: SyncEngine.ItemCounts,
         val keptDeleted: Int = 0,
-        val clamped: Int = 0
+        val clamped: Int = 0,
+        val notSyncable: Int = 0
     )
 
     /**
@@ -93,15 +96,18 @@ class PasswordSync(
      * keeps changing locally while it is merged
      * ([com.automatethethings.xkey.password.PasswordUpdateConflictException]).
      *
-     * `SyncPassword` carries no tenant, sharing or expiry, so an existing
-     * entry is patched in place and keeps its own; a new one is added as a
+     * `SyncPassword` carries no tenant, sharing or expiry, so a sync writes
+     * only the entries [gather] would send: an existing entry in the default
+     * tenant, personal and with no expiry is patched in place; an entry of
+     * another tenant, a shared one or an expiring one is left unchanged and
+     * counted as skipped ([MergeResult.notSyncable]). A new one is added as a
      * personal entry, with no expiry, in the default tenant.
      *
      * A sync never writes an entry's tenant, sharing or expiry over the ones
      * it holds: an entry is added only while no entry has its id
      * ([PasswordRepository.insertIfAbsent]), and one added by another writer
-     * between the check and the add, perhaps with its expiry set since, is
-     * patched in place instead.
+     * between the check and the add is patched in place instead, or, if it
+     * has been given a policy sync does not carry since, left unchanged.
      *
      * An existing entry is overwritten last-writer-wins: only by an incoming
      * copy whose `updated_at` is strictly newer than the stored one. An older
@@ -134,6 +140,7 @@ class PasswordSync(
         repository.pruneDeletions(now)
         var keptDeleted = 0
         var clamped = 0
+        var notSyncable = 0
         var added = 0
         var updated = 0
         var skipped = 0
@@ -165,10 +172,10 @@ class PasswordSync(
             // A clamped copy's real age is unknown, so it overwrites no existing entry (0 refuses every one).
             val olderThan = if (isClamped) 0L else record.updatedAt
             val existed = try {
-                // In any tenant: an id names one entry, wherever it lives.
+                // In any tenant: an id names one entry, wherever it lives, but only one gather() would send is written.
                 // Last writer wins: an existing entry is patched only while it is older than the incoming copy.
                 when {
-                    repository.updateFields(id, patch, onlyIfOlderThan = olderThan) -> true
+                    repository.updateFields(id, patch, onlyIfOlderThan = olderThan, onlyIfSyncable = true) -> true
                     // Deleted on the phone, and this copy is no newer than the delete: it stays deleted.
                     isDeletedSince(id, record.updatedAt, isClamped) -> {
                         keptDeleted++
@@ -178,7 +185,7 @@ class PasswordSync(
                     // Added only while still absent: never replaces an entry another writer added since.
                     repository.insertIfAbsent(record) -> false
                     // Added meanwhile: patched in place like any existing entry, keeping the policy it was given.
-                    repository.updateFields(id, patch, onlyIfOlderThan = olderThan) -> true
+                    repository.updateFields(id, patch, onlyIfOlderThan = olderThan, onlyIfSyncable = true) -> true
                     // Added and deleted again between the two: it keeps moving, so the next sync retries.
                     else -> throw PasswordUpdateConflictException()
                 }
@@ -190,6 +197,11 @@ class PasswordSync(
                 // The local entry is the same age or newer (or the incoming one has no updated_at): it is kept.
                 skipped++
                 continue
+            } catch (e: PasswordNotSyncableException) {
+                // Another tenant's, shared or expiring: sync carries none of these, so it is left as it is.
+                notSyncable++
+                skipped++
+                continue
             } catch (e: PasswordUpdateConflictException) {
                 // Changed locally on every attempt: the local edit is kept, and the next sync retries.
                 skipped++
@@ -197,7 +209,7 @@ class PasswordSync(
             }
             if (existed) updated++ else added++
         }
-        return MergeResult(SyncEngine.ItemCounts(added, updated, skipped), keptDeleted = keptDeleted, clamped = clamped)
+        return MergeResult(SyncEngine.ItemCounts(added, updated, skipped), keptDeleted = keptDeleted, clamped = clamped, notSyncable = notSyncable)
     }
 
     /**
@@ -229,8 +241,7 @@ class PasswordSync(
     )
 
     /** Whether [merge] would add this entry, from `SyncPassword`, with the policy it has. */
-    private fun PasswordRecord.hasDefaultPolicy() =
-        tenantId == PasswordEntity.DEFAULT_TENANT && !shared && expiresAt.isNullOrEmpty()
+    private fun PasswordRecord.hasDefaultPolicy() = hasSyncablePolicy(tenantId, shared, expiresAt)
 
     companion object {
         private const val TAG = "PasswordSync"

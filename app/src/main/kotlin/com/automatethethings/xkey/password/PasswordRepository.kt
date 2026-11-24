@@ -114,6 +114,23 @@ class PasswordNotNewerException :
     Exception("the stored entry is not older than the incoming one; nothing was written")
 
 /**
+ * An update refused, nothing written, because the stored entry has a policy
+ * sync does not carry ([PasswordRepository.updateFields] with
+ * `onlyIfSyncable`): another tenant, shared, or an expiry. The message names
+ * no content.
+ */
+class PasswordNotSyncableException :
+    Exception("the stored entry is not one sync carries; nothing was written")
+
+/**
+ * Whether an entry with this policy is one password sync carries: in the
+ * default tenant, personal, with no expiry. `SyncPassword` has no field for
+ * any of them, so sync sends only such entries and writes only such entries.
+ */
+internal fun hasSyncablePolicy(tenantId: String, shared: Boolean, expiresAt: String?): Boolean =
+    tenantId == PasswordEntity.DEFAULT_TENANT && !shared && expiresAt.isNullOrEmpty()
+
+/**
  * Repository for the encrypted password store. Encrypts each password value with
  * the Android Keystore via [KeystoreAeadCipher] before persisting through
  * [PasswordDao], and decrypts on read.
@@ -292,17 +309,26 @@ class PasswordRepository(
      * newer local write between the reads still wins. An entry the same age
      * or newer is refused with [PasswordNotNewerException], nothing written;
      * so is any existing entry when [onlyIfOlderThan] is 0 (no timestamp).
+     *
+     * With [onlyIfSyncable] (a sync's write), the patch is applied only to an
+     * entry sync carries ([hasSyncablePolicy]), checked on each read like
+     * [onlyIfOlderThan]; any other is refused with
+     * [PasswordNotSyncableException], nothing written.
      */
     suspend fun updateFields(
         passwordId: String,
         patch: PasswordPatch,
         tenantId: String? = null,
-        onlyIfOlderThan: Long? = null
+        onlyIfOlderThan: Long? = null,
+        onlyIfSyncable: Boolean = false
     ): Boolean {
         val updatedAt = if (patch.updatedAt > 0) patch.updatedAt else System.currentTimeMillis()
         var newCiphertext: ByteArray? = null
         repeat(UPDATE_ATTEMPTS) {
             val existing = find(passwordId, tenantId) ?: return false
+            if (onlyIfSyncable && !hasSyncablePolicy(existing.tenantId, existing.shared, existing.expiresAt)) {
+                throw PasswordNotSyncableException()
+            }
             if (onlyIfOlderThan != null && existing.updatedAt >= onlyIfOlderThan) {
                 throw PasswordNotNewerException()
             }
