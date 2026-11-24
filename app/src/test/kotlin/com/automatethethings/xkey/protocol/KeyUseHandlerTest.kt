@@ -455,6 +455,20 @@ class KeyUseHandlerTest {
     }
 
     @Test
+    fun `a software key of the wrong type is refused as a keystore key is`() = runTest {
+        // An HMAC key's material is no AES key, and an AES key's no MAC key:
+        // refused with the code a Keystore key of the wrong type answers.
+        listOf(
+            MethodNames.LOCAL_SYMMETRIC_ENCRYPT to """{"keyId":"$SW_HMAC_256","plaintext":"$data"}""",
+            MethodNames.LOCAL_SYMMETRIC_DECRYPT to """{"keyId":"$SW_HMAC_256","ciphertext":"${b64(swCiphertext(unb64(data)))}"}""",
+            MethodNames.LOCAL_HMAC to """{"keyId":"$SW_AES","data":"$data"}"""
+        ).forEach { (method, params) ->
+            assertCleanError(method, ErrorCodes.KEY_NOT_FOUND, call(method, params))
+        }
+        assertTrue("no key-use entry: $inserted", inserted.none { it.success && it.keyId != null })
+    }
+
+    @Test
     fun `a missing field answers INVALID_PARAMS for each method`() = runTest {
         allRequests().forEach { (method, params) ->
             JSONObject(params).keys().asSequence().toList()
