@@ -33,6 +33,7 @@ import kotlinx.coroutines.test.runTest
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.After
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Before
@@ -112,6 +113,7 @@ class SyncEngineMergeOathTest {
         every { KeyStore.getInstance("AndroidKeyStore") } returns mockk(relaxed = true)
         mockkConstructor(OathSecretManager::class)
         every { anyConstructed<OathSecretManager>().encryptSecret(any()) } answers { firstArg() }
+        every { anyConstructed<OathSecretManager>().decryptSecret(any()) } answers { firstArg() }
 
         mockkStatic(Uri::class)
         every { Uri.parse(any()) } answers { jvmUri(firstArg()) }
@@ -227,6 +229,38 @@ class SyncEngineMergeOathTest {
         val counts = engine.mergeOath(payload)
 
         assertNull("a deleted id stays deleted", rows["gone"])
+        assertEquals(SyncEngine.ItemCounts(added = 0, updated = 0, skipped = 1), counts)
+    }
+
+    @Test
+    fun `a stale copy with another secret never overwrites the stored secret`() = runTest {
+        engine.mergeOath(JSONArray().put(credential("x", "Acme", "alice", secret = "GEZDGNBVGY3TQOJQ")))
+        val rekeyed = rows.getValue("x").secretEncrypted
+
+        val counts = engine.mergeOath(JSONArray().put(credential("x", "Acme", "alice", secret = "JBSWY3DPEHPK3PXP")))
+
+        assertArrayEquals("the stored secret is kept", rekeyed, rows.getValue("x").secretEncrypted)
+        assertEquals(SyncEngine.ItemCounts(added = 0, updated = 0, skipped = 1), counts)
+    }
+
+    @Test
+    fun `a copy with the same secret applies its label`() = runTest {
+        engine.mergeOath(JSONArray().put(credential("y", "Acme", "alice")))
+
+        val counts = engine.mergeOath(JSONArray().put(credential("y", "Acme Corp", "alice@example.com")))
+
+        assertEquals(SyncEngine.ItemCounts(added = 0, updated = 1, skipped = 0), counts)
+        assertEquals("Acme Corp", rows.getValue("y").issuer)
+        assertEquals("alice@example.com", rows.getValue("y").accountName)
+    }
+
+    @Test
+    fun `a copy with another digit count never overwrites the stored parameters`() = runTest {
+        engine.mergeOath(JSONArray().put(credential("z", "Acme", "alice")))
+
+        val counts = engine.mergeOath(JSONArray().put(credential("z", "Acme", "alice").put("digits", 8)))
+
+        assertEquals(6, rows.getValue("z").digits)
         assertEquals(SyncEngine.ItemCounts(added = 0, updated = 0, skipped = 1), counts)
     }
 
