@@ -97,7 +97,10 @@ class KeyUseHandlerTest {
         SW_AES to Triple("AES-256-GCM", "symmetric", aesMaterial),
         SW_HMAC_256 to Triple("HMAC-SHA256", "symmetric", RFC4231_KEY),
         SW_HMAC_384 to Triple("HMAC-SHA384", "symmetric", RFC4231_KEY),
-        SW_HMAC_512 to Triple("HMAC-SHA512", "symmetric", RFC4231_KEY)
+        SW_HMAC_512 to Triple("HMAC-SHA512", "symmetric", RFC4231_KEY),
+        SW_ODD_AES to Triple("AES-XTS", "symmetric", aesMaterial),
+        SW_ODD_HMAC to Triple("HMAC-SHA224", "symmetric", RFC4231_KEY),
+        SW_ODD_NAME to Triple("XYZ", "symmetric", aesMaterial)
     )
 
     private val hwCiphertext = ByteArray(44) { 0x41 }
@@ -676,6 +679,28 @@ class KeyUseHandlerTest {
     }
 
     @Test
+    fun `a software key with an unrecognised algorithm is refused for AES and HMAC`() = runTest {
+        val ciphertext = b64(swCiphertext(unb64(data)))
+        fun aes(keyId: String) = listOf(
+            MethodNames.LOCAL_SYMMETRIC_ENCRYPT to """{"keyId":"$keyId","plaintext":"$data"}""",
+            MethodNames.LOCAL_SYMMETRIC_DECRYPT to """{"keyId":"$keyId","ciphertext":"$ciphertext"}"""
+        )
+        fun hmac(keyId: String) = listOf(MethodNames.LOCAL_HMAC to """{"keyId":"$keyId","data":"$data"}""")
+        val requests = aes(SW_ODD_AES) + hmac(SW_ODD_HMAC) + aes(SW_ODD_NAME) + hmac(SW_ODD_NAME)
+        requests.forEach { (method, params) ->
+            handedMaterial.clear()
+            assertCleanError("$method $params", ErrorCodes.INVALID_PARAMS, call(method, params))
+            handedMaterial.forEach { material ->
+                assertTrue("$method $params: the key material is zeroed", material.all { it == 0.toByte() })
+            }
+        }
+        io.mockk.coVerify(exactly = 0) { keystore.symmetricEncrypt(any(), any(), any()) }
+        io.mockk.coVerify(exactly = 0) { keystore.symmetricDecrypt(any(), any(), any()) }
+        io.mockk.coVerify(exactly = 0) { keystore.computeHMACWithAlgorithm(any(), any()) }
+        assertTrue("no key-use entry: $inserted", inserted.none { it.success && it.keyId != null })
+    }
+
+    @Test
     fun `getPublicKey writes one entry naming the key, the format and the desktop`() = runTest {
         listOf("der", "pem", "ssh", "cose").forEach { format ->
             assertOneKeyUseEntry(MethodNames.LOCAL_GET_PUBLIC_KEY, """{"keyId":"$HW_EC","format":"$format"}""")
@@ -831,6 +856,9 @@ class KeyUseHandlerTest {
         const val SW_HMAC_256 = "sw-hmac-256"
         const val SW_HMAC_384 = "sw-hmac-384"
         const val SW_HMAC_512 = "sw-hmac-512"
+        const val SW_ODD_AES = "sw-odd-aes"
+        const val SW_ODD_HMAC = "sw-odd-hmac"
+        const val SW_ODD_NAME = "sw-odd-name"
         const val HW_AES = "hw-aes"
         const val HW_HMAC = "hw-hmac"
         const val HW_EC = "hw-ec"
