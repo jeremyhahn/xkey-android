@@ -1890,12 +1890,11 @@ class RequestHandler(
             ?: throw ProtocolException("Missing parameters", errorCode = ErrorCodes.INVALID_PARAMS)
 
         val decryptParams = LocalDecryptParams.fromJson(params)
+        val ciphertext = decodeBase64Strict("ciphertext", decryptParams.ciphertext)
         // The requesting desktop, captured before anything can suspend.
         val caller = auditCaller()
         val startTime = System.currentTimeMillis()
-        val decrypted = keystoreManager.rsaDecryptWithAlgorithm(
-            decryptParams.keyId, decryptParams.getCiphertextBytes()
-        )
+        val decrypted = keystoreManager.rsaDecryptWithAlgorithm(decryptParams.keyId, ciphertext)
         val durationMs = System.currentTimeMillis() - startTime
 
         keyDao.recordUsage(decryptParams.keyId)
@@ -1930,14 +1929,14 @@ class RequestHandler(
             ?: throw ProtocolException("Missing parameters", errorCode = ErrorCodes.INVALID_PARAMS)
 
         val symParams = LocalSymmetricParams.fromJson(params)
+        val plaintext = decodeBase64Strict("plaintext", symParams.data)
+        val aad = symParams.aad?.let { decodeBase64Strict("aad", it) }
         // The requesting desktop, captured before anything can suspend.
         val caller = auditCaller()
 
         // Software-backed keys are operated on outside the Keystore.
         com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(symParams.keyId)?.let { sw ->
-            val ct = com.automatethethings.xkey.crypto.SoftwareKeyOps.aesGcmEncrypt(
-                sw.material, symParams.getDataBytes(), symParams.getAadBytes()
-            )
+            val ct = com.automatethethings.xkey.crypto.SoftwareKeyOps.aesGcmEncrypt(sw.material, plaintext, aad)
             keyDao.recordUsage(symParams.keyId)
             return Response.success(
                 request.id,
@@ -1946,9 +1945,7 @@ class RequestHandler(
         }
 
         val startTime = System.currentTimeMillis()
-        val ciphertext = keystoreManager.symmetricEncrypt(
-            symParams.keyId, symParams.getDataBytes(), symParams.getAadBytes()
-        )
+        val ciphertext = keystoreManager.symmetricEncrypt(symParams.keyId, plaintext, aad)
         val durationMs = System.currentTimeMillis() - startTime
 
         keyDao.recordUsage(symParams.keyId)
@@ -1984,14 +1981,14 @@ class RequestHandler(
             ?: throw ProtocolException("Missing parameters", errorCode = ErrorCodes.INVALID_PARAMS)
 
         val symParams = LocalSymmetricParams.fromJson(params)
+        val ciphertext = decodeBase64Strict("ciphertext", symParams.data)
+        val aad = symParams.aad?.let { decodeBase64Strict("aad", it) }
         // The requesting desktop, captured before anything can suspend.
         val caller = auditCaller()
 
         // Software-backed keys are operated on outside the Keystore.
         com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(symParams.keyId)?.let { sw ->
-            val pt = com.automatethethings.xkey.crypto.SoftwareKeyOps.aesGcmDecrypt(
-                sw.material, symParams.getDataBytes(), symParams.getAadBytes()
-            )
+            val pt = com.automatethethings.xkey.crypto.SoftwareKeyOps.aesGcmDecrypt(sw.material, ciphertext, aad)
             keyDao.recordUsage(symParams.keyId)
             return Response.success(
                 request.id,
@@ -2000,9 +1997,7 @@ class RequestHandler(
         }
 
         val startTime = System.currentTimeMillis()
-        val plaintext = keystoreManager.symmetricDecrypt(
-            symParams.keyId, symParams.getDataBytes(), symParams.getAadBytes()
-        )
+        val plaintext = keystoreManager.symmetricDecrypt(symParams.keyId, ciphertext, aad)
         val durationMs = System.currentTimeMillis() - startTime
 
         keyDao.recordUsage(symParams.keyId)
@@ -2117,13 +2112,14 @@ class RequestHandler(
             ?: throw ProtocolException("Missing parameters", errorCode = ErrorCodes.INVALID_PARAMS)
 
         val hmacParams = LocalHMACParams.fromJson(params)
+        val hmacData = decodeBase64Strict("data", hmacParams.data)
         val caller = auditCaller()
 
         // Software-backed keys are operated on outside the Keystore.
         com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(hmacParams.keyId)?.let { sw ->
             val swStart = System.currentTimeMillis()
             val swMac = com.automatethethings.xkey.crypto.SoftwareKeyOps.hmac(
-                sw.material, hmacParams.getDataBytes(), sw.algorithm
+                sw.material, hmacData, sw.algorithm
             )
             val swDurationMs = System.currentTimeMillis() - swStart
             keyDao.recordUsage(hmacParams.keyId)
@@ -2142,7 +2138,7 @@ class RequestHandler(
         }
 
         val startTime = System.currentTimeMillis()
-        val hmac = keystoreManager.computeHMACWithAlgorithm(hmacParams.keyId, hmacParams.getDataBytes())
+        val hmac = keystoreManager.computeHMACWithAlgorithm(hmacParams.keyId, hmacData)
         val durationMs = System.currentTimeMillis() - startTime
 
         keyDao.recordUsage(hmacParams.keyId)
@@ -2180,11 +2176,10 @@ class RequestHandler(
             ?: throw ProtocolException("Missing parameters", errorCode = ErrorCodes.INVALID_PARAMS)
 
         val ecdhParams = LocalECDHParams.fromJson(params)
+        val peerPublicKey = decodeBase64Strict("peerPublicKey", ecdhParams.peerPublicKey)
         val caller = auditCaller()
         val startTime = System.currentTimeMillis()
-        val sharedSecret = keystoreManager.performECDH(
-            ecdhParams.keyId, ecdhParams.getPeerPublicKeyBytes()
-        )
+        val sharedSecret = keystoreManager.performECDH(ecdhParams.keyId, peerPublicKey)
         val durationMs = System.currentTimeMillis() - startTime
 
         keyDao.recordUsage(ecdhParams.keyId)
