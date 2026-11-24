@@ -66,6 +66,7 @@ Never does:
 | protected-memory | shipped | `NoiseSession` zeroes the Noise static, ephemeral and session keys, and the handshake intermediates, with `fill(0)` once they are no longer needed; on Android's managed heap this is best-effort hygiene, not a guarantee, since the collector and the JCA objects may keep copies, and the class documentation states that limit | `docs/protected-memory/` |
 | trusted-computing-enrollment | future | Android initiators for `remote.getTCGCSRIDevID`, `remote.activateCredential` and `remote.getAttestationQuote` (needs a Kotlin TPM2 credential-activation flow), and the `local.*` IDevID and TCG family, dormant on both sides | none |
 | maintenance | standing | Dependency updates (dependabot and manual) and CI configuration changes (ci.yml template adoptions, workflow fixes) are worked on `row/317-maintenance` and land as PRs from it; no dependency or CI branch exists outside this row; the row stays open and carries no Dev complete milestone (owner decision 1234, #317) | `#317` |
+| key-algorithm-parity | shipped | Key algorithms on a par with the desktop: PIV RSA 3072 (`0x05`) and RSA 4096 (`0x16`) with the desktop's wire names, `local.generateKey` takes the RSA modulus from `keySizeBits` (2048, 3072 or 4096; other sizes are INVALID_PARAMS), Key Management creates P-521, RSA 3072, AES-192 and HMAC-SHA384 keys, and `local.getCapabilities` lists ES512, AES192 and HMAC-SHA384; post-quantum is out of scope (#333) | `docs/piv/architecture.md` |
 
 ## Interfaces
 

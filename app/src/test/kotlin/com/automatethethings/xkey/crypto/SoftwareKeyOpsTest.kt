@@ -86,11 +86,12 @@ class SoftwareKeyOpsTest {
             SoftwareKeyOps.hmac(key, data, "HMAC-SHA512"),
             SoftwareKeyOps.hmac(key, data, "HmacSHA512")
         )
-        // Everything else — including SHA-384 — falls back to HmacSHA256.
-        assertEquals(32, SoftwareKeyOps.hmac(key, data, "HMAC-SHA384").size)
+        // "384" selects HmacSHA384; everything else falls back to HmacSHA256.
+        assertEquals(48, SoftwareKeyOps.hmac(key, data, "HMAC-SHA384").size)
+        assertEquals(32, SoftwareKeyOps.hmac(key, data, "HMAC-SHA224").size)
         assertArrayEquals(
             SoftwareKeyOps.hmac(key, data, "HMAC-SHA256"),
-            SoftwareKeyOps.hmac(key, data, "HMAC-SHA384")
+            SoftwareKeyOps.hmac(key, data, "HMAC-SHA224")
         )
         assertArrayEquals(
             SoftwareKeyOps.hmac(key, data, "HMAC-SHA256"),
