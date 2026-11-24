@@ -14,6 +14,8 @@
  */
 package com.automatethethings.xkey.ui
 
+import com.automatethethings.xkey.crypto.MlDsaParameterSet
+import com.automatethethings.xkey.crypto.PqcBacking
 import com.automatethethings.xkey.crypto.SoftwareKeyOps
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -81,5 +83,35 @@ class KeyCreationAlgorithmsTest {
         assertEquals("HMAC-SHA384", SoftwareKeyOps.hmacAlgorithm("HMAC-SHA384"))
         val mac = SoftwareKeyOps.hmac(ByteArray(48) { 1 }, byteArrayOf(1, 2, 3), "HMAC-SHA384")
         assertEquals(48, mac.size)
+    }
+
+    @Test
+    fun `signing and tls offer the three ML-DSA parameter sets on every release`() {
+        val names = listOf("ML-DSA-44", "ML-DSA-65", "ML-DSA-87")
+        for (sdk in 28..37) {
+            assertTrue(internals(KeyCreationAlgorithms.signing(sdk)).containsAll(names))
+            assertTrue(internals(KeyCreationAlgorithms.tls(sdk)).containsAll(names))
+        }
+    }
+
+    @Test
+    fun `an ML-DSA entry names its parameter set and no other entry does`() {
+        assertEquals(MlDsaParameterSet.ML_DSA_65, KeyCreationAlgorithms.mlDsaSet("ML-DSA-65"))
+        assertEquals(null, KeyCreationAlgorithms.mlDsaSet("ES256"))
+        assertEquals(null, KeyCreationAlgorithms.mlDsaSet("RSA-OAEP-2048"))
+    }
+
+    @Test
+    fun `storage offers hardware first only for a set the device makes, and software always`() {
+        val set = MlDsaParameterSet.ML_DSA_65
+        assertEquals(
+            listOf(PqcBacking.HARDWARE, PqcBacking.SOFTWARE),
+            KeyCreationAlgorithms.storageOptions(set, setOf(MlDsaParameterSet.ML_DSA_65))
+        )
+        assertEquals(
+            listOf(PqcBacking.SOFTWARE),
+            KeyCreationAlgorithms.storageOptions(set, setOf(MlDsaParameterSet.ML_DSA_44))
+        )
+        assertEquals(listOf(PqcBacking.SOFTWARE), KeyCreationAlgorithms.storageOptions(set, emptySet()))
     }
 }

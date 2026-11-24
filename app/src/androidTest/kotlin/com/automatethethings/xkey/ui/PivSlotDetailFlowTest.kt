@@ -384,7 +384,7 @@ class PivSlotDetailFlowTest {
         val ALGORITHM = PivAlgorithm.ES256
 
         /** Not a [PivAlgorithm] constant, so `valueOf` has to fail. */
-        const val UNKNOWN_ALGORITHM = "ML-DSA-87"
+        const val UNKNOWN_ALGORITHM = "SLH-DSA-SHA2-128S"
 
         const val EXPIRED_ALIAS = "xkey_uitest_pivdetailflow_expired"
         const val EXPIRING_ALIAS = "xkey_uitest_pivdetailflow_expiring"
