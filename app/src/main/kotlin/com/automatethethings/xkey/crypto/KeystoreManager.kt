@@ -1504,7 +1504,8 @@ class KeystoreManager(
     ): ByteArray {
         val alias = buildGeneralAlias(keyId)
         val spki = withAliasGate(alias) {
-            if (keyStore.containsAlias(alias)) keyStore.deleteEntry(alias)
+            // The gate is reentrant: the inner take keeps the write visibly gated.
+            if (keyStore.containsAlias(alias)) withAliasGate(alias) { keyStore.deleteEntry(alias) }
             pqcStore.delete(alias)
             when (backing) {
                 PqcBacking.SOFTWARE -> pqcStore.generate(alias, set, authDurationSeconds)
@@ -2067,7 +2068,7 @@ class KeystoreManager(
             // A software ML-DSA record and a Keystore entry never share an
             // alias; either one is the key, and both go.
             val inKeystore = keyStore.containsAlias(alias)
-            if (inKeystore) keyStore.deleteEntry(alias)
+            if (inKeystore) withAliasGate(alias) { keyStore.deleteEntry(alias) }
             pqcStore.delete(alias) || inKeystore
         }
         if (!deleted) {
