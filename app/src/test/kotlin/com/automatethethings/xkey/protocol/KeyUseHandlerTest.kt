@@ -485,9 +485,9 @@ class KeyUseHandlerTest {
     fun `a request with no params answers INVALID_PARAMS for each method`() = runTest {
         allRequests().forEach { (method, _) ->
             val request = """{"id":1,"method":"$method"}"""
-            val response = JSONObject(
-                String(handler.handleRawRequest(request.toByteArray(Charsets.UTF_8)), Charsets.UTF_8)
-            )
+            val response = servedBy(PEER_OK) {
+                JSONObject(String(handler.handleRawRequest(request.toByteArray(Charsets.UTF_8)), Charsets.UTF_8))
+            }
             assertCleanError(method, ErrorCodes.INVALID_PARAMS, response)
         }
     }

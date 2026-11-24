@@ -438,7 +438,12 @@ class HmacEcdhAuditTest {
         entry.details?.let { JSONObject(it).optString("algorithm", "").ifEmpty { null } }
 
     private suspend fun <T> servedBy(peer: String, block: suspend () -> T): T =
-        withContext(RequestHandler.servedConnection(binding, peer, "test:connection")) { block() }
+        withContext(RequestHandler.servedConnection(binding, peer, "test:connection") + Served()) { block() }
+
+    /** Marks a coroutine that runs inside [servedBy], so [call] keeps its peer. */
+    private class Served : kotlin.coroutines.AbstractCoroutineContextElement(Key) {
+        companion object Key : kotlin.coroutines.CoroutineContext.Key<Served>
+    }
 
     private fun device(name: String): PairedDeviceData = mockk(relaxed = true) {
         every { deviceName } returns name
@@ -467,7 +472,12 @@ class HmacEcdhAuditTest {
         }
     }
 
-    private suspend fun call(method: String, params: String): JSONObject {
+    /** Sends [method] from the paired [PEER_A] unless a [servedBy] block names another peer. */
+    private suspend fun call(method: String, params: String): JSONObject =
+        if (kotlinx.coroutines.currentCoroutineContext()[Served] != null) rawCall(method, params)
+        else servedBy(PEER_A) { rawCall(method, params) }
+
+    private suspend fun rawCall(method: String, params: String): JSONObject {
         val request = """{"id":1,"method":"$method","params":$params}"""
         return JSONObject(String(handler.handleRawRequest(request.toByteArray(Charsets.UTF_8)), Charsets.UTF_8))
     }
