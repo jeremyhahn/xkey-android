@@ -208,22 +208,25 @@ class StreamFrameLimitsTest {
     }
 
     /**
-     * A reply over 65535 bytes cannot be framed: not one byte of it is
-     * written, the connection ends, and serve fails with
-     * [MessageTooLargeException] (it is not an IOException, so the loop does
-     * not absorb it). The next desktop is served.
+     * A reply over 65535 bytes cannot be framed: it is replaced by an
+     * INTERNAL_ERROR under the request's id, and the same connection answers
+     * the next request.
      */
     @Test
-    fun aResponseOverTheFrameLimitWritesNothingAndEndsTheConnection() = runBlocking {
-        val (desktop, phone) = pairedDesktop()
+    fun aResponseOverTheFrameLimitIsAnsweredWithAnErrorAndTheConnectionGoesOn() = runBlocking {
+        val (desktop, _) = pairedDesktop()
 
         desktop.send(desktop.noise.encrypt(request("test.big", id = 4)))
 
-        desktop.assertClosedByPhone()
-        val failure = phone.awaitServeEnded()
-        assertTrue("serve failed with $failure", failure is MessageTooLargeException)
-        assertKeysZeroed(phone)
-        assertNextDesktopIsServed()
+        val refused = desktop.readEncrypted()
+        assertEquals(4L, refused.getLong("id"))
+        assertEquals(
+            com.automatethethings.xkey.protocol.ErrorCodes.INTERNAL_ERROR,
+            refused.getJSONObject("error").getInt("code")
+        )
+
+        desktop.send(desktop.noise.encrypt(request("local.getCapabilities", id = 5)))
+        assertEquals(5L, desktop.readEncrypted().getLong("id"))
     }
 
     // ---------------------------------------------------------------------
