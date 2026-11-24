@@ -131,10 +131,21 @@ class StreamPairingSession(
          * milliseconds; nothing before the handshake waits on the user.
          */
         const val HANDSHAKE_TIMEOUT_MS = 10_000L
+
+        /**
+         * How long a connection whose peer is not yet approved has, from the
+         * end of the handshake, to send pairing.confirm. The desktop sends it
+         * as soon as `xkey device pair` has handshaken; the SAS prompt that
+         * follows has no timeout of its own and is not bounded by this.
+         */
+        const val CONFIRM_TIMEOUT_MS = 60_000L
     }
 
     /** Test seam: the handshake deadline, [HANDSHAKE_TIMEOUT_MS] outside tests. */
     @Volatile internal var handshakeTimeoutMs: Long = HANDSHAKE_TIMEOUT_MS
+
+    /** Test seam: the confirm deadline, [CONFIRM_TIMEOUT_MS] outside tests. */
+    @Volatile internal var confirmTimeoutMs: Long = CONFIRM_TIMEOUT_MS
 
     /** What [transportMethods] add to each request routed to the shared handler. */
     private val routingContext: CoroutineContext =
