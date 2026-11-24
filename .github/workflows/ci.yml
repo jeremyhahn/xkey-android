@@ -107,10 +107,9 @@
 #
 # Tiers. A pull request runs the PR tier: lint, build and the unit suite with
 # coverage (the image job), the repository's own gates (lint-gates) and the
-# changed-files detection with the architecture gate (preflight). The full
-# tier adds integration; it runs on a push to main, on workflow_dispatch and
-# on a PR labelled ci:full. security, deps-check and `trivy image` are
-# scans.yml's (above).
+# changed-files detection with the architecture gate (preflight), and
+# integration on every event but a docs-only PR. security, deps-check and
+# `trivy image` are scans.yml's (above).
 # Soak runs on workflow_dispatch only. A draft PR runs no
 # CI, and CI Gate fails on a draft. A PR whose every changed file matches
 # DOCS_ONLY_PATTERN runs lint alone.
@@ -203,11 +202,8 @@ env:
   COVERAGE_THRESHOLD: ''
   # Gradle has no build tags; the variants are AGP build types, and CI builds
   # and tests debug.
-  # The full tier: every event but pull_request (push to main,
-  # workflow_dispatch), and a PR labelled ci:full.
-  # Steps read it as env.CI_FULL_TIER; a job-level `if:` cannot read env, so
-  # the integration job repeats this expression. Keep them equal.
-  CI_FULL_TIER: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full') }}
+  # A PR labelled ci:full: the docs-only scope is off, so every job runs.
+  CI_FULL_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ci:full') }}
   # The files a docs-only PR may touch. Narrow it if the build ever embeds or
   # generates from docs/.
   DOCS_ONLY_PATTERN: '(\.md$|^docs/)'
@@ -427,7 +423,7 @@ jobs:
           EVENT: ${{ github.event_name }}
         run: |
           docs_only=false
-          if [ "$EVENT" = pull_request ] && [ "$CI_FULL_TIER" != true ]; then
+          if [ "$EVENT" = pull_request ] && [ "$CI_FULL_LABEL" != true ]; then
             if files=$(git diff --name-only --no-renames "$BASE...$HEAD") && [ -n "$files" ]; then
               if ! printf '%s\n' "$files" | grep -qvE "$DOCS_ONLY_PATTERN"; then
                 docs_only=true
@@ -476,8 +472,7 @@ jobs:
   # databases and the dependency repositories.
   #
   # lint, deps-check, build and coverage are the PR tier and run on every
-  # event. security and trivy image are full tier only (env.CI_FULL_TIER):
-  # main after every merge, dispatch, ci:full.
+  # event.
   #
   # The job reads the base image's package index into APT_INDEX_SUM, which
   # the integration image's tag hashes and its build takes as a build
@@ -792,11 +787,10 @@ jobs:
   # compose stack on the runner host started by `make integration-test`. The
   # stack is named per run under the repo's prefix, and the job keeps its own
   # teardown last under `if: always()`.
-  # Full tier only (CI_FULL_TIER's expression); never on a plain PR.
+  # Every event but a docs-only PR; never on a draft PR.
   integration:
     name: Integration [integration image]
-    # Never on a draft PR, ci:full or not.
-    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && !github.event.pull_request.draft }}
+    if: ${{ !github.event.pull_request.draft && needs.preflight.outputs.docs_only != 'true' }}
     runs-on: ${{ github.server_url == 'https://github.com' && fromJSON(needs.preflight.outputs.runner_docker) || 'bigdisk' }}   # v1.48
     needs: preflight   # v1.48: reads runner_docker
     timeout-minutes: 120      # a cold integration image build and the JVM suite
@@ -1001,9 +995,9 @@ jobs:
   # Further stages run in the image job as steps of the same shape (one
   # `make` target in the toolchain image, `if: !cancelled()`). A suite that
   # needs its own runner or stack is a job of the integration job's shape and
-  # joins CI Gate's needs list and check lines. Such a suite is full tier (the
-  # integration job's `if:`, `full` in CI Gate) unless it is lint, build or
-  # unit, which stay on the PR tier.
+  # joins CI Gate's needs list and check lines. Such a suite is `code` (the
+  # integration job's `if:` and check class) unless it is lint, build or
+  # unit, which are `pr`.
   # A job that runs only when certain paths change (the preflight job gains an
   # output for them, `optee` here) needs the image job as well, and its `if:`
   # tests an image job output that its build step sets (here `built`, which
@@ -1042,10 +1036,8 @@ jobs:
     steps:
       - name: Fail closed on any non-success
         env:
-          # The full tier is CI_FULL_TIER: every event but a PR, and a
-          # PR labelled ci:full. A job marked `full` may be skipped below only
-          # when it is not selected; a `pr` job may never be skipped.
-          FULL_TIER: ${{ env.CI_FULL_TIER }}
+          # A `code` job may be skipped only on a docs-only PR; a `pr` job never.
+          DOCS_ONLY: ${{ needs.preflight.outputs.docs_only }}
           # A `dispatch` job runs on workflow_dispatch only.
           DISPATCH: ${{ github.event_name == 'workflow_dispatch' }}
           # A draft PR runs no CI, so its gate fails rather than pass on skips.
@@ -1056,13 +1048,13 @@ jobs:
             exit 1
           fi
           BAD=0
-          echo "full tier selected: ${FULL_TIER}; dispatch selected: ${DISPATCH}"
-          check() { # <job> <result> <pr|full|dispatch>
+          echo "docs only: ${DOCS_ONLY}; dispatch selected: ${DISPATCH}"
+          check() { # <job> <result> <pr|code|dispatch>
             case "$2" in
               success) echo "OK   $1";;
               skipped)
-                if [ "$3" = full ] && [ "${FULL_TIER}" != true ]; then
-                  echo "SKIP $1 (full tier not selected)"
+                if [ "$3" = code ] && [ "${DOCS_ONLY}" = true ]; then
+                  echo "SKIP $1 (docs-only PR)"
                 elif [ "$3" = dispatch ] && [ "${DISPATCH}" != true ]; then
                   echo "SKIP $1 (dispatch only)"
                 else
@@ -1071,12 +1063,12 @@ jobs:
               *) echo "FAIL $1 ($2)"; BAD=1;;
             esac
           }
-          # One line per job in needs above. A job gated to the
-          # full tier by its `if:` is marked full, one gated to
-          # workflow_dispatch is dispatch; every other job is pr.
+          # One line per job in needs above. A job the docs-only scope skips
+          # is code, one gated to workflow_dispatch is dispatch; every other
+          # job is pr.
           check preflight   "${{ needs.preflight.result }}" pr
           check image       "${{ needs.image.result }}" pr
           check lint-gates  "${{ needs.lint-gates.result }}" pr
-          check integration "${{ needs.integration.result }}" full
+          check integration "${{ needs.integration.result }}" code
           check soak        "${{ needs.soak.result }}" dispatch
           exit $BAD
