@@ -15,6 +15,7 @@
 package com.automatethethings.xkey.oath
 
 import android.net.Uri
+import android.util.Log
 import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.audit.auditedWrite
 import kotlinx.coroutines.flow.Flow
@@ -32,11 +33,15 @@ import java.util.UUID
  * @property credential The underlying OATH credential entity.
  * @property code The current one-time password code string.
  * @property secondsRemaining Seconds until the current TOTP code expires (0 for HOTP).
+ * @property codeError True when no code could be computed for this row (its
+ *           secret cannot be decrypted, or a stored field the engine refuses);
+ *           [code] is then [OathRepository.NO_CODE].
  */
 data class OathCredentialWithCode(
     val credential: OathCredentialEntity,
     val code: String,
-    val secondsRemaining: Int
+    val secondsRemaining: Int,
+    val codeError: Boolean = false
 )
 
 /**
@@ -204,7 +209,11 @@ class OathRepository(
      * @param uri The `otpauth://` URI string to parse.
      * @return The generated unique oath identifier for the imported credential.
      * @throws IllegalArgumentException if the URI scheme is not `otpauth`,
-     *         the type is not `totp` or `hotp`, or the `secret` parameter is missing.
+     *         the type is not `totp` or `hotp`, the `secret` parameter is missing,
+     *         not Base32 or under 80 bits, the algorithm is not SHA1, SHA256 or
+     *         SHA512, digits is not 6 to 8, or a TOTP period is not a positive
+     *         number of seconds (an HOTP period is ignored).
+     *         The message never carries the secret.
      */
     suspend fun importFromUri(uri: String): String = importParsed(uri, structuredLabel = false)
 
@@ -273,12 +282,27 @@ class OathRepository(
             "Missing required 'secret' query parameter"
         }
         val secret = base32Decode(secretBase32)
+        // Never name the secret here: the message reaches the UI and logs.
+        require(secret.size >= MIN_SECRET_BYTES) {
+            "Secret is too short: ${secret.size} bytes decoded, at least $MIN_SECRET_BYTES required"
+        }
 
         // Optional parameters with defaults
         val issuer = parsed.getQueryParameter("issuer") ?: labelIssuer
         val algorithm = parsed.getQueryParameter("algorithm")?.uppercase() ?: "SHA1"
         val digits = parsed.getQueryParameter("digits")?.toIntOrNull() ?: 6
         val periodSeconds = parsed.getQueryParameter("period")?.toIntOrNull() ?: 30
+        // A value OathEngine cannot compute a code from would be stored and
+        // then fail on every tick of the list, so it is refused here.
+        require(algorithm in SUPPORTED_ALGORITHMS) {
+            "Unsupported algorithm: expected SHA1, SHA256 or SHA512"
+        }
+        require(digits in SUPPORTED_DIGITS) { "Unsupported digits: $digits, expected 6 to 8" }
+        // HOTP ignores the period; TOTP needs a positive one, as
+        // OathEngine.generateTotpCode requires.
+        require(type != "TOTP" || periodSeconds > 0) {
+            "Unsupported period: $periodSeconds seconds, expected a positive number of seconds"
+        }
 
         // The HOTP counter is part of the credential, not an update applied
         // after it: a credential inserted at counter 0 and only afterwards
@@ -309,7 +333,7 @@ class OathRepository(
      *
      * For TOTP credentials, computes the code based on the current system time.
      * For HOTP credentials, computes the code from the stored counter and
-     * advances the counter with a compare-and-set ([OathCredentialDao.advanceCounter]).
+     * advances the counter with a compare-and-set ([OathCredentialDao.claimCounter]).
      * When another generation advanced it first, the credential is read again
      * and the code is generated from the new counter, so two overlapping
      * generations never return the same HOTP code.
@@ -320,30 +344,41 @@ class OathRepository(
      * @param oathId The unique identifier of the OATH credential.
      * @return The generated OTP code string, zero-padded to the configured digit length.
      * @throws NoSuchElementException if no credential exists with the given [oathId].
-     * @throws IllegalStateException if the HOTP counter could not be advanced
+     * @throws OathCounterExhaustedException if the HOTP counter is at
+     *         [HOTP_COUNTER_MAX]: no further code exists for it.
+     * @throws IllegalStateException if an HOTP claim fails while the stored
+     *         counter has not moved past the value tried, or no claim succeeds
      *         within [MAX_COUNTER_ATTEMPTS] attempts.
      */
     suspend fun generateCode(oathId: String): String {
+        var credential = dao.getByOathId(oathId)
+            ?: throw NoSuchElementException("No OATH credential found with oathId: $oathId")
         var attempt = 0
         while (true) {
-            val credential = dao.getByOathId(oathId)
-                ?: throw NoSuchElementException("No OATH credential found with oathId: $oathId")
-
-            val secret = secretManager.decryptSecret(credential.secretEncrypted)
-
+            // A code is handed out only once its counter value is claimed
+            // (compare-and-set, one statement): two callers that read the
+            // same counter (a desktop generate and a phone tap) cannot both
+            // claim it, so the loser re-reads and takes the next value. The
+            // code is computed before the claim, so a decrypt or engine
+            // failure never burns a counter value.
             val code = when (credential.oathType) {
                 "TOTP" -> OathEngine.generateTotpCode(
-                    secret = secret,
+                    secret = secretManager.decryptSecret(credential.secretEncrypted),
                     algorithm = credential.algorithm,
                     digits = credential.digits,
                     periodSeconds = credential.periodSeconds
                 )
-                "HOTP" -> OathEngine.generateHotpCode(
-                    secret = secret,
-                    counter = credential.counter,
-                    algorithm = credential.algorithm,
-                    digits = credential.digits
-                )
+                "HOTP" -> {
+                    if (credential.counter == HOTP_COUNTER_MAX) {
+                        throw OathCounterExhaustedException(oathId)
+                    }
+                    OathEngine.generateHotpCode(
+                        secret = secretManager.decryptSecret(credential.secretEncrypted),
+                        counter = credential.counter,
+                        algorithm = credential.algorithm,
+                        digits = credential.digits
+                    )
+                }
                 else -> throw IllegalStateException(
                     "Unknown OATH type: ${credential.oathType}"
                 )
@@ -354,29 +389,37 @@ class OathRepository(
             // still leaves its row. A generation the user or desktop asked for
             // (an HOTP copy advances the counter) is audited; list refreshes
             // go through observeAll and are not.
-            val claimed = auditedWrite(
+            val tried = credential.counter
+            val won = auditedWrite(
                 write = {
-                    // Claim this counter value; another generation may have taken it.
-                    val won = credential.oathType != "HOTP" ||
-                        dao.advanceCounter(oathId, credential.counter, credential.counter + 1) == 1
-                    if (won) dao.recordUsage(oathId, System.currentTimeMillis())
-                    won
+                    val claimed = credential.oathType != "HOTP" || dao.claimCounter(oathId, tried) > 0
+                    if (claimed) dao.recordUsage(oathId, System.currentTimeMillis())
+                    claimed
                 },
-                audit = { won ->
-                    if (won) AuditLogger.logOathCodeGenerated(oathId, credential.issuer, credential.accountName)
+                audit = { claimed ->
+                    if (claimed) AuditLogger.logOathCodeGenerated(oathId, credential.issuer, credential.accountName)
                 }
             )
-            if (!claimed) {
-                attempt++
-                if (attempt >= MAX_COUNTER_ATTEMPTS) {
-                    throw IllegalStateException(
-                        "HOTP counter for $oathId could not be advanced after $MAX_COUNTER_ATTEMPTS attempts"
-                    )
-                }
-                continue
-            }
+            if (won) return code
 
-            return code
+            // A retry happens only when the counter moved on; otherwise the
+            // claim could fail forever on the same value.
+            credential = dao.getByOathId(oathId)
+                ?: throw NoSuchElementException("No OATH credential found with oathId: $oathId")
+            if (credential.counter == HOTP_COUNTER_MAX) {
+                throw OathCounterExhaustedException(oathId)
+            }
+            if (credential.counter <= tried) {
+                throw IllegalStateException(
+                    "HOTP counter claim failed without progress for OATH credential $oathId"
+                )
+            }
+            attempt++
+            if (attempt >= MAX_COUNTER_ATTEMPTS) {
+                throw IllegalStateException(
+                    "HOTP counter for $oathId could not be advanced after $MAX_COUNTER_ATTEMPTS attempts"
+                )
+            }
         }
     }
 
@@ -395,42 +438,37 @@ class OathRepository(
      */
     fun observeAll(): Flow<List<OathCredentialWithCode>> {
         return dao.observeAll().map { credentials ->
-            credentials.map { credential ->
-                val secret = secretManager.decryptSecret(credential.secretEncrypted)
-                val now = System.currentTimeMillis()
+            credentials.map(::withCode)
+        }
+    }
 
-                val code = when (credential.oathType) {
-                    "TOTP" -> OathEngine.generateTotpCode(
-                        secret = secret,
-                        algorithm = credential.algorithm,
-                        digits = credential.digits,
-                        periodSeconds = credential.periodSeconds,
-                        timeMs = now
-                    )
-                    "HOTP" -> OathEngine.generateHotpCode(
-                        secret = secret,
-                        counter = credential.counter,
-                        algorithm = credential.algorithm,
-                        digits = credential.digits
-                    )
-                    else -> "------"
-                }
-
-                val secondsRemaining = if (credential.oathType == "TOTP") {
-                    val elapsed = (now / 1000L) % credential.periodSeconds.toLong()
-                    credential.periodSeconds - elapsed.toInt()
-                } else {
-                    0
-                }
-
+    /**
+     * The row with its current code ([OathCurrentCode]). One row whose code
+     * cannot be computed (an invalidated Keystore key, a stored value the
+     * engine refuses) must not take the whole list down: it is shown without
+     * a code and can still be deleted.
+     */
+    private fun withCode(credential: OathCredentialEntity): OathCredentialWithCode =
+        when (val current = OathCurrentCode.currentCode(
+            credential,
+            { secretManager.decryptSecret(it.secretEncrypted) },
+            System.currentTimeMillis()
+        )) {
+            is OathCurrentCode.Available -> OathCredentialWithCode(
+                credential = credential,
+                code = current.code,
+                secondsRemaining = current.secondsLeft ?: 0
+            )
+            OathCurrentCode.Unavailable -> {
+                Log.w(TAG, "No code for OATH row ${credential.oathId}")
                 OathCredentialWithCode(
                     credential = credential,
-                    code = code,
-                    secondsRemaining = secondsRemaining
+                    code = NO_CODE,
+                    secondsRemaining = 0,
+                    codeError = true
                 )
             }
         }
-    }
 
     /**
      * Delete an OATH credential by its unique identifier.
@@ -480,6 +518,17 @@ class OathRepository(
 
     companion object {
 
+        private const val TAG = "OathRepository"
+
+        /** What a row shows in place of a code it cannot compute. */
+        const val NO_CODE = "------"
+
+        /**
+         * The last HOTP counter value: no code is computed at it, and
+         * [OathCredentialDao.claimCounter] never advances past it.
+         */
+        const val HOTP_COUNTER_MAX = Long.MAX_VALUE
+
         /**
          * How many times [generateCode] reads an HOTP credential again after
          * another generation advanced its counter first.
@@ -490,6 +539,15 @@ class OathRepository(
          * RFC 4648 Base32 alphabet (A-Z, 2-7).
          */
         private const val BASE32_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
+
+        /** RFC 4226 section 4 R6: a shared secret of at least 128 bits is recommended, 80 required. */
+        private const val MIN_SECRET_BYTES = 10
+
+        /** The HMAC algorithms [OathEngine] computes. */
+        private val SUPPORTED_ALGORITHMS = setOf("SHA1", "SHA256", "SHA512")
+
+        /** The code lengths [OathEngine] computes. */
+        private val SUPPORTED_DIGITS = 6..8
 
         /**
          * Decode a Base32-encoded string to raw bytes.
@@ -568,3 +626,11 @@ class OathRepository(
         private val CONFUSABLE_DIGITS = mapOf('0' to 'O', '1' to 'L', '8' to 'B')
     }
 }
+
+/**
+ * The HOTP counter of [oathId] is at [OathRepository.HOTP_COUNTER_MAX]: the
+ * credential is kept, but no further code can be generated for it. The text
+ * names only the id, never a secret or a code.
+ */
+class OathCounterExhaustedException(oathId: String) :
+    IllegalStateException("HOTP counter exhausted for OATH credential $oathId")

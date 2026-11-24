@@ -329,7 +329,7 @@ e2e-setup: install ## Configure a connected device/emulator for the go-xkms conf
 	$(ADB) install -r app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
 	$(ADB) shell am instrument -w \
 		-e class com.automatethethings.xkey.e2e.TcpHsmSettingEnabler \
-		com.automatethethings.xkey.debug.test/androidx.test.runner.AndroidJUnitRunner
+		com.automatethethings.xkey.debug.test/com.automatethethings.xkey.XKeyTestRunner
 	$(ADB) forward tcp:8444 tcp:8444
 	@echo ""
 	@echo "Now launch the app and switch BLE on, then run:"

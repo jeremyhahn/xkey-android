@@ -15,6 +15,7 @@
 
 package com.automatethethings.xkey.transport
 
+import com.automatethethings.xkey.ble.NoiseTestKeyStore
 import android.app.KeyguardManager
 import android.app.NotificationManager
 import android.content.Context
@@ -127,6 +128,7 @@ class StreamPairingSessionRevocationTest {
 
     @Before
     fun setUp() {
+        NoiseTestKeyStore.install()
         mockkStatic(Log::class)
         every { Log.v(any(), any<String>()) } returns 0
         every { Log.d(any(), any<String>()) } returns 0

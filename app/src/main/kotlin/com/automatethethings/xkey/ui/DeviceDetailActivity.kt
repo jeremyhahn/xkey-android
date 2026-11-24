@@ -23,6 +23,7 @@ import android.content.ServiceConnection
 import android.graphics.Typeface
 import android.os.Bundle
 import android.os.IBinder
+import android.util.Log
 import android.view.Gravity
 import android.view.MenuItem
 import android.view.View
@@ -47,6 +48,7 @@ import com.google.android.material.materialswitch.MaterialSwitch
 import com.google.android.material.snackbar.Snackbar
 import com.automatethethings.xkey.R
 import com.automatethethings.xkey.ble.BleClient
+import com.automatethethings.xkey.ble.NoiseException
 import com.automatethethings.xkey.ble.NoiseSession
 import com.automatethethings.xkey.ble.PairingConfirmationCallback
 import com.automatethethings.xkey.protocol.AttestationHelper
@@ -66,9 +68,6 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.suspendCancellableCoroutine
-import kotlinx.coroutines.withContext
-import kotlin.coroutines.resume
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -1415,7 +1414,14 @@ class DeviceDetailActivity : AppCompatActivity() {
         snackbar.show()
 
         launchPhoneInitiatedReattest(snackbar) step@{
-                val keyPair = NoiseSession.getStoredStaticKeyPair(this@DeviceDetailActivity)
+                // A corrupt or unreadable key store is logged as such and gets
+                // the same re-pair instruction as a missing key.
+                val keyPair = try {
+                    NoiseSession.getStoredStaticKeyPair(this@DeviceDetailActivity)
+                } catch (e: NoiseException) {
+                    Log.e("DeviceDetailActivity", "Stored static key cannot be read", e)
+                    null
+                }
                 if (keyPair == null) {
                     snackbar.dismiss()
                     Snackbar.make(
@@ -1542,24 +1548,17 @@ class DeviceDetailActivity : AppCompatActivity() {
             deviceName: String,
             publicKeyFingerprint: String,
             shortAuthString: String
-        ): Boolean = withContext(Dispatchers.Main) {
-            if (isFinishing || isDestroyed) return@withContext false
-            suspendCancellableCoroutine { continuation ->
-                val dialog = MaterialAlertDialogBuilder(this@DeviceDetailActivity)
-                    .setTitle(getString(R.string.pairing_dialog_title))
-                    .setMessage(
-                        getString(R.string.pairing_dialog_message_sas, deviceName, publicKeyFingerprint, shortAuthString)
-                    )
-                    .setPositiveButton(getString(R.string.pairing_dialog_allow)) { _, _ ->
-                        if (continuation.isActive) continuation.resume(true)
-                    }
-                    .setNegativeButton(getString(R.string.pairing_dialog_deny)) { _, _ ->
-                        if (continuation.isActive) continuation.resume(false)
-                    }
-                    .setCancelable(false)
-                    .show()
-                continuation.invokeOnCancellation { dialog.dismiss() }
-            }
+        ): Boolean = awaitHostedAnswer(this@DeviceDetailActivity) { dialog, answer ->
+            // A finishing or destroyed screen refuses; one destroyed under the
+            // dialog settles it as a refusal.
+            dialog
+                .setTitle(getString(R.string.pairing_dialog_title))
+                .setMessage(
+                    getString(R.string.pairing_dialog_message_sas, deviceName, publicKeyFingerprint, shortAuthString)
+                )
+                .setPositiveButton(getString(R.string.pairing_dialog_allow)) { _, _ -> answer(true) }
+                .setNegativeButton(getString(R.string.pairing_dialog_deny)) { _, _ -> answer(false) }
+                .setCancelable(false)
         }
     }
 

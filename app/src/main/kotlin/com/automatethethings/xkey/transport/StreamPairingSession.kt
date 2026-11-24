@@ -131,10 +131,21 @@ class StreamPairingSession(
          * milliseconds; nothing before the handshake waits on the user.
          */
         const val HANDSHAKE_TIMEOUT_MS = 10_000L
+
+        /**
+         * How long a connection whose peer is not yet approved has, from the
+         * end of the handshake, to send pairing.confirm. The desktop sends it
+         * as soon as `xkey device pair` has handshaken; the SAS prompt that
+         * follows has no timeout of its own and is not bounded by this.
+         */
+        const val CONFIRM_TIMEOUT_MS = 60_000L
     }
 
     /** Test seam: the handshake deadline, [HANDSHAKE_TIMEOUT_MS] outside tests. */
     @Volatile internal var handshakeTimeoutMs: Long = HANDSHAKE_TIMEOUT_MS
+
+    /** Test seam: the confirm deadline, [CONFIRM_TIMEOUT_MS] outside tests. */
+    @Volatile internal var confirmTimeoutMs: Long = CONFIRM_TIMEOUT_MS
 
     /** What [transportMethods] add to each request routed to the shared handler. */
     private val routingContext: CoroutineContext =
@@ -218,6 +229,15 @@ class StreamPairingSession(
         /** The handshake did not complete by the deadline, which ended the connection. */
         @Volatile var handshakeExpired = false
 
+        /** The peer has sent its one pairing.confirm; see [beginConfirm]. */
+        @Volatile var confirmAttempted = false
+
+        /** The reply being sent is the last: the message loop ends the connection after it. */
+        @Volatile var closeAfterReply = false
+
+        /** The handshake was not followed by pairing.confirm in time, which ended the connection. */
+        @Volatile var confirmExpired = false
+
         /** The request the message loop is waiting on, if any. */
         @Volatile var request: Job? = null
 
@@ -277,7 +297,9 @@ class StreamPairingSession(
                 // A phone-initiated frame goes only to the connection that
                 // holds the server, checked with the encryption it admits.
                 if (activeConnection !== this) throw IOException("Another desktop's connection replaced this one")
-                pairedDeviceRepository?.requirePaired(peerKeyHex)
+                // No store, no paired peer: nothing goes out (fails closed)
+                val repo = pairedDeviceRepository ?: throw IOException("No paired-device store; peer is not paired")
+                repo.requirePaired(peerKeyHex)
             }
             check()
             noise.encrypt(plaintext)
@@ -335,6 +357,31 @@ class StreamPairingSession(
                 ended = true
             }
             end()
+        }
+
+        /**
+         * Ends a connection that is still unapproved and has sent no
+         * pairing.confirm by the confirm deadline. Under [state], so a confirm
+         * that arrived first is left to run: its prompt is the user's.
+         */
+        fun expireConfirm() {
+            synchronized(state) {
+                if (confirmed || confirmAttempted || ended) return
+                confirmExpired = true
+                ended = true
+            }
+            end()
+        }
+
+        /**
+         * Records that the peer's pairing.confirm has arrived, which stops the
+         * confirm deadline, unless the deadline ended the connection first or
+         * the peer has already sent its one confirm.
+         */
+        fun beginConfirm(): Boolean = synchronized(state) {
+            if (ended || confirmAttempted) return false
+            confirmAttempted = true
+            true
         }
 
         /** Marks the connection ended, stops its request and closes its streams. */
@@ -417,7 +464,21 @@ class StreamPairingSession(
             Log.i(TAG, "[$transportLabel] Noise handshake complete")
             onConnected()
 
-            messageLoop(connection, isActive)
+            // A peer the user has not approved must ask for approval in
+            // time, or it would hold a one-at-a-time transport by idling. A
+            // confirmed peer keeps no deadline.
+            val confirmDeadline = if (connection.confirmed) null else teardownScope.launch {
+                delay(confirmTimeoutMs)
+                connection.expireConfirm()
+                if (connection.confirmExpired) {
+                    Log.w(TAG, "[$transportLabel] no pairing.confirm within $confirmTimeoutMs ms of the handshake; closing the connection")
+                }
+            }
+            try {
+                messageLoop(connection, isActive)
+            } finally {
+                confirmDeadline?.cancel()
+            }
         } finally {
             withContext(NonCancellable) {
                 PairedDeviceRepository.removeRemovalListener(connection)
@@ -587,16 +648,18 @@ class StreamPairingSession(
                 Log.i(TAG, "[$transportLabel] connection ended while a request ran: ${e.message}")
                 break
             }
-            if (responseBytes == null || connection.inputEnded) {
-                // A response to one of our outbound requests, or a request
-                // whose peer went away while it ran.
-                continue
+            // Null: a response to one of our outbound requests, or a request
+            // whose peer went away while it ran.
+            if (responseBytes != null && !connection.inputEnded) {
+                try {
+                    send(connection, responseBytes, phoneInitiated = false)
+                } catch (e: IOException) {
+                    Log.e(TAG, "[$transportLabel] failed to send response", e)
+                    break
+                }
             }
-
-            try {
-                send(connection, responseBytes, phoneInitiated = false)
-            } catch (e: IOException) {
-                Log.e(TAG, "[$transportLabel] failed to send response", e)
+            if (connection.closeAfterReply) {
+                Log.i(TAG, "[$transportLabel] pairing.confirm did not confirm the peer; closing the connection")
                 break
             }
         }
@@ -657,9 +720,9 @@ class StreamPairingSession(
      * Intercepts pairing.confirm before normal routing, otherwise routes via the
      * message router (bidirectional) or directly to the request handler.
      *
-     * Internal so that the USB wire-contract tests can drive a decrypted
-     * request through the same dispatch the message loop uses; it runs
-     * against the active connection.
+     * Internal so that tests can drive a decrypted request through the same
+     * gate and dispatch the message loop uses; it runs against the active
+     * connection.
      */
     internal suspend fun interceptOrRoute(plaintext: ByteArray): ByteArray? =
         interceptOrRoute(plaintext, activeConnection)
@@ -670,7 +733,24 @@ class StreamPairingSession(
         // only request that may run is pairing.confirm itself; everything else
         // is refused. Without this, any peer that can reach the transport
         // could sign, list keys, or export shared material unapproved.
-        if (pairingEnforced && connection?.confirmed != true) {
+        // A session without a paired-device store cannot approve anyone, so it
+        // is gated like any other: nothing it serves runs unpaired.
+        if (connection?.confirmed != true) {
+            // One pairing.confirm per connection: one that does not confirm
+            // ends it once answered, so a peer cannot repeat the prompt
+            // until the user approves one by mistake.
+            if (connection != null && isPairingConfirm(plaintext)) {
+                if (!connection.beginConfirm()) {
+                    if (!connection.isLive) return null
+                    connection.closeAfterReply = true
+                    Log.w(TAG, "[$transportLabel] a second pairing.confirm on one connection; refusing it and closing")
+                    return refuseRepeatedConfirm(plaintext)
+                }
+                val answer = handlePairingConfirm(plaintext, connection)
+                    ?: if (connection.isCurrent) rejectUnpaired(plaintext) else null
+                if (!connection.confirmed) connection.closeAfterReply = true
+                return answer
+            }
             handlePairingConfirm(plaintext, connection)?.let { return it }
             // A request that outlived its connection answers nothing.
             if (connection != null && !connection.isCurrent) return null
@@ -683,10 +763,22 @@ class StreamPairingSession(
         // reads as a protocol mismatch rather than "you are already paired" --
         // so re-running `xkey device pair` against a known phone failed with a
         // confusing error. Confirming again is a no-op, so it simply succeeds.
-        if (pairingEnforced) {
-            confirmAlreadyPaired(plaintext)?.let { return it }
-        }
+        confirmAlreadyPaired(plaintext)?.let { return it }
 
+        return routeConfirmed(plaintext, connection)
+    }
+
+    /**
+     * Test seam: dispatches [plaintext] as a confirmed connection's request,
+     * past the pairing gate (which is tested on its own), so the wire-contract
+     * tests can reach the transport's dispatch without a paired peer.
+     * Production code must not call this.
+     */
+    internal suspend fun routeConfirmedForTest(plaintext: ByteArray): ByteArray? =
+        routeConfirmed(plaintext, activeConnection)
+
+    /** The dispatch a confirmed connection's request runs through. */
+    private suspend fun routeConfirmed(plaintext: ByteArray, connection: Connection?): ByteArray? {
         routeTransportMethod(plaintext)?.let { return it }
 
         // The router calls the handler in this coroutine, so the elements
@@ -754,13 +846,23 @@ class StreamPairingSession(
         true
     }
 
-    /**
-     * Whether this session can enforce pairing. A transport constructed
-     * without a paired-device repository has no notion of approval, so it
-     * cannot gate on it.
-     */
-    private val pairingEnforced: Boolean
-        get() = pairedDeviceRepository != null
+    /** Whether [plaintext] is a pairing.confirm request, well formed or not. */
+    private fun isPairingConfirm(plaintext: ByteArray): Boolean = try {
+        JSONObject(String(plaintext, Charsets.UTF_8)).getStringOrNull("method") == MethodNames.PAIRING_CONFIRM
+    } catch (e: JSONException) {
+        false
+    }
+
+    /** Refuses a pairing.confirm sent on a connection that already sent one, without a prompt. */
+    private fun refuseRepeatedConfirm(plaintext: ByteArray): ByteArray {
+        val text = String(plaintext, Charsets.UTF_8)
+        return ProtocolResponse.error(
+            JSONObject(text).optLong("id", -1),
+            ErrorCodes.PAIRING_REJECTED,
+            "Only one pairing.confirm per connection; reconnect to pair",
+            generation = readGeneration(text)
+        ).toJson()
+    }
 
     /**
      * Refuses a request that arrived before pairing was confirmed. Responses
@@ -810,7 +912,13 @@ class StreamPairingSession(
             return null
         }
 
-        val repo = pairedDeviceRepository!!
+        val repo = pairedDeviceRepository
+        if (repo == null) {
+            Log.e(TAG, "[$transportLabel] no paired-device store; refusing pairing")
+            return ProtocolResponse.error(
+                id, ErrorCodes.PAIRING_REJECTED, "Pairing is unavailable on this transport", generation = generation
+            ).toJson()
+        }
         val callback = pairingCallback
         Log.i(TAG, "[$transportLabel] pairing.confirm from \"${pairingParams.deviceName}\"")
 
@@ -866,7 +974,7 @@ class StreamPairingSession(
         }
 
         return if (confirmed) {
-            // addDevice upserts, removing stale entries matching by key/address/name.
+            // addDevice upserts, removing a stale entry under the same key.
             repo.addDevice(peerKeyHex, pairingParams.deviceName)
             if (connection.revoked) {
                 // A removal landed between the check and the add: it wins.
@@ -874,7 +982,7 @@ class StreamPairingSession(
                 return null
             }
             if (!confirm(connection, peerKeyHex)) return null
-            val result = PairingConfirmResult(confirmed = true, deviceName = android.os.Build.MODEL)
+            val result = PairingConfirmResult(confirmed = true, deviceName = phoneModelName())
             ProtocolResponse.success(id, result.toJson(), generation = generation).toJson()
         } else {
             Log.w(TAG, "[$transportLabel] user rejected pairing from \"${pairingParams.deviceName}\"")
@@ -1062,7 +1170,14 @@ internal fun confirmAlreadyPaired(plaintext: ByteArray): ByteArray? {
     if (json.getStringOrNull("method") != MethodNames.PAIRING_CONFIRM) return null
 
     val id = json.optLong("id", -1)
-    val deviceName = android.os.Build.MODEL ?: "Android device"
-    val result = PairingConfirmResult(confirmed = true, deviceName = deviceName)
+    val result = PairingConfirmResult(confirmed = true, deviceName = phoneModelName())
     return ProtocolResponse.success(id, result.toJson(), generation = readGeneration(text)).toJson()
 }
+
+/**
+ * The name the `pairing.confirm` answer gives for this phone.
+ *
+ * [android.os.Build.MODEL] is a platform type that can read null; a null
+ * names the phone "Android device" instead of failing the approval.
+ */
+internal fun phoneModelName(): String = android.os.Build.MODEL ?: "Android device"

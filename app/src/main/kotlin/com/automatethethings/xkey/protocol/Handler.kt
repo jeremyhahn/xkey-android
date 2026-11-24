@@ -25,6 +25,9 @@ import com.automatethethings.xkey.credential.UvRequirement
 import com.automatethethings.xkey.crypto.BiometricException
 import com.automatethethings.xkey.crypto.BiometricUnavailableException
 import com.automatethethings.xkey.crypto.BiometricHelper
+import com.automatethethings.xkey.ui.PromptActivityTracker
+import com.automatethethings.xkey.ui.PromptHost
+import androidx.annotation.VisibleForTesting
 import com.automatethethings.xkey.crypto.BiometricLockoutException
 import com.automatethethings.xkey.crypto.BiometricRequiredException
 import com.automatethethings.xkey.crypto.DecryptionException
@@ -68,7 +71,6 @@ import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
-import java.lang.ref.WeakReference
 import kotlin.coroutines.AbstractCoroutineContextElement
 import kotlin.coroutines.CoroutineContext
 import java.util.Base64
@@ -214,11 +216,12 @@ class RequestHandler(
     // Per-key sharing policy DAO
     private val keySharingPolicyDao: KeySharingPolicyDao = XKeyDatabase.getInstance(context).keySharingPolicyDao()
 
-    // Weak reference to activity for biometric prompts
-    private var activityRef: WeakReference<FragmentActivity>? = null
-
-    // BiometricHelper instance (created when activity is set)
-    private var biometricHelper: BiometricHelper? = null
+    /**
+     * Where biometric prompts are raised: the app-wide record of the resumed
+     * screen (#320). Tests may pin it with [setActivity].
+     */
+    @VisibleForTesting
+    internal var promptHost: PromptHost = PromptActivityTracker
 
     // BiometricNotificationHelper for lock screen notifications
     private val biometricNotificationHelper = BiometricNotificationHelper(context)
@@ -454,15 +457,21 @@ class RequestHandler(
     }
 
     /**
-     * Sets the activity for biometric prompts.
-     *
-     * Must be called when the activity is available, before any sign requests
-     * that require crypto-bound biometric authentication.
+     * Test hook: pins the biometric prompts' host to [activity], or to none
+     * when null. The app never calls it; the host is [PromptActivityTracker],
+     * which follows whichever screen is in front.
      */
+    @VisibleForTesting
     fun setActivity(activity: FragmentActivity?) {
-        activityRef = if (activity != null) WeakReference(activity) else null
-        biometricHelper = if (activity != null) BiometricHelper(activity) else null
+        promptHost = PromptHost { activity }
     }
+
+    /**
+     * A [BiometricHelper] on the activity in front, or null when none is
+     * resumed: callers then refuse, never prompt from the background.
+     */
+    private fun biometricHelper(): BiometricHelper? =
+        promptHost.current()?.let { BiometricHelper(it) }
 
     /**
      * Handles a raw request that arrived on a session this phone *opened* — the
@@ -770,7 +779,7 @@ class RequestHandler(
                 }
             } else {
                 // Fall back to BiometricHelper (for activity context)
-                val helper = biometricHelper
+                val helper = biometricHelper()
                     ?: throw ProtocolException(
                         "No activity available for biometric prompt",
                         errorCode = ErrorCodes.INTERNAL_ERROR
@@ -1044,7 +1053,7 @@ class RequestHandler(
             }
 
             // Fall back to crypto-bound BiometricHelper flow (requires activity)
-            val helper = biometricHelper
+            val helper = biometricHelper()
                 ?: throw ProtocolException(
                     "No activity available for biometric prompt",
                     errorCode = ErrorCodes.INTERNAL_ERROR
@@ -1467,7 +1476,7 @@ class RequestHandler(
                     notice.close()
                 }
             } else {
-                val helper = biometricHelper
+                val helper = biometricHelper()
                     ?: throw ProtocolException(
                         "No activity available for biometric prompt",
                         errorCode = ErrorCodes.INTERNAL_ERROR
@@ -2738,7 +2747,7 @@ class RequestHandler(
                 // The activity's own prompt answers no launcher request; it
                 // takes its queue turn, and the notification only wakes the
                 // phone for it.
-                val helper = biometricHelper
+                val helper = biometricHelper()
                     ?: throw ProtocolException(
                         "No activity available for biometric prompt",
                         errorCode = ErrorCodes.INTERNAL_ERROR
@@ -3114,7 +3123,7 @@ class RequestHandler(
                 onLaunch = notice.onLaunch
             )
         }
-        val helper = biometricHelper
+        val helper = biometricHelper()
             ?: throw ProtocolException(
                 "No activity available for biometric prompt",
                 errorCode = ErrorCodes.INTERNAL_ERROR

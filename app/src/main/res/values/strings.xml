@@ -97,7 +97,7 @@
     <string name="settings_auth_mode_time_window">Time window</string>
     <string name="settings_auth_mode_time_window_description">Require biometric once per time window</string>
     <string name="settings_auth_mode_per_session">Per session</string>
-    <string name="settings_auth_mode_per_session_description">Require biometric once until app goes to background</string>
+    <string name="settings_auth_mode_per_session_description">Ask for biometric once per desktop connection</string>
     <string name="settings_time_window_title">Time Window Duration</string>
     <string name="settings_time_window_description">Authentication remains valid for this duration</string>
     <string name="settings_security_info">For maximum security, use per-operation mode. Time window and per-session modes provide convenience but reduce security by allowing multiple operations with a single authentication.</string>
@@ -955,9 +955,11 @@
     <string name="oath_field_period">Period (seconds)</string>
     <string name="oath_code_copied">Code copied to clipboard</string>
     <string name="oath_code_copy_failed">Could not generate a code to copy</string>
+    <string name="oath_code_unavailable">No code is available for this account</string>
     <string name="oath_delete_confirm">Delete this credential?</string>
     <string name="oath_delete_message">This will permanently remove the %s credential for %s.</string>
-    <string name="oath_context_view_details">View Details</string>
+    <string name="oath_context_copy">Copy</string>
+    <string name="oath_context_details">Details</string>
     <string name="oath_context_delete">Delete</string>
     <string name="oath_detail_title">Credential Details</string>
     <string name="oath_detail_issuer">Issuer</string>
@@ -976,6 +978,11 @@
     <string name="oath_detail_never_used">Never</string>
     <string name="oath_detail_period_value">%1$d seconds</string>
     <string name="oath_detail_times_used">%1$d times</string>
+    <string name="oath_detail_remote_device">Remote device</string>
+    <string name="oath_detail_code">Current code</string>
+    <string name="oath_detail_time_left">Expires in %1$d s</string>
+    <string name="oath_detail_hotp_hint">Copying uses this code and advances the counter</string>
+    <string name="oath_detail_copy">Copy code</string>
 
     <!-- Contact Management -->
     <string name="contact_management_title">Contacts</string>

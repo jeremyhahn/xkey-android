@@ -111,7 +111,7 @@ class KeyDetailActivityFlowTest {
         awaitText(scenario, context.getString(R.string.key_action_delete))
 
         clickTextInTree(scenario, context.getString(R.string.key_action_delete))
-        onView(withText(R.string.key_delete_confirm)).inRoot(isDialog()).perform(click())
+        DialogFlowSupport.clickInDialog(R.string.key_delete_confirm)
 
         awaitCondition("The key row should be deleted") {
             runBlocking { keyTestDao().getByKeyId(keyId) } == null
