@@ -124,13 +124,15 @@ sequenceDiagram
 
 ## Phone screens
 
-**List row.** `OathRowLayout` measures the code column (code and countdown)
-first and gives the issuer and account what is left. The code is one line and
-never ellipsized; the account wraps to two lines, then ellipsizes. When less
-than `OathAdapter.MIN_INFO_WIDTH_DP` (96dp) would be left beside the code, as
-on a narrow outer display or at a large font scale, the code moves below the
-issuer and account. Only if the code is wider than the whole row is its text
-size reduced to fit. The row mirrors for right-to-left layouts.
+**List row.** `OathRowLayout` gives every row the same stacked shape at any
+width and font scale. The top line is a small title: the issuer initial circle,
+then the issuer and the account in small text, one line each, ellipsized at the
+end when too long. The code has its own line below the title, in large
+monospace text on one line and never ellipsized, with the countdown at the end
+of the same line (under the code only if both do not fit side by side); the
+period progress bar runs across the bottom. Only if the code alone is wider
+than the whole row is its text size reduced to fit. The row mirrors for
+right-to-left layouts.
 
 **Tap and copy.** A tap on a row, the long-press Copy and the details screen's
 Copy all go through `OathCodeClipboard`. The clip is marked sensitive
