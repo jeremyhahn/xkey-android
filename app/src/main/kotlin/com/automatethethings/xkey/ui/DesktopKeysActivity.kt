@@ -148,6 +148,8 @@ class DesktopKeysActivity : AppCompatActivity() {
         serviceBound = bindService(
             Intent(this, XKeyGattService::class.java), serviceConnection, Context.BIND_AUTO_CREATE
         )
+        // No connection will come: open now, which finds no session and says so.
+        if (!serviceBound) launch { controller.open() }
     }
 
     override fun onDestroy() {
