@@ -37,6 +37,18 @@ data class OathCredentialWithCode(
     val secondsRemaining: Int
 )
 
+/** What [OathRepository.upsertStructured] did with one synced item. */
+enum class SyncMergeOutcome {
+    /** No row had the id: one was added. */
+    ADDED,
+
+    /** A row had the id: it was updated in place. */
+    UPDATED,
+
+    /** The id was deleted on the phone: nothing was written. */
+    DELETED
+}
+
 /**
  * The `otpauth://` URI ([Key Uri Format](https://github.com/google/google-authenticator/wiki/Key-Uri-Format))
  * that [OathRepository.importStructured] builds from separate fields. Every
@@ -246,9 +258,10 @@ class OathRepository(
      * in place ([OathCredentialDao.updateSynced]), keeping its primary key,
      * creation time and usage statistics, with the HOTP counter the larger
      * of the stored one and [counter]. Merging the same item again therefore
-     * never adds a second row.
+     * never adds a second row. An id deleted on the phone
+     * ([deleteCredential]) is never added back.
      *
-     * @return true if a row was added, false if an existing one was updated.
+     * @return what the merge did with the item ([SyncMergeOutcome]).
      * @throws IllegalArgumentException if [oathId] is blank or the fields are
      *         invalid (for example a secret that is not Base32); nothing is written.
      */
@@ -262,8 +275,9 @@ class OathRepository(
         digits: Int = 6,
         period: Int = 30,
         counter: Long? = null
-    ): Boolean {
+    ): SyncMergeOutcome {
         require(oathId.isNotBlank()) { "Missing OATH credential id" }
+        if (dao.isDeleted(oathId)) return SyncMergeOutcome.DELETED
         val otpType = type.lowercase()
         val parsed = parseOathUri(
             otpauthUri(
@@ -293,7 +307,7 @@ class OathRepository(
             createdAt = System.currentTimeMillis()
         )
         // Never REPLACE: that deletes the row and inserts a new one, losing its usage statistics.
-        if (dao.insertIfAbsent(entity) != -1L) return true
+        if (dao.insertIfAbsent(entity) != -1L) return addedUnlessDeleted(oathId)
         val updated = dao.updateSynced(
             oathId = oathId,
             oathType = entity.oathType,
@@ -305,9 +319,21 @@ class OathRepository(
             accountName = entity.accountName,
             secretEncrypted = entity.secretEncrypted
         )
-        if (updated > 0) return false
-        // Deleted between the insert and the update: add it again.
-        return dao.insertIfAbsent(entity) != -1L
+        if (updated > 0) return SyncMergeOutcome.UPDATED
+        // Gone between the insert and the update: added again only if the phone did not delete it.
+        if (dao.isDeleted(oathId)) return SyncMergeOutcome.DELETED
+        return if (dao.insertIfAbsent(entity) != -1L) addedUnlessDeleted(oathId) else SyncMergeOutcome.UPDATED
+    }
+
+    /**
+     * After a sync insert of [oathId]: a deletion on the phone that landed
+     * between the delete-record check and the insert wins, and the row the
+     * merge just added is removed again.
+     */
+    private suspend fun addedUnlessDeleted(oathId: String): SyncMergeOutcome {
+        if (!dao.isDeleted(oathId)) return SyncMergeOutcome.ADDED
+        dao.deleteByOathId(oathId)
+        return SyncMergeOutcome.DELETED
     }
 
     private suspend fun importParsed(uri: String, structuredLabel: Boolean): String {
@@ -497,11 +523,14 @@ class OathRepository(
      * Delete an OATH credential by its unique identifier.
      *
      * Removes the credential and its encrypted secret from the database.
-     * This operation is irreversible.
+     * This operation is irreversible. The id is recorded first
+     * ([OathCredentialDao.recordDeletion]), so a sync merge running at the
+     * same time, or any later one, never adds the credential back.
      *
      * @param oathId The unique identifier of the credential to delete.
      */
     suspend fun deleteCredential(oathId: String) {
+        dao.recordDeletion(oathId, System.currentTimeMillis())
         dao.deleteByOathId(oathId)
     }
 

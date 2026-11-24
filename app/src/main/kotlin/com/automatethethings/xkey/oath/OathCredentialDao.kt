@@ -173,6 +173,20 @@ interface OathCredentialDao {
     @Query("DELETE FROM oath_credentials WHERE oath_id = :oathId")
     suspend fun deleteByOathId(oathId: String)
 
+    /**
+     * Record that [oathId] was deleted on the phone at [deletedAt], so a
+     * sync never adds it back. A later deletion of the same id replaces the
+     * earlier record.
+     */
+    @Query("INSERT OR REPLACE INTO oath_deletions (oath_id, deleted_at) VALUES (:oathId, :deletedAt)")
+    suspend fun recordDeletion(oathId: String, deletedAt: Long)
+
+    /**
+     * @return true if [oathId] has a delete record ([recordDeletion]).
+     */
+    @Query("SELECT EXISTS(SELECT 1 FROM oath_deletions WHERE oath_id = :oathId)")
+    suspend fun isDeleted(oathId: String): Boolean
+
     // -------------------------------------------------------------------------
     // Aggregate Queries
     // -------------------------------------------------------------------------

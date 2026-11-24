@@ -56,6 +56,9 @@ class SyncEngineMergeOathTest {
 
     /** The table, by `oath_id`, as the DAO's insert-if-absent and in-place update leave it. */
     private val rows = linkedMapOf<String, OathCredentialEntity>()
+
+    /** The ids with a delete record (`oath_deletions`). */
+    private val deleted = mutableSetOf<String>()
     private lateinit var engine: SyncEngine
     private lateinit var dao: OathCredentialDao
 
@@ -64,6 +67,8 @@ class SyncEngineMergeOathTest {
         dao = mockk<OathCredentialDao>()
         coEvery { dao.getByOathId(any()) } answers { rows[firstArg()] }
         coEvery { dao.deleteByOathId(any()) } answers { rows.remove(firstArg<String>()) }
+        coEvery { dao.recordDeletion(any(), any()) } answers { deleted += firstArg<String>() }
+        coEvery { dao.isDeleted(any()) } answers { firstArg<String>() in deleted }
         coEvery { dao.insertIfAbsent(any()) } answers {
             val row = firstArg<OathCredentialEntity>()
             if (rows.containsKey(row.oathId)) {

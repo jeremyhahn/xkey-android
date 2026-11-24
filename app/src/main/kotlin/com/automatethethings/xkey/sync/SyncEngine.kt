@@ -12,6 +12,7 @@ import com.automatethethings.xkey.crypto.Base32
 import com.automatethethings.xkey.crypto.SyncCodec
 import com.automatethethings.xkey.oath.OathRepository
 import com.automatethethings.xkey.oath.OathSecretManager
+import com.automatethethings.xkey.oath.SyncMergeOutcome
 import com.automatethethings.xkey.password.FilePasswordVaultFactorStore
 import com.automatethethings.xkey.password.PasswordRepository
 import com.automatethethings.xkey.password.PasswordVault
@@ -134,7 +135,8 @@ class SyncEngine(
      * Imports/updates incoming OATH credentials by the peer's `id`
      * ([OathRepository.upsertStructured]): an item whose id is already stored
      * updates that row in place, its HOTP counter never moving back, so
-     * merging the same payload again adds no rows. An item without an id,
+     * merging the same payload again adds no rows. An item whose id was
+     * deleted on the phone is skipped and never added back. An item without an id,
      * secret or account, or with an invalid field (a secret that is not
      * Base32, say), is counted as skipped and the rest still merge.
      */
@@ -153,7 +155,7 @@ class SyncEngine(
                 skipped++
                 continue
             }
-            val wasAdded = try {
+            val outcome = try {
                 oathRepo.upsertStructured(
                     oathId = id,
                     type = obj.optString("type", "totp"),
@@ -170,7 +172,12 @@ class SyncEngine(
                 skipped++
                 continue
             }
-            if (wasAdded) added++ else updated++
+            when (outcome) {
+                SyncMergeOutcome.ADDED -> added++
+                SyncMergeOutcome.UPDATED -> updated++
+                // Deleted on the phone: the peer's copy never brings it back.
+                SyncMergeOutcome.DELETED -> skipped++
+            }
         }
         if (skipped > 0) Log.w(TAG, "Skipped $skipped incoming OATH credentials")
         return ItemCounts(added, updated, skipped)

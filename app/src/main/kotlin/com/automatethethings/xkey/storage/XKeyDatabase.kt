@@ -32,6 +32,7 @@ import com.automatethethings.xkey.storage.dao.KeyDao
 import com.automatethethings.xkey.storage.dao.KeySharingPolicyDao
 import com.automatethethings.xkey.oath.OathCredentialDao
 import com.automatethethings.xkey.oath.OathCredentialEntity
+import com.automatethethings.xkey.oath.OathDeletionEntity
 import com.automatethethings.xkey.password.PasswordDao
 import com.automatethethings.xkey.password.PasswordDeletionEntity
 import com.automatethethings.xkey.password.PasswordEntity
@@ -100,7 +101,8 @@ import java.util.concurrent.atomic.AtomicReference
         OathCredentialEntity::class,
         PivSlotEntity::class,
         PasswordEntity::class,
-        PasswordDeletionEntity::class
+        PasswordDeletionEntity::class,
+        OathDeletionEntity::class
     ],
     version = 14,
     exportSchema = true
@@ -617,14 +619,20 @@ abstract class XKeyDatabase : RoomDatabase() {
 
         /**
          * Migration from v13 to v14: add the `password_deletions` table
-         * ([PasswordDeletionEntity]). Additive: every existing row is kept,
-         * and no entry starts with a deletion record.
+         * ([PasswordDeletionEntity]) and `oath_deletions`
+         * ([OathDeletionEntity]), the ids of passwords and OATH credentials
+         * deleted on the phone, so a sync merge never adds one back.
+         * Additive: every existing row is kept, and both tables start empty.
          */
         val MIGRATION_13_14 = object : Migration(13, 14) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL(
                     "CREATE TABLE IF NOT EXISTS `password_deletions` " +
                         "(`password_id` TEXT NOT NULL, `deleted_at` INTEGER NOT NULL, PRIMARY KEY(`password_id`))"
+                )
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `oath_deletions` (`oath_id` TEXT NOT NULL, " +
+                        "`deleted_at` INTEGER NOT NULL, PRIMARY KEY(`oath_id`))"
                 )
             }
         }

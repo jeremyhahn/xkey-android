@@ -38,8 +38,8 @@ import org.junit.Test
  * migration path to 12, or the open throws "A migration from x to 12 was
  * required but not found". Both are checked here against the jars CI builds
  * with, at the current version: v13 (#178) adds the keys table's policy
- * revision, so the compiled hash is now the committed 13.json's, and every
- * stored version from 1 to 12 needs a path to 13. The type converter is covered by [AuditOperationTypeConverterTest];
+ * revision and v14 the OATH delete records, so the compiled hash is now the
+ * committed 14.json's, and every stored version from 1 to 13 needs a path to 14. The type converter is covered by [AuditOperationTypeConverterTest];
  * the migrations' SQL is covered on a device by the instrumented
  * `XKeyDatabaseMigrationTest`.
  */
@@ -99,14 +99,15 @@ class XKeyDatabaseRoomUpgradeTest {
 
     private companion object {
         /** The version `@Database` declares. */
-        const val CURRENT_VERSION = 13
+        const val CURRENT_VERSION = 14
 
         /**
-         * `identityHash` of the committed 13.json. (12.json, written by Room
+         * `identityHash` of the committed 14.json (v14 adds `oath_deletions`;
+         * 13.json holds e02480570d8c7a895d2410493d8e9e08). (12.json, written by Room
          * 2.7.0 in #42, holds 346118e31d0992f85496533bbc1b5d5b, which 2.8.5
          * reproduced for the v12 entities.)
          */
-        const val CURRENT_IDENTITY_HASH = "e02480570d8c7a895d2410493d8e9e08"
+        const val CURRENT_IDENTITY_HASH = "e16b28d3439d4a3a3982b9f61e3dff03"
 
         /** The migrations `XKeyDatabase.buildDatabase` registers, in its order. */
         val APP_MIGRATIONS = listOf(
@@ -121,7 +122,8 @@ class XKeyDatabaseRoomUpgradeTest {
             XKeyDatabase.MIGRATION_9_10,
             XKeyDatabase.MIGRATION_10_11,
             XKeyDatabase.MIGRATION_11_12,
-            XKeyDatabase.MIGRATION_12_13
+            XKeyDatabase.MIGRATION_12_13,
+            XKeyDatabase.MIGRATION_13_14
         )
     }
 }
