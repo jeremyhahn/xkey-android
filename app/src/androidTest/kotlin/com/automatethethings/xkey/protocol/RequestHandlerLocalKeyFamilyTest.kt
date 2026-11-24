@@ -378,6 +378,8 @@ class RequestHandlerLocalKeyFamilyTest {
         val keyId = generateKey("policy-$runId", KeyTypes.SECRET, "AES256")
         val widen = JSONObject().put("keyId", keyId).put("shareable", true)
 
+        // The anonymous caller: the shared fixture's paired peer is cleared.
+        handler.setConnectedDevicePublicKeyHex(null)
         assertEquals(ErrorCodes.OPERATION_DENIED, call("local.setKeyPolicy", widen).errorCode())
         assertStaysPrivate(keyId)
 
