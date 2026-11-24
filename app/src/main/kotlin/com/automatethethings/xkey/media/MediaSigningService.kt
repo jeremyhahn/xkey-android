@@ -339,6 +339,8 @@ class MediaSigningService : Service() {
         // the app is refused goes to the private store.
         val filePath = getFilePathFromUri(uri)
         val hashType = if (filePath != null) AutoSignHash.hashTypeForPath(filePath) else contentResolver.getType(uri)
+        // A non-JPEG row with no path yet is retried once the row has its path.
+        if (filePath == null && !MediaHasher.isJpeg(hashType)) return AutoSignQueue.Outcome.RETRY
 
         // Hash the media content
         val contentHash = try {
