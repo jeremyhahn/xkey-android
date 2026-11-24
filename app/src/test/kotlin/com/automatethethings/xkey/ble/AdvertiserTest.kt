@@ -30,6 +30,7 @@ import io.mockk.verify
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotSame
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -368,6 +369,62 @@ class AdvertiserPayloadTest {
         val state = advertiser.advertisingState.value as AdvertisingState.Error
         assertEquals(AdvertiseError.DATA_TOO_LARGE, state.error)
         assertFalse(advertiser.isAdvertising())
+    }
+
+    /**
+     * A stop while the stack has not yet answered wins: the too-large refusal
+     * that follows must not restart advertising after the service stopped.
+     */
+    @Test
+    fun aTooLargeRefusalAfterAStopIsNotRetried() {
+        val advertiser = Advertiser(adapter)
+        advertiser.startAdvertising()
+        advertiser.stopAdvertising()
+
+        callbacks[0].onStartFailure(AdvertiseCallback.ADVERTISE_FAILED_DATA_TOO_LARGE)
+
+        verify(exactly = 1) { leAdvertiser.startAdvertising(any(), any(), any(), any()) }
+        assertEquals(AdvertisingState.Stopped, advertiser.advertisingState.value)
+        assertFalse(advertiser.isAdvertising())
+    }
+
+    /** A success that arrives after a stop publishes nothing and is taken down. */
+    @Test
+    fun aSuccessAfterAStopIsTakenDown() {
+        val advertiser = Advertiser(adapter)
+        advertiser.startAdvertising()
+        advertiser.stopAdvertising()
+
+        callbacks[0].onStartSuccess(mockk<AdvertiseSettings>(relaxed = true))
+
+        assertEquals(AdvertisingState.Stopped, advertiser.advertisingState.value)
+        assertFalse(advertiser.isAdvertising())
+        verify(atLeast = 1) { leAdvertiser.stopAdvertising(callbacks[0]) }
+    }
+
+    /**
+     * A callback of a stopped start reaching the advertiser after a fresh start
+     * is stale: it neither retries, nor fails, nor publishes the fresh start.
+     */
+    @Test
+    fun aStaleCallbackLeavesTheNextStartAlone() {
+        val advertiser = Advertiser(adapter)
+        advertiser.startAdvertising()
+        advertiser.stopAdvertising()
+        advertiser.startAdvertising()
+        assertEquals(2, callbacks.size)
+        assertNotSame("each start attempt has its own callback", callbacks[0], callbacks[1])
+
+        callbacks[0].onStartFailure(AdvertiseCallback.ADVERTISE_FAILED_DATA_TOO_LARGE)
+        callbacks[0].onStartSuccess(mockk<AdvertiseSettings>(relaxed = true))
+
+        verify(exactly = 2) { leAdvertiser.startAdvertising(any(), any(), any(), any()) }
+        assertEquals(AdvertisingState.Stopped, advertiser.advertisingState.value)
+        assertFalse(advertiser.isAdvertising())
+        verify(exactly = 0) { leAdvertiser.stopAdvertising(callbacks[1]) }
+
+        callbacks[1].onStartSuccess(mockk<AdvertiseSettings>(relaxed = true))
+        assertTrue(advertiser.isAdvertising())
     }
 
     /** Any other refusal is reported at once, without a retry. */
