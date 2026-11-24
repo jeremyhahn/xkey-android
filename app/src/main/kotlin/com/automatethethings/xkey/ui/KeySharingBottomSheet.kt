@@ -792,7 +792,7 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
                     currentEntity = { id -> keyDao.getByKeyId(id) }
                 )) {
                     is DesktopKeyShare.Outcome.Sent ->
-                        getString(R.string.sharing_desktop_sent, out.result.importId)
+                        getString(R.string.sharing_desktop_sent, boundedDesktopText(out.result.importId))
                     // Declined, refused, or (null) a changed session: nothing was
                     // imported. A changed session re-reads what the new one allows.
                     else -> desktopOutcomeFor(out)?.let { getString(it) }
@@ -800,7 +800,7 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                getString(R.string.sharing_desktop_failed, e.message ?: e.javaClass.simpleName)
+                getString(R.string.sharing_desktop_failed, boundedDesktopText(e.message ?: e.javaClass.simpleName))
             }
             if (!isAdded) return@launch
             desktopSendButton.isEnabled = true
@@ -983,6 +983,27 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
          * sent, or why nothing will.
          */
         @StringRes
+        /** The most characters of desktop-supplied text a status line shows. */
+        private const val DESKTOP_TEXT_MAX = 200
+
+        /**
+         * Desktop-supplied text (an error message, an import id) as one
+         * bounded line: control characters become spaces, and text past
+         * [DESKTOP_TEXT_MAX] is cut, never inside a surrogate pair, and ends in an ellipsis.
+         */
+        internal fun boundedDesktopText(text: String): String {
+            val line = buildString(minOf(text.length, DESKTOP_TEXT_MAX + 1)) {
+                for (c in text) {
+                    if (length > DESKTOP_TEXT_MAX) break
+                    append(if (c.isISOControl()) ' ' else c)
+                }
+            }
+            if (line.length <= DESKTOP_TEXT_MAX) return line
+            var end = DESKTOP_TEXT_MAX
+            if (Character.isHighSurrogate(line[end - 1])) end--
+            return line.substring(0, end) + "…"
+        }
+
         internal fun desktopStatusFor(decision: DesktopShareDecision): Int = when (decision) {
             DesktopShareDecision.PUBLIC_KEY -> R.string.sharing_desktop_ready
             DesktopShareDecision.NO_PEER -> R.string.sharing_desktop_no_peer
