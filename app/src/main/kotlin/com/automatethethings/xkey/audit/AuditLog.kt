@@ -148,6 +148,9 @@ enum class AuditOperationType {
     /** Passwords were synced with a paired device. */
     PASSWORD_SYNC_PERFORMED,
 
+    /** Trust-store certificates were synced with a paired device. */
+    TRUST_STORE_SYNC_PERFORMED,
+
     // Co-signing operations
     /** A co-sign request was initiated. */
     COSIGN_INITIATED,

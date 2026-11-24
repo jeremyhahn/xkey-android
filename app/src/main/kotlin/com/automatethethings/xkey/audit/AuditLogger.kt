@@ -1450,6 +1450,63 @@ object AuditLogger {
     }
 
     /**
+     * Records one trust-store sync with a paired device: counts only, never
+     * a certificate body. Same shape as [logOathSyncPerformed] so it plugs
+     * into the shared sync audit helpers; [updated] is always zero here.
+     *
+     * @param count Certificates sent to the peer.
+     * @param added Certificates the merge stored on the phone (as synced).
+     * @param skipped Certificates the merge skipped: present, self-signed,
+     *   unparsable or rejected.
+     */
+    @Suppress("UNUSED_PARAMETER")
+    fun logTrustStoreSyncPerformed(
+        deviceId: String?,
+        deviceName: String?,
+        count: Int,
+        direction: String = SYNC_INBOUND,
+        added: Int = 0,
+        updated: Int = 0,
+        skipped: Int = 0,
+        success: Boolean = true,
+        errorMessage: String? = null
+    ) {
+        val details = JSONObject().apply {
+            put("direction", direction)
+            put("certificateCount", count)
+            put("added", added)
+            put("skipped", skipped)
+        }
+        log(
+            AuditLogEntity(
+                operationType = AuditOperationType.TRUST_STORE_SYNC_PERFORMED,
+                deviceId = deviceId,
+                deviceName = deviceName,
+                success = success,
+                errorMessage = errorMessage,
+                details = details.toString()
+            )
+        )
+    }
+
+    /**
+     * Records a synced OATH item the merge refused: the phone holds [oathId]
+     * with other key material (secret, type, algorithm, digits or period)
+     * and the wire item carries no timestamp to say which copy is newer, so
+     * the phone's copy is kept. Only the id is recorded, never a secret.
+     */
+    fun logOathSyncConflict(oathId: String) {
+        log(
+            AuditLogEntity(
+                operationType = AuditOperationType.OATH_SYNC_PERFORMED,
+                keyId = oathId,
+                success = false,
+                errorMessage = "sync conflict: key material differs, local copy kept"
+            )
+        )
+    }
+
+    /**
      * Records one password sync with a paired device. Only counts are
      * recorded: never a password, site or user name.
      *

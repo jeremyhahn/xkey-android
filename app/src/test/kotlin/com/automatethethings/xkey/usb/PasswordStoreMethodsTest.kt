@@ -17,7 +17,9 @@ package com.automatethethings.xkey.usb
 import android.util.Log
 import com.automatethethings.xkey.crypto.KeystoreAeadCipher
 import com.automatethethings.xkey.password.PassphraseHasher
+import com.automatethethings.xkey.password.InMemoryPasswordDeletions
 import com.automatethethings.xkey.password.PasswordDao
+import com.automatethethings.xkey.password.PasswordDeletionQueries
 import com.automatethethings.xkey.password.PasswordEntity
 import com.automatethethings.xkey.password.PasswordEntryLimit
 import com.automatethethings.xkey.password.PasswordEntryTooLargeException
@@ -87,7 +89,7 @@ class PasswordStoreMethodsTest {
     private lateinit var methods: PasswordStoreMethods
     private var nextId = 1L
 
-    private class InMemoryPasswordDao : PasswordDao {
+    private class InMemoryPasswordDao : PasswordDao, PasswordDeletionQueries by InMemoryPasswordDeletions() {
         val rows = linkedMapOf<String, PasswordEntity>()
         var failing = false
         private var rowId = 0L

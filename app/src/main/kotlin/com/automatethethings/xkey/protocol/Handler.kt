@@ -3915,7 +3915,9 @@ class RequestHandler(
                 com.automatethethings.xkey.oath.OathSecretManager()
             )
             // Nothing has that id: say so rather than claim a deletion. The
-            // repository writes the audit row, as for a delete on the phone.
+            // repository writes the audit row, as for a delete on the phone,
+            // and records the deletion with the delete in one transaction, so
+            // no sync with another paired device adds it back.
             val deleted = oathRepository.deleteCredential(credentialId)
 
             val result = JSONObject().apply { put("deleted", deleted) }
@@ -3935,13 +3937,25 @@ class RequestHandler(
      * those already present by fingerprint) and returns the phone's certs so the
      * desktop can merge them back.
      */
+    /**
+     * Merges the desktop's certificates (stored as synced, never as trust
+     * anchors) and returns the phone's. Records one audit entry per sync,
+     * success or failure, with counts and the desktop that asked, never a
+     * certificate body. The reply keeps its `added`/`skipped`/`remote` shape.
+     */
     private suspend fun handleSyncTrustStore(request: Request): Response {
+        val peerId = currentPeerPublicKeyHex()
+        val peerName = auditPeerName(peerId)
         return try {
             val params = request.params ?: JSONObject()
             val engine = com.automatethethings.xkey.sync.SyncEngine(context)
             val counts = engine.mergeCertificates(params.optJSONArray("certificates") ?: org.json.JSONArray())
             val remote = engine.gatherCertificates()
             engine.markSynced()
+            AuditLogger.logTrustStoreSyncPerformed(
+                peerId, peerName, remote.length(), AuditLogger.SYNC_INBOUND,
+                added = counts.added, skipped = counts.skipped
+            )
             Response.success(request.id, JSONObject().apply {
                 put("added", counts.added)
                 put("skipped", counts.skipped)
@@ -3949,6 +3963,10 @@ class RequestHandler(
             })
         } catch (e: Exception) {
             Log.e(TAG, "syncTrustStore failed", e)
+            AuditLogger.logTrustStoreSyncPerformed(
+                peerId, peerName, 0, AuditLogger.SYNC_INBOUND,
+                success = false, errorMessage = "syncTrustStore failed: ${e.javaClass.simpleName}"
+            )
             Response.error(request.id, ErrorCodes.INTERNAL_ERROR, "syncTrustStore failed: ${e.message}")
         }
     }
@@ -4394,8 +4412,11 @@ class RequestHandler(
         }
         val peerPublicKeyHex = requireConfirmedPeer("sharePublicKey")
         return try {
-            val der = com.automatethethings.xkey.crypto.SyncCodec.pemToDer(pem)
-                ?: return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Invalid public_key_pem")
+            val der = try {
+                com.automatethethings.xkey.crypto.SyncCodec.pemToDer(pem)
+            } catch (e: com.automatethethings.xkey.crypto.MalformedSyncValueException) {
+                return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Invalid public_key_pem")
+            }
             val fingerprint = com.automatethethings.xkey.crypto.SyncCodec.sha256Hex(der)
             val keyId = params.optString("key_id", "")
             val label = params.optString("label", "").ifBlank { keyId.ifBlank { "shared-key" } }
