@@ -2394,15 +2394,20 @@ class KeystoreManager(
          * @param algorithm "ES256", "ES384", "ES512", "RS256", "RS384", or "RS512".
          * @throws SigningException if the algorithm is not supported.
          */
-        fun jcaSignatureAlgorithm(algorithm: String): String = when (algorithm) {
-            "ES256" -> SIG_ALGORITHM_ES256
-            "ES384" -> SIG_ALGORITHM_ES384
-            "ES512" -> SIG_ALGORITHM_ES512
-            "RS256" -> SIG_ALGORITHM_RS256
-            "RS384" -> SIG_ALGORITHM_RS384
-            "RS512" -> SIG_ALGORITHM_RS512
-            else -> throw SigningException("Unsupported algorithm: $algorithm")
-        }
+        fun jcaSignatureAlgorithm(algorithm: String): String =
+            JCA_SIGNATURE_ALGORITHMS[algorithm] ?: throw SigningException("Unsupported algorithm: $algorithm")
+
+        /** True when a key of [algorithm] signs through [jcaSignatureAlgorithm]; ML-DSA keys do not. */
+        fun hasJcaSignature(algorithm: String): Boolean = algorithm in JCA_SIGNATURE_ALGORITHMS
+
+        private val JCA_SIGNATURE_ALGORITHMS = mapOf(
+            "ES256" to SIG_ALGORITHM_ES256,
+            "ES384" to SIG_ALGORITHM_ES384,
+            "ES512" to SIG_ALGORITHM_ES512,
+            "RS256" to SIG_ALGORITHM_RS256,
+            "RS384" to SIG_ALGORITHM_RS384,
+            "RS512" to SIG_ALGORITHM_RS512
+        )
 
         /** The JCA algorithm passkey assertions sign their hash with. */
         const val PASSKEY_SIGNATURE_ALGORITHM = "SHA256withECDSA"
