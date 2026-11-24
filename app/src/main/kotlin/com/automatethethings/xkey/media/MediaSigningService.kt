@@ -42,6 +42,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -194,6 +195,9 @@ class MediaSigningService : Service() {
         super.onDestroy()
         unregisterObservers()
         releaseWakeLock()
+        // Cancelling the scope, not only the jobs in flight, means a change
+        // already dispatched to an observer starts no new signing after this.
+        serviceScope.cancel()
         signingJobs.forEach { it.cancel() }
         signingJobs.clear()
         Log.i(TAG, "Media signing service stopped")
