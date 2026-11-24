@@ -35,6 +35,7 @@ import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
@@ -288,9 +289,10 @@ class BootstrapSettingsRepositoryJvmTest {
 
     @Test
     fun `deriveSettingsFromUrl fills every server from an https URL`() = runBlocking {
-        repository.deriveSettingsFromUrl("https://kms.example.com:8443")
+        val returned = repository.deriveSettingsFromUrl("https://kms.example.com:8443")
 
         val settings = reopened().getSettings()
+        assertEquals(settings, returned)
         assertEquals("https://kms.example.com:8443", settings.daneServerUrl)
         assertEquals("kms.example.com:8445", settings.noiseServerAddr)
         assertEquals("https://kms.example.com:8443", settings.spkiServerUrl)
@@ -299,18 +301,56 @@ class BootstrapSettingsRepositoryJvmTest {
 
     @Test
     fun `deriveSettingsFromUrl upgrades an http URL to https`() = runBlocking {
-        repository.deriveSettingsFromUrl("http://kms.example.com")
+        val returned = repository.deriveSettingsFromUrl("http://kms.example.com")
 
         val settings = reopened().getSettings()
+        assertEquals(settings, returned)
         assertEquals("https://kms.example.com:443", settings.directServerUrl)
         assertEquals("kms.example.com:8445", settings.noiseServerAddr)
     }
 
     @Test
-    fun `deriveSettingsFromUrl with no scheme changes nothing`() = runBlocking {
-        repository.deriveSettingsFromUrl("kms.example.com")
+    fun `deriveSettingsFromUrl with no scheme returns null and changes nothing`() = runBlocking {
+        assertNull(repository.deriveSettingsFromUrl("kms.example.com"))
 
         assertEquals(BootstrapSettingsData.DEFAULT, reopened().getSettings())
+    }
+
+    @Test
+    fun `deriveSettingsFromUrl writes the addresses over a stored legacy malformed pin and key`() = runBlocking {
+        store.edit {
+            it[KEY_SPKI_PIN] = LEGACY_PIN
+            it[KEY_NOISE_KEY] = LEGACY_KEY
+        }
+
+        val returned = repository.deriveSettingsFromUrl("https://new.example.com:8443")
+
+        val settings = reopened().getSettings()
+        assertEquals(settings, returned)
+        assertEquals("https://new.example.com:8443", settings.daneServerUrl)
+        assertEquals("https://new.example.com:8443", settings.spkiServerUrl)
+        assertEquals("https://new.example.com:8443", settings.directServerUrl)
+        assertEquals("new.example.com:8445", settings.noiseServerAddr)
+        assertEquals(LEGACY_PIN, settings.spkiPinSha256)
+        assertEquals(LEGACY_KEY, settings.noiseServerStaticKey)
+        assertEquals(emptyList<AuditLogEntity>(), inserted)
+    }
+
+    @Test
+    fun `deriveSettingsFromUrl over a legacy pin and key refuses ftp and a bare host`() = runBlocking {
+        store.edit {
+            it[KEY_SPKI_PIN] = LEGACY_PIN
+            it[KEY_NOISE_KEY] = LEGACY_KEY
+        }
+
+        assertNull(repository.deriveSettingsFromUrl("ftp://new.example.com:2121"))
+        assertNull(repository.deriveSettingsFromUrl("new.example.com"))
+
+        val settings = reopened().getSettings()
+        assertEquals(
+            BootstrapSettingsData.DEFAULT.copy(spkiPinSha256 = LEGACY_PIN, noiseServerStaticKey = LEGACY_KEY),
+            settings
+        )
     }
 
     /**
@@ -399,8 +439,8 @@ class BootstrapSettingsRepositoryJvmTest {
     }
 
     @Test
-    fun `deriveSettingsFromUrl ignores a URL that is not http or https`() = runBlocking {
-        repository.deriveSettingsFromUrl("ftp://kms.example.com:2121")
+    fun `deriveSettingsFromUrl returns null for a URL that is not http or https`() = runBlocking {
+        assertNull(repository.deriveSettingsFromUrl("ftp://kms.example.com:2121"))
 
         assertEquals(BootstrapSettingsData.DEFAULT, reopened().getSettings())
     }
@@ -448,7 +488,11 @@ class BootstrapSettingsRepositoryJvmTest {
     private companion object {
         const val PIN = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
         const val NOISE_KEY = "FEDCBA9876543210FEDCBA9876543210FEDCBA9876543210FEDCBA9876543210"
+        const val LEGACY_PIN = "abc"
+        const val LEGACY_KEY = "zz zz"
         val KEY_METHOD_ORDER = stringPreferencesKey("method_order")
+        val KEY_SPKI_PIN = stringPreferencesKey("spki_pin_sha256")
+        val KEY_NOISE_KEY = stringPreferencesKey("noise_server_static_key")
         val KEY_PER_METHOD_TIMEOUT = intPreferencesKey("per_method_timeout_seconds")
     }
 }
