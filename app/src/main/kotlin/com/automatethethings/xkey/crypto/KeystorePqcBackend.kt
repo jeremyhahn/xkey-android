@@ -55,14 +55,23 @@ import java.util.concurrent.atomic.AtomicReference
  *   returns its `KeyProperties.SECURITY_LEVEL_*`, or null or a throw when the
  *   set cannot be made there; injected by tests.
  * @param ioDispatcher where the probe runs, never the main thread.
+ * @param generateKey generates a set under an alias with an authentication
+ *   duration, in StrongBox when its last argument is true and the TEE
+ *   otherwise, and returns the key's SPKI and KeyInfo level; injected by tests.
+ * @param deleteKey deletes an alias, doing nothing when it is absent; injected by tests.
  */
 class KeystorePqcBackend(
     private val sdkInt: Int = Build.VERSION.SDK_INT,
     private val probe: (MlDsaParameterSet, Boolean) -> Int? = ::probeOnce,
-    private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO
+    private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    private val generateKey: (String, MlDsaParameterSet, Int, Boolean) -> PqcGeneratedKey = ::generateOnce,
+    private val deleteKey: (String) -> Unit = ::deleteAlias
 ) : PqcHardwareBackend {
 
     private val supported = AtomicReference<Set<MlDsaParameterSet>>(emptySet())
+
+    /** Each probed set's hardware locations: true is StrongBox, false the TEE. */
+    private val hardwareLocations = AtomicReference<Map<MlDsaParameterSet, Set<Boolean>>>(emptyMap())
     private val started = AtomicBoolean(false)
     private val probed = CompletableDeferred<Set<MlDsaParameterSet>>()
 
@@ -82,12 +91,16 @@ class KeystorePqcBackend(
         }
         scope.launch(ioDispatcher) {
             try {
-                val found = MlDsaParameterSet.entries.filterTo(LinkedHashSet()) { set ->
-                    // The TEE first, then StrongBox: either one in hardware keeps the set.
-                    probeLevel(set, strongBox = false) in HARDWARE_LEVELS ||
-                        probeLevel(set, strongBox = true) in HARDWARE_LEVELS
+                val locations = LinkedHashMap<MlDsaParameterSet, Set<Boolean>>()
+                for (set in MlDsaParameterSet.entries) {
+                    // The TEE and StrongBox are both probed: either one in hardware keeps the set.
+                    val where = listOf(false, true).filterTo(LinkedHashSet()) { strongBox ->
+                        probeLevel(set, strongBox) in HARDWARE_LEVELS
+                    }
+                    if (where.isNotEmpty()) locations[set] = where
                 }
-                supported.set(found.toSet())
+                hardwareLocations.set(locations)
+                supported.set(locations.keys.toSet())
             } finally {
                 probed.complete(supported.get())
             }
@@ -105,13 +118,16 @@ class KeystorePqcBackend(
      *
      * [authDurationSeconds] follows the EC keys: negative needs no user
      * authentication, zero authenticates every use, positive keeps one
-     * authentication valid that many seconds. [preferStrongBox] asks
-     * StrongBox first and falls back to the TEE when StrongBox refuses.
-     * Blocks on the Keystore: never call it on the main thread.
+     * authentication valid that many seconds. Only the locations the probe
+     * found [set] in hardware are tried: StrongBox first when
+     * [preferStrongBox] or when it is the only one, falling back to the TEE
+     * only when the TEE probed hardware. A key is kept only when its KeyInfo
+     * level is TEE or StrongBox and its SPKI is a [set] key; any other key is
+     * deleted. Blocks on the Keystore: never call it on the main thread.
      *
      * @throws UnsupportedAlgorithmException if the probe did not report [set].
-     * @throws KeyGenerationException if the Keystore fails or returns a key
-     *   that is not a [set] SubjectPublicKeyInfo.
+     * @throws KeyGenerationException if no probed location makes a hardware
+     *   [set] key; no key is then left under [alias].
      */
     override fun generate(
         alias: String,
@@ -119,23 +135,38 @@ class KeystorePqcBackend(
         authDurationSeconds: Int,
         preferStrongBox: Boolean
     ): ByteArray {
-        if (set !in supportedParameterSets()) throw UnsupportedAlgorithmException(set.wireName)
-        if (Build.VERSION.SDK_INT < MIN_SDK) throw UnsupportedAlgorithmException(set.wireName)
+        if (sdkInt < MIN_SDK) throw UnsupportedAlgorithmException(set.wireName)
+        val where = hardwareLocations.get()[set]
+        if (where.isNullOrEmpty() || set !in supportedParameterSets()) {
+            throw UnsupportedAlgorithmException(set.wireName)
+        }
+        val order = when {
+            preferStrongBox || false !in where -> listOf(true, false).filter { it in where }
+            else -> listOf(false)
+        }
 
-        val keyStore = androidKeyStore()
-        val spki = try {
-            if (keyStore.containsAlias(alias)) keyStore.deleteEntry(alias)
-            generateKeyPair(alias, set, authDurationSeconds, preferStrongBox).public.encoded
-        } catch (e: Exception) {
-            throw KeyGenerationException("Failed to generate ${set.wireName} key", e)
+        var failure: Exception? = null
+        for (strongBox in order) {
+            try {
+                deleteKey(alias)
+                val key = generateKey(alias, set, authDurationSeconds, strongBox)
+                if (key.securityLevel !in HARDWARE_LEVELS) {
+                    throw KeyGenerationException(
+                        "${set.wireName} key came back at security level ${key.securityLevel}, not in hardware"
+                    )
+                }
+                checkSpki(set, key.spki)
+                return key.spki
+            } catch (e: CancellationException) {
+                runCatching { deleteKey(alias) }
+                throw e
+            } catch (e: Exception) {
+                runCatching { deleteKey(alias) }
+                failure = e
+            }
         }
-        try {
-            checkSpki(set, spki)
-        } catch (e: KeyGenerationException) {
-            runCatching { keyStore.deleteEntry(alias) }
-            throw e
-        }
-        return spki
+        throw failure as? KeyGenerationException
+            ?: KeyGenerationException("Failed to generate ${set.wireName} key", failure)
     }
 
     /** `"ML-DSA"`: the platform's `KeyProperties.KEY_ALGORITHM_ML_DSA`, for every set. */
@@ -220,26 +251,30 @@ private fun probeOnce(set: MlDsaParameterSet, strongBox: Boolean): Int? {
     }
 }
 
+/** A key the generation seam made: its SubjectPublicKeyInfo DER and its KeyInfo security level. */
+class PqcGeneratedKey(val spki: ByteArray, val securityLevel: Int?)
+
+/** Deletes [alias] from the Android Keystore; nothing when it is absent. */
+private fun deleteAlias(alias: String) {
+    val keyStore = androidKeyStore()
+    if (keyStore.containsAlias(alias)) keyStore.deleteEntry(alias)
+}
+
 /**
- * StrongBox first when [preferStrongBox], then the TEE: as the EC keys do,
- * any StrongBox refusal (`StrongBoxUnavailableException`, or a StrongBox
- * that does not make ML-DSA) falls back to the TEE.
+ * The default generation: makes [set] under [alias] in StrongBox when
+ * [strongBox], else in the TEE, and reads the private key's [KeyInfo] level.
  */
-@RequiresApi(KeystorePqcBackend.MIN_SDK)
-private fun generateKeyPair(
+private fun generateOnce(
     alias: String,
     set: MlDsaParameterSet,
     authDurationSeconds: Int,
-    preferStrongBox: Boolean
-): KeyPair {
-    if (preferStrongBox) {
-        try {
-            return generateWith(alias, set, authDurationSeconds, strongBox = true)
-        } catch (e: Exception) {
-            // The TEE below.
-        }
-    }
-    return generateWith(alias, set, authDurationSeconds, strongBox = false)
+    strongBox: Boolean
+): PqcGeneratedKey {
+    if (Build.VERSION.SDK_INT < KeystorePqcBackend.MIN_SDK) throw UnsupportedAlgorithmException(set.wireName)
+    val pair = generateWith(alias, set, authDurationSeconds, strongBox)
+    val info = KeyFactory.getInstance(pair.private.algorithm, ANDROID_KEYSTORE)
+        .getKeySpec(pair.private, KeyInfo::class.java)
+    return PqcGeneratedKey(pair.public.encoded, info.securityLevel)
 }
 
 /**

@@ -14,13 +14,17 @@
  */
 package com.automatethethings.xkey.piv
 
+import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.util.Log
 import com.automatethethings.xkey.audit.AuditLogger
+import com.automatethethings.xkey.crypto.KeystoreAeadCipher
 import com.automatethethings.xkey.crypto.MlDsaParameterSet
+import com.automatethethings.xkey.crypto.PqcBacking
 import com.automatethethings.xkey.crypto.PqcHardware
 import com.automatethethings.xkey.crypto.PqcHardwareBackend
 import com.automatethethings.xkey.crypto.PqcKeysTest
+import com.automatethethings.xkey.crypto.PqcSoftwareKeyStore
 import com.automatethethings.xkey.crypto.UnsupportedAlgorithmException
 import io.mockk.coEvery
 import io.mockk.coVerify
@@ -46,6 +50,7 @@ import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder
 import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -425,6 +430,69 @@ class PivKeyManagerTest {
         } finally {
             PqcHardware.backend = saved
         }
+    }
+
+    /** A software ML-DSA store over a temporary directory and a stand-in seal. */
+    private fun softwareStore(): PqcSoftwareKeyStore {
+        val cipher = mockk<KeystoreAeadCipher>()
+        every { cipher.encrypt(any()) } answers { firstArg<ByteArray>().reversedArray() }
+        every { cipher.decrypt(any()) } answers { firstArg<ByteArray>().reversedArray() }
+        val context = mockk<Context>(relaxed = true)
+        every { context.filesDir } returns java.nio.file.Files.createTempDirectory("piv-pqc").toFile()
+        return PqcSoftwareKeyStore(context, cipher)
+    }
+
+    private fun stubSigningAudit() {
+        every {
+            AuditLogger.logSigningRequest(any(), any(), any(), any(), any(), any(), any(), any(), any())
+        } returns Unit
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun `a software ML-DSA sign holds the slot lock until it has recorded its use`() = runTest(StandardTestDispatcher()) {
+        stubSigningAudit()
+        keystore.live = null
+        val store = softwareStore()
+        val alias = PivSlot.AUTHENTICATION.keystoreAlias
+        store.generate(alias, MlDsaParameterSet.ML_DSA_44)
+        val usageGate = CompletableDeferred<Unit>()
+        coEvery { pivSlotDao.recordUsage("9A") } coAnswers { usageGate.await() }
+
+        val sign = async {
+            PivKeyManager(pivSlotDao, pqcStore = store)
+                .sign(PivSlot.AUTHENTICATION, byteArrayOf(1), PivAlgorithm.ML_DSA_44)
+        }
+        runCurrent()
+        val generate = launch {
+            PivKeyManager(pivSlotDao, pqcStore = store)
+                .generateKey(PivSlot.AUTHENTICATION, PivAlgorithm.ML_DSA_87, PqcBacking.SOFTWARE)
+        }
+        runCurrent()
+
+        assertFalse("generateKey ran while a sign held the slot", generate.isCompleted)
+        assertEquals(MlDsaParameterSet.ML_DSA_44, store.parameterSet(alias))
+
+        usageGate.complete(Unit)
+        assertEquals(MlDsaParameterSet.ML_DSA_44.signatureBytes, sign.await().size)
+        generate.join()
+        assertEquals(MlDsaParameterSet.ML_DSA_87, store.parameterSet(alias))
+    }
+
+    @Test
+    fun `a software slot regenerated as ML-DSA-87 refuses an ML-DSA-44 sign`() = runTest {
+        stubSigningAudit()
+        keystore.live = null
+        val store = softwareStore()
+        val manager = PivKeyManager(pivSlotDao, pqcStore = store)
+        manager.generateKey(PivSlot.AUTHENTICATION, PivAlgorithm.ML_DSA_44, PqcBacking.SOFTWARE)
+        manager.generateKey(PivSlot.AUTHENTICATION, PivAlgorithm.ML_DSA_87, PqcBacking.SOFTWARE)
+
+        val error = runCatching {
+            manager.sign(PivSlot.AUTHENTICATION, byteArrayOf(1), PivAlgorithm.ML_DSA_44)
+        }.exceptionOrNull()
+        assertTrue("$error", error is IllegalStateException)
+        coVerify(exactly = 0) { pivSlotDao.recordUsage(any()) }
     }
 
     private suspend fun importError(certDer: ByteArray): Throwable? =

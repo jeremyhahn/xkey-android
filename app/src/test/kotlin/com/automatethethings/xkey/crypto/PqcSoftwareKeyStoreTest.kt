@@ -85,7 +85,7 @@ class PqcSoftwareKeyStoreTest {
             assertTrue(store.contains(alias))
 
             val data = "message for ${set.wireName}".toByteArray()
-            val signature = store.sign(alias, data)
+            val signature = store.sign(alias, set, data)
             assertEquals(set.signatureBytes, signature.size)
             val verifier = MLDSASigner()
             verifier.init(false, PublicKeyFactory.createKey(spki))
@@ -105,7 +105,7 @@ class PqcSoftwareKeyStoreTest {
         assertFalse("PKCS#8 bytes on disk", contains(onDisk, privateTail))
         assertTrue("the sealed plaintext is zeroed after generate", sealedPlaintexts.single().all { it == 0.toByte() })
 
-        store.sign(alias, byteArrayOf(1, 2, 3))
+        store.sign(alias, MlDsaParameterSet.ML_DSA_65, byteArrayOf(1, 2, 3))
         assertEquals(1, openedPlaintexts.size)
         assertTrue("the opened plaintext is zeroed after sign", openedPlaintexts.single().all { it == 0.toByte() })
     }
@@ -117,7 +117,7 @@ class PqcSoftwareKeyStoreTest {
 
         assertFalse(store.contains("xkey_key_b"))
         assertNull(store.publicKeyDer("xkey_key_b"))
-        assertThrows(GeneralSecurityException::class.java) { store.sign("xkey_key_b", byteArrayOf(1)) }
+        assertThrows(GeneralSecurityException::class.java) { store.sign("xkey_key_b", MlDsaParameterSet.ML_DSA_44, byteArrayOf(1)) }
     }
 
     @Test
@@ -128,14 +128,30 @@ class PqcSoftwareKeyStoreTest {
         val b = PqcSoftwareKeyStore.Record.decode(store.fileFor("xkey_key_b").readBytes())
         store.fileFor("xkey_key_a").writeBytes(a.copy(sealed = b.sealed).encode())
 
-        assertThrows(GeneralSecurityException::class.java) { store.sign("xkey_key_a", byteArrayOf(1)) }
+        assertThrows(GeneralSecurityException::class.java) { store.sign("xkey_key_a", MlDsaParameterSet.ML_DSA_44, byteArrayOf(1)) }
     }
 
     @Test
     fun `a key that does not exist does not sign`() {
         assertFalse(store.contains("xkey_key_none"))
         assertNull(store.parameterSet("xkey_key_none"))
-        assertThrows(GeneralSecurityException::class.java) { store.sign("xkey_key_none", byteArrayOf(1)) }
+        assertThrows(GeneralSecurityException::class.java) { store.sign("xkey_key_none", MlDsaParameterSet.ML_DSA_44, byteArrayOf(1)) }
+    }
+
+    @Test
+    fun `a record of another set than the one asked does not sign`() {
+        store.generate("xkey_key_87", MlDsaParameterSet.ML_DSA_87)
+
+        assertThrows(PqcKeyRecordException::class.java) {
+            store.sign("xkey_key_87", MlDsaParameterSet.ML_DSA_44, byteArrayOf(1))
+        }
+        assertThrows(PqcKeyRecordException::class.java) {
+            store.sign("xkey_key_87", MlDsaParameterSet.ML_DSA_65, byteArrayOf(1))
+        }
+        assertEquals(
+            MlDsaParameterSet.ML_DSA_87.signatureBytes,
+            store.sign("xkey_key_87", MlDsaParameterSet.ML_DSA_87, byteArrayOf(1)).size
+        )
     }
 
     @Test
@@ -149,9 +165,9 @@ class PqcSoftwareKeyStoreTest {
             assertEquals(0, store.authDurationSeconds("xkey_key_auth"))
             assertEquals(-1, store.authDurationSeconds("xkey_key_open"))
             assertNull(store.authDurationSeconds("xkey_key_none"))
-            assertThrows(BiometricRequiredException::class.java) { store.sign("xkey_key_auth", byteArrayOf(1)) }
-            store.sign("xkey_key_auth", byteArrayOf(1), userAuthenticatedAt = 500_000L)
-            store.sign("xkey_key_open", byteArrayOf(1))
+            assertThrows(BiometricRequiredException::class.java) { store.sign("xkey_key_auth", MlDsaParameterSet.ML_DSA_44, byteArrayOf(1)) }
+            store.sign("xkey_key_auth", MlDsaParameterSet.ML_DSA_44, byteArrayOf(1), userAuthenticatedAt = 500_000L)
+            store.sign("xkey_key_open", MlDsaParameterSet.ML_DSA_44, byteArrayOf(1))
         } finally {
             PqcSoftwareKeyStore.clock = defaultClock
         }
@@ -165,7 +181,7 @@ class PqcSoftwareKeyStoreTest {
         store.fileFor("xkey_key_old").writeBytes(bytes)
 
         assertFalse(store.contains("xkey_key_old"))
-        assertThrows(GeneralSecurityException::class.java) { store.sign("xkey_key_old", byteArrayOf(1)) }
+        assertThrows(GeneralSecurityException::class.java) { store.sign("xkey_key_old", MlDsaParameterSet.ML_DSA_44, byteArrayOf(1)) }
     }
 
     @Test

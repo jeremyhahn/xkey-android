@@ -152,8 +152,8 @@ class KeystoreManagerPqcLifecycleTest {
         generate("direct", 0)
         val alias = KeystoreManager.generalKeyAlias("direct")
 
-        assertThrows(BiometricRequiredException::class.java) { store.sign(alias, DATA) }
-        assertEquals(SET.signatureBytes, store.sign(alias, DATA, userAuthenticatedAt = now).size)
+        assertThrows(BiometricRequiredException::class.java) { store.sign(alias, SET, DATA) }
+        assertEquals(SET.signatureBytes, store.sign(alias, SET, DATA, userAuthenticatedAt = now).size)
     }
 
     private fun row(keyId: String) = KeyEntity(

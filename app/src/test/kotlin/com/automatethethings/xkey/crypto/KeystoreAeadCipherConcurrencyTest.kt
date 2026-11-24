@@ -149,7 +149,7 @@ class KeystoreAeadCipherConcurrencyTest {
         assertEquals("one wrap key is generated", 1, generations.get())
         val store = PqcSoftwareKeyStore(context, KeystoreAeadCipher(PqcSoftwareKeyStore.WRAP_KEY_ALIAS))
         for (i in 0 until THREADS) {
-            val signature = store.sign("xkey_key_race$i", byteArrayOf(i.toByte()))
+            val signature = store.sign("xkey_key_race$i", MlDsaParameterSet.ML_DSA_44, byteArrayOf(i.toByte()))
             assertEquals(MlDsaParameterSet.ML_DSA_44.signatureBytes, signature.size)
         }
     }
