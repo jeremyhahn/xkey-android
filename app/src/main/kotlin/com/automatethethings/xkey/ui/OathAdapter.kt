@@ -69,8 +69,8 @@ class OathAdapter(
             }
         }
 
-        // The code section is measured first and never shrinks; on a narrow
-        // row or with a large font it drops below the issuer and account.
+        // The issuer and account are a small title line; the code has its
+        // own line below and is never cut.
         val content = OathRowLayout(context).apply {
             layoutParams = ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -82,17 +82,17 @@ class OathAdapter(
                 UIHelpers.dpToPxInt(context, 16),
                 UIHelpers.dpToPxInt(context, 14)
             )
-            leadingGap = UIHelpers.dpToPxInt(context, 14)
-            codeGap = UIHelpers.dpToPxInt(context, 12)
+            leadingGap = UIHelpers.dpToPxInt(context, 12)
             stackGap = UIHelpers.dpToPxInt(context, 8)
-            minInfoWidth = UIHelpers.dpToPxInt(context, MIN_INFO_WIDTH_DP)
+            indicatorGap = UIHelpers.dpToPxInt(context, 12)
+            progressGap = UIHelpers.dpToPxInt(context, 6)
         }
 
         // Gradient initial circle
         val initialContainer = FrameLayout(context).apply {
             layoutParams = ViewGroup.LayoutParams(
-                UIHelpers.dpToPxInt(context, 48),
-                UIHelpers.dpToPxInt(context, 48)
+                UIHelpers.dpToPxInt(context, 36),
+                UIHelpers.dpToPxInt(context, 36)
             )
             tag = "initialContainer"
         }
@@ -104,7 +104,7 @@ class OathAdapter(
             )
             gravity = Gravity.CENTER
             setTextColor(ContextCompat.getColor(context, R.color.on_primary))
-            textSize = 20f
+            textSize = 16f
             typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
             tag = "initial"
         }
@@ -117,11 +117,11 @@ class OathAdapter(
             GradientDrawable.Orientation.TL_BR,
             intArrayOf(gradientStart, gradientEnd)
         ).apply {
-            cornerRadius = UIHelpers.dpToPx(context, 24f)
+            cornerRadius = UIHelpers.dpToPx(context, 18f)
         }
         initialContainer.background = gradient
 
-        // Info column: issuer and account ellipsize; the code never does.
+        // Title: issuer and account in small text, one line each, ellipsized.
         val infoColumn = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             layoutParams = ViewGroup.LayoutParams(
@@ -131,7 +131,7 @@ class OathAdapter(
         }
 
         val issuerText = TextView(context).apply {
-            setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_TitleMedium)
+            setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_LabelLarge)
             setTextColor(UIHelpers.resolveThemeColor(
                 context,
                 com.google.android.material.R.attr.colorOnSurface
@@ -143,43 +143,29 @@ class OathAdapter(
         infoColumn.addView(issuerText)
 
         val accountText = TextView(context).apply {
-            setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_LabelMedium)
+            setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_BodySmall)
             setTextColor(UIHelpers.resolveThemeColor(
                 context,
                 com.google.android.material.R.attr.colorOnSurfaceVariant
             ))
-            maxLines = 2
+            maxLines = 1
             ellipsize = android.text.TextUtils.TruncateAt.END
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
-            ).apply {
-                topMargin = UIHelpers.dpToPxInt(context, 2)
-            }
+            )
             tag = "account"
         }
         infoColumn.addView(accountText)
 
-        // Code section: OTP code, countdown, progress
-        val codeSection = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
+        // Code line: the OTP code in large monospace, never cut.
+        val codeText = TextView(context).apply {
             layoutParams = ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
             )
-            gravity = Gravity.END
-            tag = "codeSection"
-        }
-
-        val codeText = TextView(context).apply {
-            // A vertical LinearLayout defaults a child to MATCH_PARENT, which
-            // let the section shrink the code to the countdown's width.
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            )
             keepWhole()
-            textSize = 24f
+            textSize = 28f
             typeface = Typeface.MONOSPACE
             setTextColor(UIHelpers.resolveThemeColor(
                 context,
@@ -188,33 +174,26 @@ class OathAdapter(
             letterSpacing = 0.1f
             tag = "code"
         }
-        codeSection.addView(codeText)
 
         val countdownText = TextView(context).apply {
             keepWhole()
-            setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_LabelSmall)
+            setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_LabelMedium)
             setTextColor(UIHelpers.resolveThemeColor(
                 context,
                 com.google.android.material.R.attr.colorOnSurfaceVariant
             ))
-            layoutParams = LinearLayout.LayoutParams(
+            layoutParams = ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
-            ).apply {
-                topMargin = UIHelpers.dpToPxInt(context, 2)
-            }
-            gravity = Gravity.END
+            )
             tag = "countdown"
         }
-        codeSection.addView(countdownText)
 
         val progressBar = ProgressBar(context, null, android.R.attr.progressBarStyleHorizontal).apply {
-            layoutParams = LinearLayout.LayoutParams(
+            layoutParams = ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 UIHelpers.dpToPxInt(context, 4)
-            ).apply {
-                topMargin = UIHelpers.dpToPxInt(context, 4)
-            }
+            )
             progressTintList = ColorStateList.valueOf(
                 UIHelpers.resolveThemeColor(context, androidx.appcompat.R.attr.colorPrimary)
             )
@@ -223,10 +202,8 @@ class OathAdapter(
             )
             tag = "progress"
         }
-        codeSection.addView(progressBar)
 
-        content.setChildren(initialContainer, infoColumn, codeSection)
-        content.fitText = codeText
+        content.setChildren(initialContainer, infoColumn, codeText, countdownText, progressBar)
 
         card.addView(content)
         return card
@@ -301,9 +278,6 @@ class OathAdapter(
     }
 
     companion object {
-        /** The narrowest issuer/account column the code may sit beside, in dp. */
-        const val MIN_INFO_WIDTH_DP = 96
-
         /**
          * Format an OTP code with a space in the middle for readability.
          *
@@ -328,57 +302,55 @@ internal fun TextView.keepWhole() {
 }
 
 /**
- * The OATH list row: a leading badge, the issuer/account column and the
- * code section. The code section is measured first at its full natural
- * width and never shrinks; the info column takes what is left. When less
- * than [minInfoWidth] would be left (a narrow screen or a large font), the
- * code section drops below the badge and info column and spans the row.
+ * The OATH list row, one shape at every width and font scale:
  *
- * Children are added with [setChildren]; the row mirrors for right-to-left
- * layouts.
+ * - a title line: the leading badge and the issuer/account column, which
+ *   takes the rest of the width and ellipsizes;
+ * - the code line below it: the code at its full natural width on one line,
+ *   never ellipsized, with the [indicator] (the countdown) at the end of the
+ *   same line, or under the code when both do not fit side by side;
+ * - the [progress] bar across the row at the bottom.
+ *
+ * Only when the code alone is wider than the whole row is its text size
+ * scaled down to keep it on one line. Children are added with
+ * [setChildren]; the row mirrors for right-to-left layouts.
  */
 internal class OathRowLayout(context: Context) : ViewGroup(context) {
 
     private lateinit var leading: View
-    private lateinit var info: View
-    private lateinit var code: View
+    private lateinit var title: View
+    private lateinit var code: TextView
+    private lateinit var indicator: View
+    private lateinit var progress: View
 
     /** Space after the leading badge. */
     var leadingGap: Int = 0
 
-    /** Space between the info column and the code section side by side. */
-    var codeGap: Int = 0
-
-    /** Space above the code section once it drops below. */
+    /** Space between the title line and the code line. */
     var stackGap: Int = 0
 
-    /** The narrowest info column the code section may sit beside. */
-    var minInfoWidth: Int = 0
+    /** Least space between the code and the indicator beside it. */
+    var indicatorGap: Int = 0
 
-    /**
-     * The code text inside the code section. Only when the code is wider
-     * than the whole row is its text size scaled down to keep it on one line.
-     */
-    var fitText: TextView? = null
-        set(value) {
-            field = value
-            fitTextSize = 0f
-        }
+    /** Space above the progress bar. */
+    var progressGap: Int = 0
 
-    private var fitTextSize = 0f
+    private var codeTextSize = 0f
+    private var indicatorBelow = false
 
-    /** True when the last measure put the code section below the info column. */
-    var isStacked: Boolean = false
-        private set
-
-    fun setChildren(leading: View, info: View, code: View) {
+    fun setChildren(leading: View, title: View, code: TextView, indicator: View, progress: View) {
         removeAllViews()
         this.leading = leading
-        this.info = info
+        this.title = title
         this.code = code
+        this.indicator = indicator
+        this.progress = progress
+        codeTextSize = 0f
         addView(leading)
-        addView(info)
+        addView(title)
         addView(code)
+        addView(indicator)
+        addView(progress)
     }
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
@@ -386,27 +358,37 @@ internal class OathRowLayout(context: Context) : ViewGroup(context) {
         val inner = max(0, width - paddingLeft - paddingRight)
         val unspecified = MeasureSpec.makeMeasureSpec(0, MeasureSpec.UNSPECIFIED)
 
-        fitText?.let { text ->
-            if (fitTextSize == 0f) fitTextSize = text.textSize
-            if (text.textSize != fitTextSize) text.setTextSize(TypedValue.COMPLEX_UNIT_PX, fitTextSize)
-        }
+        if (codeTextSize == 0f) codeTextSize = code.textSize
+        if (code.textSize != codeTextSize) code.setTextSize(TypedValue.COMPLEX_UNIT_PX, codeTextSize)
 
         leading.measure(fixedOrWrap(leading.layoutParams.width, inner), fixedOrWrap(leading.layoutParams.height, 0))
-        code.measure(MeasureSpec.makeMeasureSpec(inner, MeasureSpec.AT_MOST), unspecified)
+        val titleWidth = max(0, inner - leading.measuredWidth - leadingGap)
+        title.measure(exactly(titleWidth), unspecified)
+        val titleHeight = max(leading.measuredHeight, title.measuredHeight)
 
-        val topWidth = max(0, inner - leading.measuredWidth - leadingGap)
-        val besideCode = topWidth - codeGap - code.measuredWidth
-        isStacked = besideCode < minInfoWidth
+        code.measure(unspecified, unspecified)
+        if (code.measuredWidth > inner && shrinkToFit(inner)) code.measure(unspecified, unspecified)
+        code.measure(exactly(minOf(code.measuredWidth, inner)), unspecified)
 
-        val contentHeight = if (isStacked) {
-            info.measure(exactly(topWidth), unspecified)
-            code.measure(exactly(inner), unspecified)
-            if (shrinkToFit(inner)) code.measure(exactly(inner), unspecified)
-            max(leading.measuredHeight, info.measuredHeight) + stackGap + code.measuredHeight
-        } else {
-            info.measure(exactly(besideCode), unspecified)
-            maxOf(leading.measuredHeight, info.measuredHeight, code.measuredHeight)
+        var codeLineHeight = code.measuredHeight
+        indicatorBelow = false
+        if (indicator.visibility != View.GONE) {
+            indicator.measure(MeasureSpec.makeMeasureSpec(inner, MeasureSpec.AT_MOST), unspecified)
+            indicatorBelow = code.measuredWidth + indicatorGap + indicator.measuredWidth > inner
+            codeLineHeight = if (indicatorBelow) {
+                code.measuredHeight + indicator.measuredHeight
+            } else {
+                max(code.measuredHeight, indicator.measuredHeight)
+            }
         }
+
+        var progressHeight = 0
+        if (progress.visibility != View.GONE) {
+            progress.measure(exactly(inner), fixedOrWrap(progress.layoutParams.height, 0))
+            progressHeight = progressGap + progress.measuredHeight
+        }
+
+        val contentHeight = titleHeight + stackGap + codeLineHeight + progressHeight
         setMeasuredDimension(
             width,
             resolveSize(contentHeight + paddingTop + paddingBottom, heightMeasureSpec)
@@ -422,33 +404,43 @@ internal class OathRowLayout(context: Context) : ViewGroup(context) {
         }
 
         val start = if (rtl) paddingRight else paddingLeft
-        val top = paddingTop
-        val infoStart = start + leading.measuredWidth + leadingGap
-        if (isStacked) {
-            val topHeight = max(leading.measuredHeight, info.measuredHeight)
-            place(leading, start, top + (topHeight - leading.measuredHeight) / 2)
-            place(info, infoStart, top + (topHeight - info.measuredHeight) / 2)
-            place(code, start, top + topHeight + stackGap)
+        val end = rowWidth - (if (rtl) paddingLeft else paddingRight)
+        var top = paddingTop
+
+        val titleHeight = max(leading.measuredHeight, title.measuredHeight)
+        place(leading, start, top + (titleHeight - leading.measuredHeight) / 2)
+        place(title, start + leading.measuredWidth + leadingGap, top + (titleHeight - title.measuredHeight) / 2)
+        top += titleHeight + stackGap
+
+        var codeLineHeight = code.measuredHeight
+        if (indicator.visibility != View.GONE) {
+            if (indicatorBelow) {
+                place(code, start, top)
+                place(indicator, end - indicator.measuredWidth, top + code.measuredHeight)
+                codeLineHeight += indicator.measuredHeight
+            } else {
+                codeLineHeight = max(code.measuredHeight, indicator.measuredHeight)
+                place(code, start, top + (codeLineHeight - code.measuredHeight) / 2)
+                place(indicator, end - indicator.measuredWidth, top + (codeLineHeight - indicator.measuredHeight) / 2)
+            }
         } else {
-            val height = (b - t) - paddingTop - paddingBottom
-            place(leading, start, top + (height - leading.measuredHeight) / 2)
-            place(info, infoStart, top + (height - info.measuredHeight) / 2)
-            place(code, infoStart + info.measuredWidth + codeGap, top + (height - code.measuredHeight) / 2)
+            place(code, start, top)
         }
+        top += codeLineHeight
+
+        if (progress.visibility != View.GONE) place(progress, start, top + progressGap)
     }
 
     /**
      * Last resort when even the whole row is narrower than the code: scale
-     * [fitText] down until it fits on one line, so it is never cut. Returns
-     * true when the size changed.
+     * the code text down until it fits on one line, so it is never cut.
+     * Returns true when the size changed.
      */
     private fun shrinkToFit(rowWidth: Int): Boolean {
-        val text = fitText ?: return false
-        val room = rowWidth - code.paddingLeft - code.paddingRight -
-            text.totalPaddingLeft - text.totalPaddingRight
-        val needed = text.paint.measureText(text.text.toString())
+        val room = rowWidth - code.totalPaddingLeft - code.totalPaddingRight
+        val needed = code.paint.measureText(code.text.toString())
         if (room <= 0 || needed <= room) return false
-        text.setTextSize(TypedValue.COMPLEX_UNIT_PX, text.textSize * room / needed * SHRINK_MARGIN)
+        code.setTextSize(TypedValue.COMPLEX_UNIT_PX, code.textSize * room / needed * SHRINK_MARGIN)
         return true
     }
 
