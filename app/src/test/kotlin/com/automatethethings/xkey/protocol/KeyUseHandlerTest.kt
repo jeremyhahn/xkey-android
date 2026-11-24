@@ -598,8 +598,61 @@ class KeyUseHandlerTest {
     }
 
     // ---------------------------------------------------------------------
+    // Audit entries and key material
+    // ---------------------------------------------------------------------
+
+    @Test
+    fun `each keystore key use writes one entry naming the key and the desktop`() = runTest {
+        gatedRequests().filter { (_, params) -> JSONObject(params).getString("keyId").startsWith("hw-") }
+            .forEach { (method, params) -> assertOneKeyUseEntry(method, params) }
+    }
+
+    @Test
+    fun `a software hmac writes one entry naming the key and the desktop`() = runTest {
+        assertOneKeyUseEntry(MethodNames.LOCAL_HMAC, """{"keyId":"$SW_HMAC_256","data":"$data"}""")
+    }
+
+    @Test
+    fun `found - getPublicKey writes no audit entry`() = runTest {
+        servedBy(PEER_OK) { result(call(MethodNames.LOCAL_GET_PUBLIC_KEY, """{"keyId":"$HW_EC","format":"der"}""")) }
+        val keyUse = setOf(
+            AuditOperationType.DECRYPTION_REQUEST, AuditOperationType.ENCRYPTION_REQUEST,
+            AuditOperationType.HMAC_REQUEST, AuditOperationType.KEY_DERIVATION_REQUEST,
+            AuditOperationType.SIGNING_REQUEST
+        )
+        assertTrue("no key-use entry: $inserted", inserted.none { it.operationType in keyUse })
+    }
+
+    // ---------------------------------------------------------------------
     // Helpers
     // ---------------------------------------------------------------------
+
+    /** The audit operation each key-use method records. */
+    private fun operationOf(method: String): AuditOperationType = when (method) {
+        MethodNames.LOCAL_DECRYPT, MethodNames.LOCAL_SYMMETRIC_DECRYPT -> AuditOperationType.DECRYPTION_REQUEST
+        MethodNames.LOCAL_SYMMETRIC_ENCRYPT -> AuditOperationType.ENCRYPTION_REQUEST
+        MethodNames.LOCAL_HMAC -> AuditOperationType.HMAC_REQUEST
+        MethodNames.LOCAL_ECDH -> AuditOperationType.KEY_DERIVATION_REQUEST
+        else -> error("no key-use operation for $method")
+    }
+
+    /** [method] served for desktop A succeeds and leaves exactly one success entry for its key. */
+    private suspend fun assertOneKeyUseEntry(method: String, params: String) {
+        inserted.clear()
+        val keyId = JSONObject(params).getString("keyId")
+        servedBy(PEER_OK) { result(call(method, params)) }
+        val entries = inserted.filter { it.success && it.keyId != null }
+        assertEquals("$method $keyId: $inserted", 1, entries.size)
+        val entry = entries.single()
+        assertEquals("$method $keyId", operationOf(method), entry.operationType)
+        assertEquals("$method $keyId", keyId, entry.keyId)
+        assertEquals("$method $keyId", PEER_OK, entry.deviceId)
+        assertEquals("$method $keyId", "Desktop A", entry.deviceName)
+        val details = entry.details.orEmpty()
+        listOf(data, peerKey, b64(aesMaterial), b64(RFC4231_KEY)).forEach { secret ->
+            assertFalse("$method $keyId: the entry carries request or key bytes", details.contains(secret))
+        }
+    }
 
     /** A Keystore-key request and, where the method has one, a software-key request per method. */
     private fun gatedRequests(): List<Pair<String, String>> = listOf(
