@@ -1,19 +1,21 @@
-# File Operations
+# File operations
 
-> **Status: REFERENCE** · Last verified: 2026-10-09
-> As-built description of file sign, verify, encrypt and decrypt via `FileOperationActivity`.
+> **Status: REFERENCE** · Last verified: 2026-11-23
+> Engineering reference for `FileOperationActivity`: the share-sheet entry, the screen, key selection, the `.xkeyenc` and `.xkeysig` formats, and audit events.
 
-This document describes the file sign, verify, encrypt, and decrypt features
-exposed through the Android Share sheet via `FileOperationActivity`.
+The flows themselves, with sequence diagrams, are in
+[architecture.md](architecture.md).
 
-## Share Sheet Integration
+## Share sheet entry
 
-`FileOperationActivity` is registered as a handler for `ACTION_SEND` and
-`ACTION_SEND_MULTIPLE` intents with `mimeType="*/*"`. This makes xKey appear
-in the system Share sheet when any app shares a file.
+`FileOperationActivity` handles `ACTION_SEND` and `ACTION_SEND_MULTIPLE` for
+any MIME type, so xKey shows up in the share sheet for every file:
 
 ```xml
-<activity android:name=".ui.FileOperationActivity" android:exported="true">
+<activity
+    android:name=".ui.FileOperationActivity"
+    android:exported="true"
+    android:label="@string/file_operation_title">
     <intent-filter>
         <action android:name="android.intent.action.SEND" />
         <category android:name="android.intent.category.DEFAULT" />
@@ -27,233 +29,146 @@ in the system Share sheet when any app shares a file.
 </activity>
 ```
 
-The activity receives file URIs via `intent.getParcelableExtra(EXTRA_STREAM)`,
-reads file metadata from `ContentResolver`, and presents a Material 3 UI with:
+`extractFileUris` reads `EXTRA_STREAM` (one URI for `SEND`, a list for
+`SEND_MULTIPLE`). The operations use only the first URI.
 
-1. File info card (name, size, MIME type)
-2. Operation selector: Sign, Verify, Encrypt, Decrypt
-3. Key selector (filtered by operation type)
-4. Recipient selector (for Encrypt only, from `ContactDao`)
-5. Process button with progress indicator and result card
+The screen is built in code (no layout XML) from these cards:
 
-## Sign Flow
+1. File info: name and size of every shared file, from `ContentResolver`.
+2. Operation: Sign, Verify, Encrypt, Decrypt.
+3. Key: shown for Sign and Decrypt, hidden for Verify and Encrypt.
+4. Recipient: shown for Encrypt only, filled from `ContactDao.getAll()`.
+5. Process button, progress indicator and a result card. The result text is
+   in the danger colour when the operation failed and the verified colour
+   otherwise.
 
-```mermaid
-sequenceDiagram
-    participant User
-    participant FOA as FileOperationActivity
-    participant CR as ContentResolver
-    participant MH as MediaHasher
-    participant KM as KeystoreManager
-    participant XMP as XmpMetadataHelper
-    participant SAF as Storage Access Framework
-    participant AL as AuditLogger
+## Key selection
 
-    User->>FOA: Share file, select Sign, choose key
-    FOA->>CR: openInputStream(uri)
-    CR-->>FOA: InputStream
+`loadKeysAndContacts` reads every row from `KeyDao` and splits them:
 
-    FOA->>MH: hashStream(inputStream)
-    Note over MH: Streaming SHA-256 via DigestInputStream
-    MH-->>FOA: hex hash string
+| Operation | Choices |
+|-----------|---------|
+| Sign | Keys whose `keyType` is `signing`, `fido2`, `ca` or `attestation`, or whose algorithm starts with `ES` or `RS`, or is `Ed25519` |
+| Verify | No key choice. The public key comes from a contact or a local key (see below) |
+| Encrypt | No key choice. The user picks a recipient contact |
+| Decrypt | Keys whose `keyType` is `encryption`, or whose algorithm starts with `ES` and whose `keyType` is not `fido2` |
 
-    FOA->>KM: signWithAlgorithm(keyId, hashBytes, algorithm)
-    Note over KM: Sign in Keystore hardware
-    KM-->>FOA: DER-encoded signature bytes
+`KeystoreManager.signWithAlgorithm` accepts ES256, ES384, ES512, RS256, RS384
+and RS512. An `Ed25519` key appears in the Sign list but signing with it
+throws a `SigningException`. A Decrypt key must have been generated with
+`PURPOSE_AGREE_KEY` on Android 12 or later; any other EC key in the list fails
+at the ECDH step.
 
-    FOA->>FOA: Build ContentAuthenticityData with SignatureEntry
+After a successful sign or decrypt the activity calls `keyDao.recordUsage`
+for the key.
 
-    alt Image or video file
-        FOA->>XMP: writeSignature(filePath, data)
-        Note over XMP: Embed in EXIF (JPEG) or sidecar
-    else Other file type
-        FOA->>SAF: ACTION_CREATE_DOCUMENT (.xkeysig)
-        SAF-->>FOA: Output URI
-        FOA->>CR: Write .xkeysig JSON to output URI
-    end
+## Sign
 
-    FOA->>AL: logFileSigned(keyId, label, uri)
-    FOA-->>User: Show success result
-```
+1. `MediaHasher.hashCanonicalUri` hashes the file. For JPEG it skips the
+   `APPn` and `COM` segments; anything else is hashed whole.
+2. `KeystoreManager.signWithAlgorithm(keyId, hashBytes, key.algorithm)` signs
+   the 32 hash bytes. The JCA algorithm (for example `SHA256withECDSA` for
+   ES256) hashes its input again, so the signature is over SHA-256 of the
+   content hash. Verification does the same.
+3. The activity builds a `ContentAuthenticityData` with one `SignatureEntry`
+   whose role is `CREATOR`. `keyFingerprint` is the SHA-256 of the key's
+   public key DER, or the key ID when the row has no public key.
+4. A JPEG gets the block in its EXIF `UserComment` and is written back over
+   the shared URI. Anything else gets a `.xkeysig` file through the save
+   picker.
 
-## Verify Flow
+## Verify
 
-```mermaid
-sequenceDiagram
-    participant User
-    participant FOA as FileOperationActivity
-    participant CR as ContentResolver
-    participant MH as MediaHasher
-    participant XMP as XmpMetadataHelper
-    participant KD as KeyDao
-    participant CD as ContactDao
-    participant KM as KeystoreManager
-    participant AL as AuditLogger
+1. For a JPEG, `XmpMetadataHelper.readSignatureFromUri` looks for an EXIF
+   `UserComment` that starts with `XKEY_SIG:`. Other types never have an
+   embedded block.
+2. With no embedded block the activity opens the system picker
+   (`OpenDocument`, filtered to `application/json` and `*/*`) for a
+   `.xkeysig` file.
+3. `MediaHasher.contentHashMatchesUri` compares the stored `contentHash` with
+   the file. An embedded block must match the canonical hash. A `.xkeysig`
+   file may match the canonical hash or the SHA-256 of the whole file.
+4. For each entry the activity looks up a contact with
+   `ContactDao.getByFingerprint(keyFingerprint)`. If there is none, it passes
+   every local key to `SignerVerification.verify`, which matches one whose
+   public key DER hashes to the fingerprint.
 
-    User->>FOA: Share file, select Verify
-    FOA->>CR: openInputStream(uri)
-    FOA->>MH: hashStream(inputStream)
-    MH-->>FOA: Content hash
+The result card has one line per signer, `<name>: Verified`,
+`<name>: Unknown signer` or `<name>: Failed`, under a header:
 
-    FOA->>XMP: readSignature(filePath)
-    alt Signature found in EXIF/XMP
-        XMP-->>FOA: ContentAuthenticityData
-    else No embedded signature
-        FOA-->>User: Prompt to pick .xkeysig file
-        User->>FOA: Select .xkeysig file
-        FOA->>CR: Read JSON from .xkeysig URI
-        FOA-->>FOA: Parse ContentAuthenticityData
-    end
+| Header | When |
+|--------|------|
+| Signature verified | Every signer verified |
+| Signature verification failed | Any signer failed, or the content hash did not match |
+| Verification complete | No failures, but at least one unknown signer |
 
-    loop Each SignatureEntry
-        FOA->>KD: getByPublicKeyFingerprint(keyFingerprint)
-        alt Found in local keys
-            KD-->>FOA: KeyEntity (public key + name)
-        else Not in local keys
-            FOA->>CD: getByFingerprint(keyFingerprint)
-            alt Found in contacts
-                CD-->>FOA: ContactEntity (public key + name)
-            else Unknown signer
-                FOA-->>FOA: Mark as unknown
-            end
-        end
+The name is the matched contact's name or local key's label. With no match it
+is the `signerName` from the file, or the first 16 characters of the
+fingerprint.
 
-        FOA->>KM: Verify signature against content hash
-    end
+## Encrypt and decrypt
 
-    FOA->>AL: logFileVerified(uri, results)
-    FOA-->>User: Show verification results
-    Note over User: Green = verified, Yellow = unknown signer, Red = failed
-```
+`FileEncryptor` does the work; see [architecture.md](architecture.md) for the
+sequence. The activity encrypts into a staging file named after
+`<file>.xkeyenc`, then asks where to save it. Decrypt does the same with the
+`.xkeyenc` suffix removed from the name.
 
-## Encrypt Flow (Hardware-Backed ECIES)
-
-All EC private key operations happen inside Android Keystore hardware.
-
-```mermaid
-sequenceDiagram
-    participant User
-    participant FOA as FileOperationActivity
-    participant FE as FileEncryptor
-    participant KS as Android Keystore
-    participant KM as KeystoreManager
-    participant SAF as Storage Access Framework
-    participant AL as AuditLogger
-
-    User->>FOA: Share file, select Encrypt, choose recipient
-    FOA->>FOA: Get recipient public key from ContactDao
-
-    FOA->>FE: encryptForRecipient(recipientPubKey, plaintext, output)
-
-    Note over FE: Generate ephemeral key ID (UUID)
-    FE->>KS: KeyPairGenerator(EC P-256, PURPOSE_AGREE_KEY)
-    Note over KS: Ephemeral key created in hardware
-
-    FE->>KM: getPublicKeyDER(ephemeralKeyId)
-    KM-->>FE: Ephemeral public key bytes
-
-    FE->>KM: performECDH(ephemeralKeyId, recipientPubKey)
-    Note over KS: ECDH in hardware
-    KM-->>FE: Shared secret (32 bytes)
-
-    Note over FE: salt = SecureRandom(32 bytes)
-    Note over FE: aesKey = HKDF-SHA256(sharedSecret, salt)
-    Note over FE: iv = SecureRandom(12 bytes)
-
-    FE->>FE: Write .xkeyenc header
-    FE->>FE: AES-256-GCM encrypt (CipherOutputStream)
-
-    FE->>KM: deleteKey(ephemeralKeyId)
-    Note over KM: Ephemeral key destroyed
-
-    FE-->>FOA: Encryption complete
-
-    FOA->>SAF: ACTION_CREATE_DOCUMENT (.xkeyenc)
-    FOA->>AL: logFileEncrypted(recipientFingerprint, uri)
-    FOA-->>User: Show success, save .xkeyenc file
-```
-
-## Decrypt Flow
-
-```mermaid
-sequenceDiagram
-    participant User
-    participant FOA as FileOperationActivity
-    participant FE as FileEncryptor
-    participant KM as KeystoreManager
-    participant KS as Android Keystore
-    participant SAF as Storage Access Framework
-    participant AL as AuditLogger
-
-    User->>FOA: Share .xkeyenc file, select Decrypt, choose key
-    FOA->>FE: decryptWithKey(localKeyId, input, output)
-
-    FE->>FE: Read header (version, ephemeral pubkey, salt, IV)
-
-    FE->>KM: performECDH(localKeyId, ephemeralPubKeyDer)
-    Note over KS: ECDH in hardware
-    KM-->>FE: Shared secret (32 bytes)
-
-    Note over FE: aesKey = HKDF-SHA256(sharedSecret, salt)
-    FE->>FE: AES-256-GCM decrypt (CipherInputStream)
-
-    FE-->>FOA: Decryption complete
-
-    FOA->>SAF: ACTION_CREATE_DOCUMENT (original extension)
-    FOA->>AL: logFileDecrypted(keyId, uri)
-    FOA-->>User: Show success, save decrypted file
-```
-
-## `.xkeyenc` Binary Format
-
-The encrypted file format is a compact binary layout.
+## `.xkeyenc` binary format
 
 ```
-Offset  Size        Field               Description
-0       1           version             Format version (0x01)
-1       2           ephemeral_len       Ephemeral public key length (big-endian)
-3       var         ephemeral_pubkey    DER-encoded ephemeral EC public key
-var     32          salt                Random salt for HKDF
-var+32  12          iv                  AES-256-GCM initialization vector
-var+44  var         ciphertext          Encrypted file content
-tail    16          tag                 AES-GCM authentication tag (appended by GCM)
+Offset  Size  Field             Description
+0       1     version           Format version, 0x01
+1       2     ephemeral_len     Length of the ephemeral public key, big-endian
+3       var   ephemeral_pubkey  DER (SubjectPublicKeyInfo) ephemeral P-256 public key
+var     32    salt              HKDF salt
+var+32  12    iv                AES-GCM nonce
+var+44  var   ciphertext        AES-256-GCM ciphertext
+tail    16    tag               GCM authentication tag, appended by the cipher
 ```
 
-### Typical sizes
+| Field | Size | Notes |
+|-------|------|-------|
+| Version | 1 byte | Always `0x01`. Decrypt rejects any other value |
+| Ephemeral key length | 2 bytes | Big-endian unsigned 16-bit |
+| Ephemeral public key | 91 bytes for P-256 | SubjectPublicKeyInfo DER |
+| Salt | 32 bytes | Random |
+| IV | 12 bytes | Random |
+| Header total | 138 bytes for P-256 | Before the ciphertext |
+| Tag | 16 bytes | 128-bit GCM tag |
 
-| Field | Typical Size | Notes |
-|-------|-------------|-------|
-| Version | 1 byte | Always `0x01` |
-| Ephemeral key length | 2 bytes | Big-endian uint16 |
-| Ephemeral public key | 91 bytes | P-256 SubjectPublicKeyInfo DER |
-| Salt | 32 bytes | Random, for HKDF |
-| IV | 12 bytes | Random, for AES-GCM |
-| Header total | ~138 bytes | Before ciphertext |
-| Auth tag | 16 bytes | 128-bit GCM tag, at end of ciphertext |
+Key derivation is HKDF-SHA256 (Bouncy Castle `HKDFBytesGenerator`) over the
+ECDH shared secret, with the salt from the header and the info string
+`xkey-file-encryption-v1`, giving a 32-byte AES key. Data is streamed through
+the cipher in 8 KiB buffers, so file size is not limited by memory.
 
-### Security Properties
+What the format gives you:
 
-- **Confidentiality**: AES-256-GCM with unique random IV
-- **Integrity**: 128-bit GCM authentication tag
-- **Forward secrecy**: Ephemeral ECDH key deleted after encryption
-- **Key protection**: ECDH private key operation executes in TEE/StrongBox
+- AES-256-GCM with a random IV per file, and a 128-bit tag over the
+  ciphertext.
+- The ephemeral private key is deleted after each file, so the sender's
+  device holds nothing that can decrypt the file later.
+- The recipient's key is long-lived. Anyone who can use it can decrypt every
+  file sent to it; there is no forward secrecy on the recipient side.
+- ECDH runs in Keystore on both sides. The recipient's key may be in
+  StrongBox; the ephemeral key is in the TEE.
 
-## `.xkeysig` JSON Format
+## `.xkeysig` JSON format
 
-Detached signature files use JSON format, suitable for non-media files where
-EXIF/XMP embedding is not appropriate.
+A `.xkeysig` file is the JSON form of `ContentAuthenticityData`
+(`media/SignatureFormat.kt`). The same JSON, prefixed with `XKEY_SIG:`, is
+what a JPEG carries in its EXIF `UserComment`.
 
 ```json
 {
     "version": 1,
-    "contentHash": "a1b2c3d4e5f6...64-character-hex-sha256",
+    "contentHash": "a1b2c3d4e5f6...64 hex characters",
     "hashAlgorithm": "SHA-256",
     "signatures": [
         {
-            "keyFingerprint": "f1e2d3c4b5a6...64-character-hex-sha256",
+            "keyFingerprint": "f1e2d3c4b5a6...64 hex characters",
             "signerName": "My Signing Key",
             "algorithm": "ES256",
-            "value": "MEUCIQDx...base64-encoded-signature",
+            "value": "MEUCIQDx...base64",
             "timestamp": "2025-07-15T10:30:00Z",
             "role": "CREATOR"
         }
@@ -261,44 +176,40 @@ EXIF/XMP embedding is not appropriate.
 }
 ```
 
-### Fields
-
 | Field | Type | Description |
 |-------|------|-------------|
-| `version` | int | Format version (currently `1`) |
-| `contentHash` | string | Hex-encoded SHA-256 of the original file content |
-| `hashAlgorithm` | string | Hash algorithm used (always `SHA-256`) |
-| `signatures` | array | List of `SignatureEntry` objects |
-| `signatures[].keyFingerprint` | string | SHA-256 hex of signer's DER-encoded public key |
-| `signatures[].signerName` | string? | Human-readable signer name (nullable) |
-| `signatures[].algorithm` | string | Signing algorithm (e.g., `ES256`, `RS256`) |
-| `signatures[].value` | string | Base64-encoded signature bytes |
-| `signatures[].timestamp` | string | ISO 8601 timestamp |
-| `signatures[].role` | string | `CREATOR`, `WITNESS`, or `ATTESTOR` |
+| `version` | int | Format version, `1`. Read as `1` when missing |
+| `contentHash` | string | Hex SHA-256 of the content. Signing writes the canonical hash, which for a non-JPEG file is the whole-file hash |
+| `hashAlgorithm` | string | `SHA-256` |
+| `signatures` | array | `SignatureEntry` objects |
+| `signatures[].keyFingerprint` | string | Hex SHA-256 of the signer's DER public key |
+| `signatures[].signerName` | string | Signer's label. Left out when null |
+| `signatures[].algorithm` | string | `ES256`, `ES384`, `ES512`, `RS256`, `RS384` or `RS512` |
+| `signatures[].value` | string | Base64 (no line wrap) signature: DER for EC, PKCS#1 for RSA |
+| `signatures[].timestamp` | string | ISO 8601 instant |
+| `signatures[].role` | string | `CREATOR`, `WITNESS` or `ATTESTOR`. A missing or unknown value reads as `CREATOR` |
 
-## SAF Integration
+## Saving output
 
-Output files are saved using the Storage Access Framework via
-`ACTION_CREATE_DOCUMENT`. This lets the user choose the save location and
-filename through the system file picker without requiring broad storage
-permissions.
+Output goes through the Storage Access Framework, so the app needs no storage
+permission. The activity registers these launchers:
 
-```kotlin
-val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
-    addCategory(Intent.CATEGORY_OPENABLE)
-    type = "application/octet-stream"
-    putExtra(Intent.EXTRA_TITLE, "document.xkeyenc")
-}
-startActivityForResult(intent, REQUEST_SAVE_FILE)
-```
+| Launcher | Contract | Used for |
+|----------|----------|----------|
+| `createSignatureFileLauncher` | `CreateDocument("application/json")` | `.xkeysig` from Sign |
+| `createEncryptedFileLauncher` | `CreateDocument("application/octet-stream")` | `.xkeyenc` from Encrypt |
+| `createDecryptedFileLauncher` | `CreateDocument("*/*")` | Plaintext from Decrypt |
+| `pickSidecarLauncher` | `OpenDocument()` | Choosing a `.xkeysig` file to verify against |
 
-## Key Selection Logic
+Encrypt and decrypt hand their staging file to a `PendingStagedSave`, which
+copies it to the chosen URI and deletes it, or deletes it when the user
+cancels.
 
-The key selector filters available keys based on the selected operation:
+## Audit events
 
-| Operation | Key Filter |
-|-----------|-----------|
-| Sign | Keys with `key_type` in `signing`, `fido2` and algorithm in `ES*`, `RS*` |
-| Verify | No key needed (uses public key from signature or contacts) |
-| Encrypt | Keys with `PURPOSE_AGREE_KEY` (encryption-type EC keys) |
-| Decrypt | Keys with `PURPOSE_AGREE_KEY` (user's own encryption keys) |
+| Operation | Call | When |
+|-----------|------|------|
+| Sign | `AuditLogger.logFileSigned(keyId, label, fileName)` | After signing, before the `.xkeysig` save picker opens |
+| Verify | `AuditLogger.logFileVerified(fileName, signerCount, verified)` | After the result is computed. `verified` is false if any line failed |
+| Encrypt | `AuditLogger.logFileEncrypted(recipientFingerprint, fileName)` | After the staging file is written |
+| Decrypt | `AuditLogger.logFileDecrypted(keyId, fileName)` | After the staging file is written |
