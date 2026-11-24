@@ -387,6 +387,25 @@ class PivKeyManagerTest {
     }
 
     @Test
+    fun `generateKey RS3072 and RS4096 ask the Keystore TEE for that modulus`() = runTest {
+        for (algorithm in listOf(PivAlgorithm.RS3072, PivAlgorithm.RS4096)) {
+            val newKey = KeyPairGenerator.getInstance("RSA").apply { initialize(1024) }.generateKeyPair()
+            keystore.generatesOnNextCall(newKey)
+
+            val info = PivKeyManager(pivSlotDao).generateKey(PivSlot.AUTHENTICATION, algorithm)
+
+            assertTrue("$algorithm reported as ${info.algorithm}", info.algorithm == algorithm)
+            assertTrue(info.hasKey)
+            verify { anyConstructed<KeyGenParameterSpec.Builder>().setKeySize(algorithm.keySizeBits) }
+            // StrongBox guarantees RSA 2048 only: PIV keys stay in the TEE.
+            verify(exactly = 0) { anyConstructed<KeyGenParameterSpec.Builder>().setIsStrongBoxBacked(any()) }
+            verify { KeyPairGenerator.getInstance("RSA", "AndroidKeyStore") }
+            unmockkAll()
+            setUp()
+        }
+    }
+
+    @Test
     fun `test certificate carries the slot key as its SubjectPublicKeyInfo`() {
         val cert = PivTestCertificates.selfSigned(slotKey)
         val parsed = java.security.cert.CertificateFactory.getInstance("X.509")

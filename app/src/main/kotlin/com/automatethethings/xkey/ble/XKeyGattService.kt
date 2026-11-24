@@ -1010,7 +1010,8 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
      * Asks the connected desktop for an encrypted backup of the stores in
      * [include] under [password] (`remote.createBackup`) over the active
      * transport, and keeps the returned envelope in [BackupStore] under the
-     * desktop's backup id.
+     * desktop's backup id. The result carries the id the envelope was stored
+     * under: a generated one when the desktop sent none.
      *
      * [password] is zeroed before this returns, whatever the outcome.
      *
@@ -1030,10 +1031,13 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
             Log.i(TAG, "Starting phone-initiated backup")
             val result = RemoteBackupClient(desktop)
                 .createBackup(password, include, "phone-${System.currentTimeMillis()}")
-            withContext(Dispatchers.IO) {
+            // A reply with no backup_id is stored under a generated id: hand
+            // back that id, the one a restore can find.
+            val storedId = withContext(Dispatchers.IO) {
                 BackupStore(applicationContext).store(result.backupId, result.backupData)
             }
-            return result
+            if (storedId == result.backupId) return result
+            return RemoteBackupClient.CreateResult(result.backupData, storedId, result.itemCount)
         } finally {
             password.fill('\u0000')
         }

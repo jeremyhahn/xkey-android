@@ -195,6 +195,8 @@ class PivSlotTest {
             PivAlgorithm.ES256 to 0x11,
             PivAlgorithm.ES384 to 0x14,
             PivAlgorithm.RS2048 to 0x07,
+            PivAlgorithm.RS3072 to 0x05,
+            PivAlgorithm.RS4096 to 0x16,
             PivAlgorithm.ED25519 to 0xE0,
             PivAlgorithm.X25519 to 0xE1,
         )
@@ -220,7 +222,10 @@ class PivSlotTest {
         assertTrue(PivAlgorithm.ED25519.isAvailableOn(33))
         assertFalse(PivAlgorithm.X25519.isAvailableOn(32))
         assertTrue(PivAlgorithm.X25519.isAvailableOn(33))
-        listOf(PivAlgorithm.ES256, PivAlgorithm.ES384, PivAlgorithm.RS2048).forEach {
+        listOf(
+            PivAlgorithm.ES256, PivAlgorithm.ES384, PivAlgorithm.RS2048,
+            PivAlgorithm.RS3072, PivAlgorithm.RS4096
+        ).forEach {
             assertTrue("$it on API 28", it.isAvailableOn(28))
         }
     }
@@ -238,7 +243,7 @@ class PivSlotTest {
     @Test
     fun `PivAlgorithm names stay stable`() {
         assertEquals(
-            listOf("ES256", "ES384", "RS2048", "ED25519", "X25519"),
+            listOf("ES256", "ES384", "RS2048", "RS3072", "RS4096", "ED25519", "X25519"),
             PivAlgorithm.entries.map { it.name }
         )
         PivAlgorithm.entries.forEach { assertEquals(it, PivAlgorithm.fromStoredName(it.name)) }
@@ -251,5 +256,33 @@ class PivSlotTest {
         assertNotNull(PivAlgorithm.ED25519)
         assertEquals("Ed25519", PivAlgorithm.ED25519.displayName)
         assertEquals("X25519", PivAlgorithm.X25519.displayName)
+    }
+
+    @Test
+    fun `PivAlgorithm RS3072 has correct properties`() {
+        assertEquals("RSA", PivAlgorithm.RS3072.keyAlgorithm)
+        assertEquals(3072, PivAlgorithm.RS3072.keySizeBits)
+        assertEquals("RSA 3072", PivAlgorithm.RS3072.displayName)
+    }
+
+    @Test
+    fun `PivAlgorithm RS4096 has correct properties`() {
+        assertEquals("RSA", PivAlgorithm.RS4096.keyAlgorithm)
+        assertEquals(4096, PivAlgorithm.RS4096.keySizeBits)
+        assertEquals("RSA 4096", PivAlgorithm.RS4096.displayName)
+    }
+
+    @Test
+    fun `PivAlgorithm carries the PIV algorithm ids`() {
+        assertEquals(0x11, PivAlgorithm.ES256.pivAlgorithmId)
+        assertEquals(0x14, PivAlgorithm.ES384.pivAlgorithmId)
+        assertEquals(0x07, PivAlgorithm.RS2048.pivAlgorithmId)
+        assertEquals(0x05, PivAlgorithm.RS3072.pivAlgorithmId)
+        assertEquals(0x16, PivAlgorithm.RS4096.pivAlgorithmId)
+        assertEquals(
+            "every algorithm has its own id",
+            PivAlgorithm.entries.size,
+            PivAlgorithm.entries.map { it.pivAlgorithmId }.toSet().size
+        )
     }
 }

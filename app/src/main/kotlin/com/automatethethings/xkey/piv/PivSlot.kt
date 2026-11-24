@@ -135,6 +135,10 @@ enum class PivAlgorithm(
     val canAgree: Boolean = false,
     val minSdk: Int = 28
 ) {
+    // Algorithm ids: NIST SP 800-78 (Table 6-2: RSA 2048 0x07, RSA 3072
+    // 0x05, ECC P-256 0x11, ECC P-384 0x14) and the YubiKey PIV extension
+    // for RSA 4096 (0x16, Yubico PIV algorithm table, firmware 5.7).
+
     /** ECDSA with NIST P-256 curve. */
     ES256("ECDSA P-256", "EC", 256, 0x11),
 
@@ -143,6 +147,12 @@ enum class PivAlgorithm(
 
     /** RSA with 2048-bit key. */
     RS2048("RSA 2048", "RSA", 2048, 0x07),
+
+    /** RSA with 3072-bit key. */
+    RS3072("RSA 3072", "RSA", 3072, 0x05),
+
+    /** RSA with 4096-bit key. */
+    RS4096("RSA 4096", "RSA", 4096, 0x16),
 
     /** EdDSA over edwards25519 (RFC 8032), signing the raw message. */
     ED25519("Ed25519", "EC", 256, 0xE0, minSdk = 33),
@@ -166,5 +176,32 @@ enum class PivAlgorithm(
 
         /** The algorithm a `piv_slots` row names (its exact entry name), or null. */
         fun fromStoredName(name: String?): PivAlgorithm? = entries.find { it.name == name }
+
+        /**
+         * The algorithm a peer names: an enum name, the desktop's spellings
+         * ("ECCP256", "RSA3072") or the dashed ones ("ECDSA-P256",
+         * "RSA-4096"), "Ed25519"/"EdDSA", "X25519", or a hex PIV algorithm
+         * id ("0x11"). Case and `_`/`-` do not matter. Null for any other
+         * name; callers refuse it, never default it.
+         */
+        fun fromWireName(name: String): PivAlgorithm? {
+            if (name.isBlank()) return null
+            entries.firstOrNull { it.name == name }?.let { return it }
+            val upper = name.trim().uppercase().replace("_", "-")
+            if (upper.startsWith("0X")) {
+                val id = upper.substring(2).toIntOrNull(16) ?: return null
+                return fromPivAlgorithmId(id)
+            }
+            return when (upper) {
+                "ES256", "ECDSA-P256", "EC-P256", "P256", "ECCP256", "ECC-P256" -> ES256
+                "ES384", "ECDSA-P384", "EC-P384", "P384", "ECCP384", "ECC-P384" -> ES384
+                "RS2048", "RSA-2048", "RSA2048" -> RS2048
+                "RS3072", "RSA-3072", "RSA3072" -> RS3072
+                "RS4096", "RSA-4096", "RSA4096" -> RS4096
+                "ED25519", "EDDSA" -> ED25519
+                "X25519" -> X25519
+                else -> null
+            }
+        }
     }
 }

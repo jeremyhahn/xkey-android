@@ -833,6 +833,40 @@ class RequestHandlerLocalKeyFamilyTest {
         assertEquals(512, storedKey(keyId).keySizeBits)
     }
 
+    /** RS256 with keySizeBits 4096 makes, returns and stores a 4096-bit Keystore key. */
+    @Test
+    fun anRs256KeyWithKeySizeBits4096IsA4096BitKey() {
+        assertRsaKeyOfSize(4096)
+    }
+
+    /** RS256 with keySizeBits 3072 makes, returns and stores a 3072-bit Keystore key. */
+    @Test
+    fun anRs256KeyWithKeySizeBits3072IsA3072BitKey() {
+        assertRsaKeyOfSize(3072)
+    }
+
+    private fun assertRsaKeyOfSize(bits: Int) {
+        val keyId = "rsa-hw-$bits-$runId"
+        createdKeyIds.add(keyId)
+        val result = call(
+            "local.generateKey",
+            JSONObject()
+                .put("keyId", keyId)
+                .put("keyType", KeyTypes.SIGNING)
+                .put("algorithm", "RS256")
+                .put("keySizeBits", bits)
+                .put("requireUserVerification", false)
+                .put("preferStrongBox", false)
+        ).ok()
+
+        val der = java.util.Base64.getDecoder().decode(result.getString("publicKeyDer"))
+        val publicKey = java.security.KeyFactory.getInstance("RSA")
+            .generatePublic(java.security.spec.X509EncodedKeySpec(der)) as java.security.interfaces.RSAPublicKey
+        assertEquals(bits, publicKey.modulus.bitLength())
+        assertEquals(bits, result.getInt("keySizeBits"))
+        assertEquals(bits, storedKey(keyId).keySizeBits)
+    }
+
     /** An exportable key lives in app memory and stays "software". */
     @Test
     fun anExportableKeyReportsSoftware() {

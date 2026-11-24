@@ -614,7 +614,7 @@ class PivKeyManager(
     private fun signatureAlgorithmOf(algorithm: PivAlgorithm): String = when (algorithm) {
         PivAlgorithm.ES256 -> "SHA256withECDSA"
         PivAlgorithm.ES384 -> "SHA384withECDSA"
-        PivAlgorithm.RS2048 -> "SHA256withRSA"
+        PivAlgorithm.RS2048, PivAlgorithm.RS3072, PivAlgorithm.RS4096 -> "SHA256withRSA"
         PivAlgorithm.ED25519 -> "Ed25519"
         PivAlgorithm.X25519 -> throw PivAlgorithmMismatchException("X25519 keys cannot sign")
     }

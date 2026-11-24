@@ -360,13 +360,29 @@ class KeystoreManagerGeneralKeysTest {
 
     @Test
     fun rejectsASymmetricKeySizeAesDoesNotDefine() {
-        val keyId = newKeyId("aes192")
+        val keyId = newKeyId("aes512")
 
         val failure = assertThrows(KeyGenerationException::class.java) {
-            runBlocking { keystoreManager.generateSymmetricKey(keyId, 192, -1) }
+            runBlocking { keystoreManager.generateSymmetricKey(keyId, 512, -1) }
         }
-        assertTrue(failure.message!!, failure.message!!.contains("128 or 256"))
+        assertTrue(failure.message!!, failure.message!!.contains("128, 192 or 256"))
         assertFalse(keystoreManager.generalKeyExists(keyId))
+    }
+
+    @Test
+    fun generatesAnAes192KeyThatRoundTrips() {
+        val keyId = newKeyId("aes192")
+        runBlocking { keystoreManager.generateSymmetricKey(keyId, 192, -1) }
+
+        assertTrue("AES-192", keystoreManager.generalKeyExists(keyId))
+
+        val plaintext = "aes-192 round trip".toByteArray()
+        val sealed = runBlocking { keystoreManager.symmetricEncrypt(keyId, plaintext) }
+        assertEquals(12 + plaintext.size + 16, sealed.size)
+        assertArrayEquals(
+            plaintext,
+            runBlocking { keystoreManager.symmetricDecrypt(keyId, sealed) }
+        )
     }
 
     @Test
@@ -381,6 +397,24 @@ class KeystoreManagerGeneralKeysTest {
         val data = "authenticate me".toByteArray()
         assertEquals(32, runBlocking { keystoreManager.computeHMAC(sha256, data) }.size)
         assertEquals(64, runBlocking { keystoreManager.computeHMAC(sha512, data) }.size)
+    }
+
+    @Test
+    fun generatesAnHmacSha384KeyThatMacsDeterministically() {
+        val keyId = newKeyId("hmac384")
+        runBlocking { keystoreManager.generateHMACKey(keyId, "HMAC-SHA384") }
+
+        assertTrue("HMAC-SHA384", keystoreManager.generalKeyExists(keyId))
+
+        val data = "authenticate me with sha-384".toByteArray()
+        val first = runBlocking { keystoreManager.computeHMAC(keyId, data) }
+        val second = runBlocking { keystoreManager.computeHMAC(keyId, data) }
+        assertEquals(48, first.size)
+        assertArrayEquals(first, second)
+        assertFalse(
+            "a different input gives a different MAC",
+            first.contentEquals(runBlocking { keystoreManager.computeHMAC(keyId, "other".toByteArray()) })
+        )
     }
 
     @Test

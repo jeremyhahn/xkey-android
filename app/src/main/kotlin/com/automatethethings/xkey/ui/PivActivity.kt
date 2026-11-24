@@ -82,8 +82,8 @@ import java.util.Locale
  * - Gradient toolbar with slot summary
  * - Hero summary card showing populated slot count and type badges
  * - Per-slot cards with key status, algorithm badges, and certificate expiry indicators
- * - Key generation dialog supporting ES256, ES384 and RS2048, plus Ed25519
- *   and X25519 on Android 13 and later
+ * - Key generation dialog listing every PivAlgorithm (ECDSA P-256/P-384, RSA 2048/3072/4096),
+ *   with Ed25519 and X25519 on Android 13 and later
  * - Reactive UI updates via Room Flow observation
  *
  * Follows the programmatic UI pattern established by [OathActivity].

@@ -50,6 +50,7 @@ import com.automatethethings.xkey.crypto.UserCancelledException
 import com.automatethethings.xkey.crypto.UserVerificationKey
 import com.automatethethings.xkey.crypto.UserVerificationPrompt
 import com.automatethethings.xkey.crypto.XKeyCryptoException
+import com.automatethethings.xkey.crypto.publicKeySizeBits
 import com.automatethethings.xkey.remote.SharePermissionLedger
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.dao.KeyDao
@@ -1496,12 +1497,12 @@ class RequestHandler(
         if (isSymmetric) {
             // Symmetric or HMAC key
             if (algorithmName.startsWith("AES")) {
-                val bits = if (algorithmName.contains("128")) 128 else 256
+                val bits = genParams.resolvedKeySizeBits() ?: 256
                 keystoreManager.generateSymmetricKey(genParams.keyId, bits, authDurationSeconds)
                 keySizeBits = bits
             } else {
                 keystoreManager.generateHMACKey(genParams.keyId, algorithmName)
-                keySizeBits = if (algorithmName.contains("512")) 512 else 256
+                keySizeBits = genParams.resolvedKeySizeBits() ?: 256
             }
             publicKeyDer = ByteArray(0) // No public key for symmetric/HMAC
             // The exact alias just generated (xkey_key_<id>), never a
@@ -1552,9 +1553,14 @@ class RequestHandler(
             keyId = genParams.keyId,
             algorithm = algorithmName,
             authDurationSeconds = authDurationSeconds,
-            preferStrongBox = genParams.preferStrongBox
+            preferStrongBox = genParams.preferStrongBox,
+            keySizeBits = if (CoseAlgorithms.isRsa(genParams.algorithm)) genParams.keySizeBits else null
         )
-        keySizeBits = CoseAlgorithms.getKeySizeBits(genParams.algorithm)
+        // The size of the key that was made, read off its public key; only a
+        // key with no readable size (EdDSA) falls back to the algorithm's own.
+        keySizeBits = generatedKeySize(genParams, publicKeyDer)
+            ?: genParams.resolvedKeySizeBits()
+            ?: CoseAlgorithms.getKeySizeBits(genParams.algorithm)
         val level = generatedKeyLevel(
             genParams.keyId,
             read = { keystoreManager.generalKeySecurityLevel(genParams.keyId) },
@@ -1629,6 +1635,26 @@ class RequestHandler(
     }
 
     /**
+     * The size of the asymmetric key local.generateKey just made, read off
+     * [publicKeyDer] by [publicKeySizeBits], or null when it has no readable
+     * size (EdDSA). A key whose size is not the one asked for (an RSA
+     * modulus from keySizeBits, else the algorithm's own) is discarded and
+     * the request fails before anything is stored: the row and the response
+     * never describe a key that was not produced.
+     */
+    private fun generatedKeySize(genParams: LocalGenerateKeyParams, publicKeyDer: ByteArray): Int? {
+        val made = publicKeySizeBits(publicKeyDer) ?: return null
+        val requested = genParams.resolvedKeySizeBits()
+        if (made == requested) return made
+        runCatching { keystoreManager.deleteGeneralKey(genParams.keyId) }
+        Log.e(TAG, "Generated key ${genParams.keyId} is $made bits, $requested were requested")
+        throw ProtocolException(
+            "Generated key ${genParams.keyId} is $made bits, not the $requested requested",
+            errorCode = ErrorCodes.INTERNAL_ERROR
+        )
+    }
+
+    /**
      * The security level of the key generateKey or local.generateKey just
      * made, read by [read] from its exact alias. A missing key or a KeyInfo
      * read that fails is an error, never a software-backed key: the key is
@@ -1679,11 +1705,7 @@ class RequestHandler(
             )
         }
 
-        val keySizeBits = when {
-            algorithmName.startsWith("AES") -> if (algorithmName.contains("128")) 128 else 256
-            algorithmName.contains("512") -> 512
-            else -> 256
-        }
+        val keySizeBits = genParams.resolvedKeySizeBits() ?: 256
         val material = ByteArray(keySizeBits / 8).also { java.security.SecureRandom().nextBytes(it) }
 
         com.automatethethings.xkey.crypto.SoftwareKeyStore(context).put(
@@ -4924,23 +4946,7 @@ class RequestHandler(
      * "RSA-2048", "Ed25519", "X25519") alongside the [PivAlgorithm] enum
      * names and the PIV algorithm id in hex ("0x11", "0xE0").
      */
-    private fun pivAlgorithmOf(name: String): PivAlgorithm? {
-        if (name.isBlank()) return null
-        runCatching { return PivAlgorithm.valueOf(name) }
-        val upper = name.trim().uppercase().replace("_", "-")
-        if (upper.startsWith("0X")) {
-            val id = upper.substring(2).toIntOrNull(16) ?: return null
-            return PivAlgorithm.fromPivAlgorithmId(id)
-        }
-        return when (upper) {
-            "ECDSA-P256", "EC-P256", "P256", "ES256" -> PivAlgorithm.ES256
-            "ECDSA-P384", "EC-P384", "P384", "ES384" -> PivAlgorithm.ES384
-            "RSA-2048", "RSA2048", "RS2048" -> PivAlgorithm.RS2048
-            "ED25519", "EDDSA" -> PivAlgorithm.ED25519
-            "X25519" -> PivAlgorithm.X25519
-            else -> null
-        }
-    }
+    private fun pivAlgorithmOf(name: String): PivAlgorithm? = PivAlgorithm.fromWireName(name)
 
     /**
      * Adds the PIV algorithm id (`algorithm_id`) of [algorithm] and, for an

@@ -384,10 +384,9 @@ class PivActivityUiTest {
         val slot = emptyPrimarySlot()
         assertShownTextInTree(scenario, slot.label)
 
-        // Anything other than entries[0], which was the only reachable choice
-        // while the chooser was suppressed. Picked by name: it is offered on
-        // every API level and generated in any Keystore, unlike the curve
-        // 25519 entries that now follow it.
+        // Anything other than the default ECDSA P-256, which was the only
+        // reachable choice while the chooser was suppressed. Named, not taken
+        // by position: the list grows, and its tail is now a slow RSA 4096.
         val target = PivAlgorithm.RS2048
 
         clickSlotAction(scenario, slot, withString(scenario, R.string.piv_generate_key))

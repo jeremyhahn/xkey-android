@@ -11,7 +11,28 @@ Android Keystore key pair under the alias `xkey_piv_<hexId>`, plus an optional
 imported X.509 certificate. Metadata (algorithm, public key DER, certificate,
 created / last-used time, use count) lives in the Room table `piv_slots`
 (`PivSlotEntity`, `PivSlotDao`). Keys are ECDSA P-256, ECDSA P-384, RSA 2048,
-Ed25519 or X25519 (`PivAlgorithm`).
+RSA 3072, RSA 4096, Ed25519 or X25519
+(`PivAlgorithm`). PIV keys never ask for StrongBox, so every size is made in
+the TEE.
+
+### PIV algorithms
+
+| `PivAlgorithm` | Key | PIV algorithm id | Wire names accepted |
+|---|---|---|---|
+| `ES256` | ECDSA P-256 | `0x11` | `ES256`, `ECCP256`, `ECC-P256`, `ECDSA-P256`, `EC-P256`, `P256` |
+| `ES384` | ECDSA P-384 | `0x14` | `ES384`, `ECCP384`, `ECC-P384`, `ECDSA-P384`, `EC-P384`, `P384` |
+| `RS2048` | RSA 2048 | `0x07` | `RS2048`, `RSA2048`, `RSA-2048` |
+| `RS3072` | RSA 3072 | `0x05` | `RS3072`, `RSA3072`, `RSA-3072` |
+| `RS4096` | RSA 4096 | `0x16` | `RS4096`, `RSA4096`, `RSA-4096` |
+| `ED25519` | Ed25519 | `0xE0` | `ED25519`, `EdDSA` |
+| `X25519` | X25519 | `0xE1` | `X25519` |
+
+The ids for P-256, P-384, RSA 2048 and RSA 3072 are the NIST SP 800-78
+values; `0x16` for RSA 4096 and `0xE0`/`0xE1` for Ed25519/X25519 are the
+YubiKey extension the desktop uses. A hex id such as `0x11` is also accepted.
+`PivAlgorithm.fromWireName` matches names case-insensitively and treats `_`
+as `-`; any other name, including RSA 1024, P-521 and post-quantum names, is
+answered with `INVALID_ALGORITHM`.
 
 The desktop drives the slots through `local.piv*`. All transports share the
 one `RequestHandler` built in `XKeyGattService` with
@@ -35,7 +56,7 @@ the list shows only the phone's slots and no error.
 |-----------|------|------|
 | `RequestHandler` (`handlePivListSlots`, `handlePivGenerateKey`, `handlePivImportCert`, `handlePivSign`, `handlePivGetCert`, `pivSlotId`, `pivAlgorithmOf`) | `app/src/main/kotlin/com/automatethethings/xkey/protocol/Handler.kt` | Wire handlers; accept go-xkms field and algorithm spellings alongside the older Android ones |
 | `PivKeyManager`, `PivSlotInfo`, `PivAlgorithmUnavailableException`, `PivAlgorithmMismatchException` | `app/src/main/kotlin/com/automatethethings/xkey/piv/PivKeyManager.kt` | `generateKey`, `importCertificate`, `listSlots`, `sign`, `agree`, `getCertificate`, `getPublicKey`, `deleteKey`; audit via `AuditLogger.logKeyCreated`, `AuditLogger.logSigningRequest`, `AuditLogger.logKeyUsed` (operation `key agreement`) and, after a stored import, `AuditLogger.logPivCertImported` (slot and subject) |
-| `PivSlot`, `PivAlgorithm` | `app/src/main/kotlin/com/automatethethings/xkey/piv/PivSlot.kt` | Slot ids, labels, `keystoreAlias`, `isPrimarySlot`, `fromHexId` (case-insensitive); algorithms `ES256`, `ES384`, `RS2048`, `ED25519`, `X25519` with `pivAlgorithmId`, `canSign`, `canAgree`, `minSdk`, `isAvailableOn`, `fromPivAlgorithmId`, `fromStoredName` |
+| `PivSlot`, `PivAlgorithm` | `app/src/main/kotlin/com/automatethethings/xkey/piv/PivSlot.kt` | Slot ids, labels, `keystoreAlias`, `isPrimarySlot`, `fromHexId` (case-insensitive); algorithms `ES256`, `ES384`, `RS2048`, `RS3072`, `RS4096`, `ED25519`, `X25519` with `pivAlgorithmId`, `canSign`, `canAgree`, `minSdk`, `isAvailableOn`, `fromPivAlgorithmId`, `fromStoredName`; `PivAlgorithm.fromWireName` parses wire names |
 | `PivPublicKeyEncoding` | `app/src/main/kotlin/com/automatethethings/xkey/piv/PivPublicKeyEncoding.kt` | The PIV tag 0x86 public key value from a SubjectPublicKeyInfo (raw 32 bytes for Ed25519/X25519, `04 || X || Y` for P-256/P-384); builds the X25519/Ed25519 SPKI from a raw key |
 | `PivSlotEntity`, `PivSlotDao` | `app/src/main/kotlin/com/automatethethings/xkey/piv/PivSlotEntity.kt`, `PivSlotDao.kt` | Room table `piv_slots`; `upsert`, `getBySlotId`, `getAll`, `recordUsage`, `deleteBySlotId`, observers for the UI |
 | `PivActivity`, `PivSlotDetailActivity` | `app/src/main/kotlin/com/automatethethings/xkey/ui/` | On-phone slot list and slot detail screens, for the phone's slots and the desktop's |

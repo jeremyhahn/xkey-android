@@ -25,6 +25,12 @@ import java.security.spec.PSSParameterSpec
 class TpmQuoteException(message: String, cause: Throwable? = null) : Exception(message, cause)
 
 /**
+ * One TPMS_PCR_SELECTION of a quote: the bank and the PCR indices selected in
+ * it, PCR n being bit n % 8 of bitmap byte n / 8 (Part 2, Table 85).
+ */
+class TpmPcrSelection(val hashAlg: Int, val indices: Set<Int>)
+
+/**
  * The fields of a TPMS_ATTEST that a Certificate Authority checks.
  *
  * Layout is TPM 2.0 Library Specification Part 2, Table 129:
@@ -49,7 +55,13 @@ class TpmAttest private constructor(
      *
      * Empty for a quote, which attests PCR state rather than an object.
      */
-    val certifiedName: ByteArray = ByteArray(0)
+    val certifiedName: ByteArray = ByteArray(0),
+    /**
+     * The PCR selections a quote covers, in the order the TPM digested them.
+     *
+     * Empty for a certification.
+     */
+    val pcrSelections: List<TpmPcrSelection> = emptyList()
 ) {
     companion object {
         /** TPM_GENERATED_VALUE; present so a quote can never be a forged hash of chosen data. */
@@ -111,17 +123,25 @@ class TpmAttest private constructor(
                         if (selectionCount < 0 || selectionCount > 16) {
                             throw TpmQuoteException("quote declares $selectionCount PCR selections")
                         }
-                        repeat(selectionCount) {
-                            buf.short // hash algorithm
+                        val selections = List(selectionCount) {
+                            val hashAlg = buf.short.toInt() and 0xFFFF
                             val sizeOfSelect = buf.get().toInt() and 0xFF
                             if (sizeOfSelect > buf.remaining()) {
                                 throw TpmQuoteException(
                                     "PCR selection bitmap runs past the end of the quote"
                                 )
                             }
-                            buf.position(buf.position() + sizeOfSelect)
+                            val bitmap = ByteArray(sizeOfSelect)
+                            buf.get(bitmap)
+                            val indices = (0 until sizeOfSelect * 8)
+                                .filter { (bitmap[it / 8].toInt() shr (it % 8)) and 1 == 1 }
+                                .toSet()
+                            TpmPcrSelection(hashAlg, indices)
                         }
-                        TpmAttest(magic, type, qualifiedSigner, extraData, read2B(buf))
+                        TpmAttest(
+                            magic, type, qualifiedSigner, extraData, read2B(buf),
+                            pcrSelections = selections
+                        )
                     }
 
                     ST_ATTEST_CERTIFY -> {
@@ -167,6 +187,9 @@ object TpmQuoteVerifier {
      * Checks that [signature] is [iak]'s signature over [quoted], that the quote
      * names [iak] as its signer, and that it is bound to [expectedNonce].
      *
+     * This does not bind any PCR values to the quote; a caller that keeps PCR
+     * values reported beside it uses the overload that takes them.
+     *
      * @throws TpmQuoteException naming the first thing that did not hold.
      */
     fun verify(
@@ -191,6 +214,81 @@ object TpmQuoteVerifier {
         verifySignature(iak, quoted, signature, "quote")
         return attest
     }
+
+    /**
+     * Verifies the quote as the overload above does and binds [pcrValues], the
+     * PCR values reported beside it, to the digest the TPM signed. Each value
+     * must be exactly one digest of the selected bank long; a value of any
+     * other length is refused before anything is hashed.
+     *
+     * @param expectedBank The PCR bank this CA asked for, as [TpmAlg.bankName] names it.
+     * @throws TpmQuoteException naming the first thing that did not hold.
+     */
+    fun verify(
+        iak: TpmPublicArea,
+        quoted: ByteArray,
+        signature: ByteArray,
+        expectedNonce: ByteArray,
+        expectedBank: String,
+        pcrValues: Map<Int, ByteArray>
+    ): TpmAttest {
+        val attest = verify(iak, quoted, signature, expectedNonce)
+
+        // The values beside the quote are unsigned; only the selection and the
+        // digest inside it are. Without this check a device could pair a
+        // genuine quote with any PCR values it liked, and those values become
+        // the enrolled device's baseline.
+        val bankAlg = PCR_BANKS.firstOrNull { TpmAlg.bankName(it) == expectedBank }
+            ?: throw TpmQuoteException("no PCR bank is named '$expectedBank'")
+        val selected = attest.pcrSelections.filter { it.indices.isNotEmpty() }
+        if (selected.size != 1) {
+            throw TpmQuoteException("quote selects PCRs in ${selected.size} banks, expected one")
+        }
+        val selection = selected.single()
+        if (selection.hashAlg != bankAlg) {
+            throw TpmQuoteException(
+                "quote covers the 0x%04x bank, not the $expectedBank bank this CA asked for"
+                    .format(selection.hashAlg)
+            )
+        }
+        if (selection.indices != pcrValues.keys) {
+            throw TpmQuoteException(
+                "quote covers PCRs ${selection.indices.sorted()} but values were reported " +
+                    "for PCRs ${pcrValues.keys.sorted()}"
+            )
+        }
+
+        // Only the concatenation is signed, so a device could move bytes from
+        // one value to the next and keep the digest. Every value must be one
+        // digest of the selected bank long before it is hashed.
+        val bankLength = MessageDigest.getInstance(
+            TpmAlg.digestName(selection.hashAlg)
+                ?: throw TpmQuoteException("quote covers unsupported bank 0x%04x".format(selection.hashAlg))
+        ).digestLength
+        selection.indices.sorted().forEach { i ->
+            val length = pcrValues.getValue(i).size
+            if (length != bankLength) {
+                throw TpmQuoteException(
+                    "PCR $i value is $length bytes, but the $expectedBank bank holds $bankLength-byte values"
+                )
+            }
+        }
+
+        // TPM2_Quote digests the selected PCRs, in ascending index order within
+        // the bank, with the signing scheme's hash (Part 3, Section 18.4).
+        val digestName = TpmAlg.digestName(iak.schemeHashAlg)
+            ?: throw TpmQuoteException(
+                "attestation key signs with unsupported hash 0x%04x".format(iak.schemeHashAlg)
+            )
+        val digest = MessageDigest.getInstance(digestName)
+        selection.indices.sorted().forEach { digest.update(pcrValues.getValue(it)) }
+        if (!MessageDigest.isEqual(digest.digest(), attest.pcrDigest)) {
+            throw TpmQuoteException("reported PCR values do not match the digest the quote signed")
+        }
+        return attest
+    }
+
+    private val PCR_BANKS = listOf(TpmAlg.SHA1, TpmAlg.SHA256, TpmAlg.SHA384, TpmAlg.SHA512)
 
     /**
      * Checks [signature] is [key]'s signature over [signed], using the scheme

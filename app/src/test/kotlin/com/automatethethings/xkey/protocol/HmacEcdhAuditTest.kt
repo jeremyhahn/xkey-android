@@ -156,7 +156,7 @@ class HmacEcdhAuditTest {
         // Unvalidated stored name: SoftwareKeyOps runs SHA-256 for it.
         every { anyConstructed<SoftwareKeyStore>().get("sw-odd") } returns SoftwareKey(
             keyId = "sw-odd",
-            algorithm = "HMAC-SHA384",
+            algorithm = "HMAC-SHA224",
             keyType = "symmetric",
             keySize = 256,
             exportable = true,
