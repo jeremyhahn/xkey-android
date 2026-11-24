@@ -43,6 +43,8 @@ import com.automatethethings.xkey.crypto.KeyInfoUnavailableException
 import com.automatethethings.xkey.crypto.KeySecurityLevel
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.crypto.MlDsaParameterSet
+import com.automatethethings.xkey.crypto.PqcBacking
+import com.automatethethings.xkey.crypto.PqcHardware
 import com.automatethethings.xkey.crypto.KeystoreUserVerificationKey
 import com.automatethethings.xkey.crypto.SigningException
 import com.automatethethings.xkey.crypto.StrongBoxUnavailableException
@@ -5125,12 +5127,17 @@ class RequestHandler(
         val slot = PivSlot.fromHexId(slotId) ?: return Response.error(request.id, ErrorCodes.PIV_INVALID_SLOT, "Invalid slot: $slotId")
         val algorithm = pivAlgorithmOf(algorithmName)
             ?: return Response.error(request.id, ErrorCodes.INVALID_ALGORITHM, "Invalid algorithm: $algorithmName")
+        val backing = when (val choice = pivKeyBacking(request, params, algorithm)) {
+            is Response -> return choice
+            else -> choice as PqcBacking?
+        }
         return try {
-            val info = pkm.generateKey(slot, algorithm)
+            val info = if (backing != null) pkm.generateKey(slot, algorithm, backing) else pkm.generateKey(slot, algorithm)
             val result = JSONObject().apply {
                 put("slot", info.slot.hexId)
                 put("slotId", info.slot.hexId)
                 put("algorithm", info.algorithm?.displayName)
+                backing?.let { put("keyBacking", it.wire) }
                 put("hasKey", info.hasKey)
                 put("has_key", info.hasKey)
                 info.publicKeyDer?.let {
@@ -5140,9 +5147,34 @@ class RequestHandler(
                 }
             }
             Response.success(request.id, result)
+        } catch (e: UnsupportedAlgorithmException) {
+            Response.error(request.id, ErrorCodes.FEATURE_UNAVAILABLE, "${algorithm.displayName} is not available with this storage")
         } catch (e: Exception) {
             Response.error(request.id, ErrorCodes.KEY_GENERATION_FAILED, e.message ?: "PIV key generation failed")
         }
+    }
+
+    /**
+     * The storage a `piv.generateKey` asks for: null for EC and RSA (which
+     * take none), the request's `keyBacking` or the default for ML-DSA, or
+     * the error [Response]: INVALID_PARAMS for an unknown backing or a backing
+     * on EC/RSA, FEATURE_UNAVAILABLE for hardware the device does not report.
+     */
+    private fun pivKeyBacking(request: Request, params: JSONObject, algorithm: PivAlgorithm): Any? {
+        val raw = params.opt("keyBacking")
+        val set = algorithm.mlDsaSet
+        if (raw == null || raw == JSONObject.NULL) {
+            return set?.let { if (it in PqcHardware.supported()) PqcBacking.HARDWARE else PqcBacking.SOFTWARE }
+        }
+        val backing = (raw as? String)?.let { PqcBacking.fromWire(it) }
+            ?: return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "keyBacking must be \"hardware\" or \"software\"")
+        if (set == null) {
+            return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "keyBacking applies to ML-DSA keys only")
+        }
+        if (backing == PqcBacking.HARDWARE && set !in PqcHardware.supported()) {
+            return Response.error(request.id, ErrorCodes.FEATURE_UNAVAILABLE, "${set.wireName} is not available in hardware on this device")
+        }
+        return backing
     }
 
     private suspend fun handlePivImportCert(request: Request): Response {

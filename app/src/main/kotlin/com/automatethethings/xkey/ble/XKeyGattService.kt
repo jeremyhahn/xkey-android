@@ -20,6 +20,7 @@ import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.auth.BiometricActivityLauncher
 import com.automatethethings.xkey.auth.SessionAuthManager
 import com.automatethethings.xkey.crypto.KeystoreManager
+import com.automatethethings.xkey.crypto.PqcSoftwareKeyStore
 import com.automatethethings.xkey.ble.fido.AndroidFidoCredentialBackend
 import com.automatethethings.xkey.ble.fido.BiometricFidoUserPrompt
 import com.automatethethings.xkey.ble.fido.Ctap2Authenticator
@@ -340,7 +341,7 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
             sessionAuthManager = sessionAuthManager,
             pairedDeviceRepository = pairedDeviceRepository,
             pinManager = PinManager(PinSettingsRepository(this)),
-            pivKeyManager = PivKeyManager(XKeyDatabase.getInstance(this).pivSlotDao())
+            pivKeyManager = PivKeyManager(XKeyDatabase.getInstance(this).pivSlotDao(), pqcStore = PqcSoftwareKeyStore(applicationContext))
         )
 
         // Initialize bidirectional message router for remote.* requests

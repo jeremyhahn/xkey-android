@@ -41,6 +41,7 @@ import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import com.automatethethings.xkey.R
 import com.automatethethings.xkey.ble.XKeyGattService
+import com.automatethethings.xkey.crypto.PqcSoftwareKeyStore
 import com.automatethethings.xkey.piv.PivAlgorithm
 import com.automatethethings.xkey.piv.PivKeyManager
 import com.automatethethings.xkey.piv.PivSlot
@@ -140,7 +141,7 @@ class PivActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
 
         val db = XKeyDatabase.getInstance(this)
-        pivKeyManager = PivKeyManager(db.pivSlotDao())
+        pivKeyManager = PivKeyManager(db.pivSlotDao(), pqcStore = PqcSoftwareKeyStore(applicationContext))
 
         buildUI()
         setContentView(rootLayout)
