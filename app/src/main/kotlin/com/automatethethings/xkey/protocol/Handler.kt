@@ -584,11 +584,10 @@ class RequestHandler(
             )
         }
 
-        return try {
+        val response = try {
             handler(request)
         } catch (e: ProtocolException) {
             Log.e(TAG, "Handler error: ${e.message}")
-            if (e.errorCode == ErrorCodes.OPERATION_DENIED) auditPolicyDenied(request.method, e)
             Response.error(request.id, e.errorCode, e.message ?: "Handler error")
         } catch (e: KeyNotFoundException) {
             Log.e(TAG, "Key not found: ${e.message}")
@@ -650,12 +649,40 @@ class RequestHandler(
             Log.e(TAG, "Unexpected handler error", e)
             Response.error(request.id, ErrorCodes.INTERNAL_ERROR, "Internal error: ${e.message}")
         }
+
+        // A refusal is audited from the response, so one a handler returns
+        // and one it throws are recorded alike, once each. A handler that
+        // wrote the refusal's own record (a failed export) marked it, and
+        // gets no second row.
+        val recorded = refusalsRecorded.remove(request)
+        val error = response.error
+        if (error?.code == ErrorCodes.OPERATION_DENIED && !recorded) {
+            auditPolicyDenied(request.method, error.message)
+        }
+        return response
+    }
+
+    /**
+     * Requests (by identity) whose handler already wrote the audit record of
+     * its refusal, so [dispatch] does not record it twice. A handler adds its
+     * request with [markRefusalRecorded] right after writing that record;
+     * [dispatch] removes it when the handler returns.
+     */
+    private val refusalsRecorded: MutableSet<Request> =
+        java.util.Collections.synchronizedSet(
+            java.util.Collections.newSetFromMap(java.util.IdentityHashMap<Request, Boolean>())
+        )
+
+    /** Tells [dispatch] that [request]'s refusal already has its audit record. */
+    private fun markRefusalRecorded(request: Request) {
+        refusalsRecorded.add(request)
     }
 
     /**
      * Records a policy refusal ([ErrorCodes.OPERATION_DENIED]) as one
-     * POLICY_DENIED audit row. Every refusal a handler throws passes
-     * [dispatch]'s catch, so this is the one place they are recorded; a throw
+     * POLICY_DENIED audit row. [dispatch] calls it on every response it
+     * returns with that code, whether the handler threw the refusal or
+     * returned it, so this is the one place they are recorded; a refusal
      * site never logs its own. The row carries the requesting peer, the
      * request method and the refusal message, which names at most a key or
      * credential id, never key material or request data. Recording never
@@ -668,7 +695,7 @@ class RequestHandler(
      * entries out. A request with no [CallerSession] (in-process) records
      * with whatever [currentPeerPublicKeyHex] returns.
      */
-    private suspend fun auditPolicyDenied(method: String, e: ProtocolException) {
+    private suspend fun auditPolicyDenied(method: String, reason: String?) {
         try {
             val callerPeer = currentPeerPublicKeyHex()
             if (callerPeer == null && currentCoroutineContext()[CallerSession] != null) {
@@ -678,7 +705,7 @@ class RequestHandler(
             AuditLogger.logPolicyDenied(
                 deviceId = callerPeer,
                 deviceName = auditPeerName(callerPeer),
-                reason = e.message ?: "Operation denied",
+                reason = reason ?: "Operation denied",
                 operation = method
             )
         } catch (c: kotlin.coroutines.cancellation.CancellationException) {
@@ -4504,6 +4531,7 @@ class RequestHandler(
                     success = false,
                     errorMessage = message
                 )
+                markRefusalRecorded(request)
                 return Response.error(request.id, ErrorCodes.OPERATION_DENIED, message)
             }
 
