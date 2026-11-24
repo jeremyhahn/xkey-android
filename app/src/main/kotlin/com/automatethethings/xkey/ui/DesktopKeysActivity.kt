@@ -63,6 +63,9 @@ class DesktopKeysActivity : AppCompatActivity() {
     /** The last step launched, which Retry repeats. */
     private var lastStep: (suspend () -> Unit)? = null
 
+    /** The failure Snackbar on screen, dismissed when the user goes back. */
+    private var failure: Snackbar? = null
+
     /** The client last adapted, so the same client is always the same source. */
     private var adapted: Pair<RemoteKeyClient, DesktopKeysSource>? = null
 
@@ -140,6 +143,10 @@ class DesktopKeysActivity : AppCompatActivity() {
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
                 running?.cancel()
+                // A retry must not reopen the step the user went back from.
+                lastStep = null
+                failure?.dismiss()
+                failure = null
                 if (!controller.back()) finish()
             }
         })
@@ -173,9 +180,11 @@ class DesktopKeysActivity : AppCompatActivity() {
             is DesktopKeysState.Loading -> state.previous?.let(::renderContent) ?: showMessage(R.string.desktop_keys_loading)
             is DesktopKeysState.Failed -> {
                 state.previous?.let(::renderContent) ?: showMessage(errorText(state.error))
-                Snackbar.make(root, errorText(state.error), Snackbar.LENGTH_LONG)
-                    .setAction(R.string.desktop_keys_retry) { lastStep?.let(::launch) }
-                    .show()
+                // Retry repeats the failed step only while it is still the last one launched.
+                val failed = lastStep
+                failure = Snackbar.make(root, errorText(state.error), Snackbar.LENGTH_LONG)
+                    .setAction(R.string.desktop_keys_retry) { if (failed != null && lastStep === failed) launch(failed) }
+                    .also { it.show() }
             }
             else -> renderContent(state)
         }
