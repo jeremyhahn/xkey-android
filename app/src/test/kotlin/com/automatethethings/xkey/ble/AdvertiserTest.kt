@@ -22,11 +22,13 @@ import android.bluetooth.le.AdvertiseSettings
 import android.bluetooth.le.BluetoothLeAdvertiser
 import android.os.ParcelUuid
 import android.util.Log
+import com.automatethethings.xkey.ble.fido.FidoBle
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.mockkStatic
 import io.mockk.unmockkAll
 import io.mockk.verify
+import java.util.UUID
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -448,5 +450,78 @@ class AdvertiserPayloadTest {
             AdvertiseError.TOO_MANY_ADVERTISERS,
             (advertiser.advertisingState.value as AdvertisingState.Error).error
         )
+    }
+
+    /**
+     * The primary PDU also carries the FIDO 16-bit service UUID so CTAP2 BLE
+     * clients find the phone, on the first start and on the no-name retry; the
+     * device name and TX power level stay in the scan response.
+     */
+    @Test
+    fun thePrimaryAdvertiseDataHoldsTheFidoServiceUuid() {
+        val advertiser = Advertiser(adapter)
+        advertiser.startAdvertising()
+        callbacks[0].onStartFailure(AdvertiseCallback.ADVERTISE_FAILED_DATA_TOO_LARGE)
+
+        assertEquals(2, primary.size)
+        for (data in primary) {
+            assertTrue(data.serviceUuids.contains(ParcelUuid(FidoBle.SERVICE_UUID)))
+            assertTrue(data.serviceUuids.contains(ParcelUuid(GattServer.XKEY_SERVICE_UUID)))
+            assertFalse(data.includeDeviceName)
+            assertFalse(data.includeTxPowerLevel)
+        }
+    }
+
+    /** The primary data and the no-name scan response each fit a 31-byte legacy PDU. */
+    @Test
+    fun thePrimaryDataAndTheNoNameScanResponseFitTheLegacyPdu() {
+        val advertiser = Advertiser(adapter)
+        advertiser.startAdvertising()
+        callbacks[0].onStartFailure(AdvertiseCallback.ADVERTISE_FAILED_DATA_TOO_LARGE)
+
+        val sizes = listOf(
+            "primary" to legacySize(primary[0], flags = true),
+            "retry primary" to legacySize(primary[1], flags = true),
+            "no-name scan response" to legacySize(scanResponses[1], flags = false),
+        )
+        for ((name, size) in sizes) {
+            assertTrue("$name is $size bytes", size <= LEGACY_PDU)
+        }
+    }
+
+    /**
+     * The legacy AD size of [data] as the stack lays it out: 3 bytes of flags
+     * for a connectable advertisement, 2 header bytes per UUID list, 2 bytes per
+     * 16-bit UUID on the Bluetooth base UUID and 16 per other UUID, 3 bytes for
+     * the TX power level, and the service and manufacturer data. The device
+     * name's length is the adapter's, so data that includes it is refused.
+     */
+    private fun legacySize(data: AdvertiseData, flags: Boolean): Int {
+        assertFalse("the device name has no fixed size", data.includeDeviceName)
+        var size = if (flags) 3 else 0
+        val uuids = data.serviceUuids.orEmpty().map { it.uuid }
+        val short = uuids.count { isSixteenBit(it) }
+        val long = uuids.size - short
+        if (short > 0) size += 2 + 2 * short
+        if (long > 0) size += 2 + 16 * long
+        if (data.includeTxPowerLevel) size += 3
+        data.serviceData.orEmpty().forEach { (uuid, bytes) ->
+            size += 2 + (if (isSixteenBit(uuid.uuid)) 2 else 16) + bytes.size
+        }
+        val manufacturer = data.manufacturerSpecificData
+        if (manufacturer != null) {
+            for (i in 0 until manufacturer.size()) size += 2 + 2 + manufacturer.valueAt(i).size
+        }
+        return size
+    }
+
+    private fun isSixteenBit(uuid: UUID): Boolean =
+        uuid.leastSignificantBits == BASE_UUID.leastSignificantBits &&
+            (uuid.mostSignificantBits and 0xFFFF0000FFFFFFFFUL.toLong()) == BASE_UUID.mostSignificantBits
+
+    private companion object {
+        const val LEGACY_PDU = 31
+
+        val BASE_UUID: UUID = UUID.fromString("00000000-0000-1000-8000-00805f9b34fb")
     }
 }
