@@ -59,7 +59,6 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
-import org.junit.Ignore
 import org.junit.Test
 
 /**
@@ -521,12 +520,6 @@ class OathHandlerWireTest {
         }
     }
 
-    @Ignore(
-        "Fails on main: OathRepository.generateCode claims the HOTP counter, then a failing " +
-            "recordUsage throws, so the code is discarded and its counter value is spent. " +
-            "The fix is in OathRepository.generateCode (a usage record failure is logged, " +
-            "the claimed code returned)."
-    )
     @Test
     fun `a HOTP code whose counter was claimed is not lost to a later failure`() = runTest {
         store(hotp(ID_HOTP, counter = 0))
@@ -534,11 +527,8 @@ class OathHandlerWireTest {
 
         val response = generate(ID_HOTP)
 
-        if (response.has("error")) {
-            assertEquals("a refused code spends no counter", 0L, rows.getValue(ID_HOTP).counter)
-        } else {
-            assertEquals(RFC4226_CODES[0], code(response))
-        }
+        assertEquals(RFC4226_CODES[0], code(response))
+        assertEquals("the claimed counter is spent once", 1L, rows.getValue(ID_HOTP).counter)
     }
 
 
