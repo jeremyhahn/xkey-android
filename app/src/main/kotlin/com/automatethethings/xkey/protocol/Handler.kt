@@ -4891,16 +4891,7 @@ class RequestHandler(
      * Reads a PIV algorithm, accepting go-xkms spellings ("ECDSA-P256",
      * "RSA-2048") alongside the [PivAlgorithm] enum names.
      */
-    private fun pivAlgorithmOf(name: String): PivAlgorithm? {
-        if (name.isBlank()) return null
-        runCatching { return PivAlgorithm.valueOf(name) }
-        return when (name.uppercase().replace("_", "-")) {
-            "ECDSA-P256", "EC-P256", "P256" -> PivAlgorithm.ES256
-            "ECDSA-P384", "EC-P384", "P384" -> PivAlgorithm.ES384
-            "RSA-2048", "RSA2048" -> PivAlgorithm.RS2048
-            else -> null
-        }
-    }
+    private fun pivAlgorithmOf(name: String): PivAlgorithm? = PivAlgorithm.fromWireName(name)
 
     private suspend fun handlePivListSlots(request: Request): Response {
         val pkm = pivKeyManager ?: return Response.error(request.id, ErrorCodes.FEATURE_UNAVAILABLE, "PIV support is not available on this transport")

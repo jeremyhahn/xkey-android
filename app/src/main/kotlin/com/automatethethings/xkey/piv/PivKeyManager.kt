@@ -383,7 +383,7 @@ class PivKeyManager(
         val signatureAlgorithm = when (algorithm) {
             PivAlgorithm.ES256 -> "SHA256withECDSA"
             PivAlgorithm.ES384 -> "SHA384withECDSA"
-            PivAlgorithm.RS2048 -> "SHA256withRSA"
+            PivAlgorithm.RS2048, PivAlgorithm.RS3072, PivAlgorithm.RS4096 -> "SHA256withRSA"
         }
 
         val startTime = System.currentTimeMillis()
