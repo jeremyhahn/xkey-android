@@ -36,9 +36,8 @@
 # (adapted: applied; no schedule `busy` clause, see the schedule guard note.)
 # v1.53 also: `Runner labels` lets code-review.yml's API-only jobs take a
 # self-hosted label set for a same-repository head under a pull request event.
-# (adapted: no `Runner labels` step here, see v1.51. code-review.yml's scope
-# job takes the bigdisk pool for a same-repository head only while
-# CI_SELF_HOSTED_BIGDISK is above 0; actionlint checks the label set.)
+# (adapted: no `Runner labels` step here, see v1.51; actionlint checks the
+# label set.)
 # v1.53 also: main-green for a release tag is a successful ci.yml run for the
 # exact commit tagged, a push run or a workflow_dispatch run on main.
 # (adapted: a release practice, no job change in this file.)
@@ -241,10 +240,10 @@ jobs:
   preflight:
     name: Preflight [changed files, architecture gates]
     # ubuntu-latest unless the repository variable CI_PREFLIGHT_RUNS_ON
-    # (runs-on JSON) names another runner; a pull request whose head
-    # repository is not this one always takes ubuntu-latest. Off github.com
-    # the forge's ubuntu-latest label, as before.
-    runs-on: ${{ github.server_url == 'https://github.com' && vars.CI_PREFLIGHT_RUNS_ON != '' && (!startsWith(github.event_name, 'pull_request') || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(vars.CI_PREFLIGHT_RUNS_ON) || 'ubuntu-latest' }}   # repo line over v1.52
+    # (runs-on JSON) names another runner; that runner only on a push to main
+    # or a same-repository pull_request, the events the self-hosted runners
+    # accept. Off github.com the forge's ubuntu-latest label, as before.
+    runs-on: ${{ github.server_url == 'https://github.com' && vars.CI_PREFLIGHT_RUNS_ON != '' && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON(vars.CI_PREFLIGHT_RUNS_ON) || 'ubuntu-latest' }}   # repo line over v1.52
     timeout-minutes: 10
     permissions:
       actions: read     # Balanced runner pool: list this repository's runs and jobs
@@ -265,7 +264,8 @@ jobs:
       # the limits in the repository variables CI_HOSTED_SHARE,
       # CI_SELF_HOSTED_BIGDISK and CI_SELF_HOSTED_BIGDISK_DOCKER. With either
       # bigdisk limit unset or 0, or any API answer incomplete, every job is
-      # hosted. A fork's head is hosted before any API call. The step reads
+      # hosted; a tie goes self-hosted. A fork's head, and any event but a
+      # push to main or a pull request, is hosted with no API call. The step reads
       # no repository code. Off github.com each job keeps its forge label.
       - name: Balanced runner pool
         id: runner
@@ -273,6 +273,7 @@ jobs:
           SERVER: ${{ github.server_url }}
           EVENT: ${{ github.event_name }}
           HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          REF: ${{ github.ref }}
           REPO: ${{ github.repository }}
           API: ${{ github.api_url }}/repos/${{ github.repository }}/actions
           RUN_ID: ${{ github.run_id }}
@@ -309,6 +310,14 @@ jobs:
                 emit "$HOSTED" "$HOSTED"
                 exit 0
               fi ;;
+          esac
+          # The self-hosted runners refuse every event but a push to main and a pull request.
+          case "$EVENT:$REF" in
+            push:refs/heads/main | pull_request:*) ;;
+            *)
+              echo "::notice::runner selection: event $EVENT on $REF is not a push to main or a pull request, which the self-hosted runners refuse; every job of this run takes the GitHub-hosted default, ubuntu-latest"
+              emit "$HOSTED" "$HOSTED"
+              exit 0 ;;
           esac
           # whole <value>: a whole number above 0, at most 6 digits.
           whole() { [[ "$1" =~ ^[0-9]{1,6}$ ]] && [ "$((10#$1))" -gt 0 ]; }
@@ -386,15 +395,15 @@ jobs:
           [ "$H" -lt "$HS" ] || hfull=1
           { [ "$S1" -lt "$C1" ] && [ "$S2" -lt "$C2" ]; } || sfull=1
           if [ "$hfull" = 1 ] && [ "$sfull" = 1 ]; then
-            [ "$SQ" -lt "$HQ" ] && pick=self
+            [ "$SQ" -le "$HQ" ] && pick=self
             why="both pools full: hosted $HQ queued, self-hosted $SQ queued"
           elif [ "$hfull" = 1 ]; then
             pick=self; why="the hosted pool is full ($H of $HS)"
           elif [ "$sfull" = 1 ]; then
             why="the self-hosted pool is full (bigdisk $S1 of $C1, bigdisk-docker $S2 of $C2)"
           else
-            # self-hosted use, max(S1/C1, S2/C2), below hosted use H/HS.
-            [ $((S1 * HS)) -lt $((H * C1)) ] && [ $((S2 * HS)) -lt $((H * C2)) ] && pick=self
+            # self-hosted use, max(S1/C1, S2/C2), at or below hosted use H/HS.
+            [ $((S1 * HS)) -le $((H * C1)) ] && [ $((S2 * HS)) -le $((H * C2)) ] && pick=self
             why="use hosted $H/$HS, bigdisk $S1/$C1, bigdisk-docker $S2/$C2"
           fi
           if [ "$pick" = self ]; then

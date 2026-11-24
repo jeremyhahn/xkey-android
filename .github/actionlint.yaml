@@ -3,9 +3,8 @@
 # Jobs run on GitHub-hosted ubuntu-latest, which actionlint knows, except:
 # - the code-review.yml review jobs, which run on the self-hosted `codex` and
 #   `qwen` runners;
-# - the ci.yml jobs that read preflight's runner outputs, and code-review.yml's
-#   scope job, which take the self-hosted bigdisk pool for a same-repository
-#   head once its repository variables are set: the label sets
+# - the ci.yml jobs that read preflight's runner outputs, which take the
+#   self-hosted bigdisk pool once its repository variables are set: the label sets
 #   [self-hosted, linux, x64, bigdisk] and [self-hosted, linux, x64,
 #   bigdisk-docker] (self-hosted, linux and x64 are actionlint built-ins).
 # Without this file actionlint reports those labels as unknown runners
