@@ -134,6 +134,22 @@ class NoiseStaticKeyMigrationTest {
         assertEquals("nothing needed rewriting", before, prefs.getString(KEY_STATIC_PRIVATE, null))
     }
 
+    /**
+     * Two sessions load the same identity from the real encrypted store: the
+     * key the first one finds or generates is the one the second one answers
+     * under, never a fresh in-memory key.
+     */
+    @Test
+    fun twoSessionsLoadTheSameStaticKey(): Unit = runBlocking {
+        val first = NoiseSession()
+        first.loadStaticKey(context)
+        val second = NoiseSession()
+        second.loadStaticKey(context)
+
+        assertNotNull(first.getStaticPublicKey())
+        assertArrayEquals(first.getStaticPublicKey(), second.getStaticPublicKey())
+    }
+
     // -----------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------

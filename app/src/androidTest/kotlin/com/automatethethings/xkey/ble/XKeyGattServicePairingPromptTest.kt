@@ -30,6 +30,8 @@ import com.automatethethings.xkey.protocol.ErrorCodes
 import com.automatethethings.xkey.protocol.Response
 import com.automatethethings.xkey.ui.MainActivity
 import com.automatethethings.xkey.ui.PROMPT_TIMEOUT_MS
+import com.automatethethings.xkey.ui.PromptActivityTracker
+import com.automatethethings.xkey.ui.SettingsActivity
 import com.automatethethings.xkey.ui.awaitCondition
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
@@ -44,6 +46,7 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
 import org.junit.Before
@@ -84,6 +87,7 @@ class XKeyGattServicePairingPromptTest {
     private lateinit var probe: XKeyGattServiceProbe
 
     private var activity: ActivityScenario<MainActivity>? = null
+    private var secondary: ActivityScenario<SettingsActivity>? = null
     private var gattProbe: GattServerProbe? = null
 
     /** Where the prompt is awaited from, so the main thread stays free. */
@@ -103,6 +107,8 @@ class XKeyGattServicePairingPromptTest {
         gattProbe = null
         activity?.close()
         activity = null
+        secondary?.close()
+        secondary = null
     }
 
     // -----------------------------------------------------------------
@@ -148,6 +154,49 @@ class XKeyGattServicePairingPromptTest {
         probe.service.setActivity(null)
 
         assertFalse(probe.service.onPairingConfirmationRequired("Orphaned Laptop", "abcd1234"))
+    }
+
+    // -----------------------------------------------------------------
+    // The prompt's host: whichever screen is in front (#320)
+    // -----------------------------------------------------------------
+
+    /**
+     * Nothing registers the activity: the screen in front hosts the prompt
+     * through the app-wide tracker, as on a phone where the service was bound
+     * by another MainActivity instance.
+     */
+    @Test
+    fun theScreenInFrontHostsThePromptWithoutRegistering(): Unit = runBlocking {
+        assertSame(PromptActivityTracker, probe.service.promptHost)
+        activity = ActivityScenario.launch(MainActivity::class.java)
+
+        val answer = callerScope.async {
+            probe.service.onPairingConfirmationRequired("Front Laptop", "abcd1234", "123456")
+        }
+        clickDialogButton(android.R.id.button1, answer)
+
+        assertTrue("the user's approval must reach the caller", withTimeout(TIMEOUT_MS) { answer.await() })
+    }
+
+    /** A screen other than MainActivity in front hosts it too. */
+    @Test
+    fun aSecondaryScreenHostsThePrompt(): Unit = runBlocking {
+        secondary = ActivityScenario.launch(SettingsActivity::class.java)
+
+        val answer = callerScope.async {
+            probe.service.onPairingConfirmationRequired("Settings Laptop", "abcd1234")
+        }
+        clickDialogButton(android.R.id.button2, answer)
+
+        assertFalse("the user's refusal must reach the caller", withTimeout(TIMEOUT_MS) { answer.await() })
+    }
+
+    /** The screen gone from the front takes the prompt with it: refused. */
+    @Test
+    fun aClosedScreenLeavesThePromptRefused(): Unit = runBlocking {
+        ActivityScenario.launch(MainActivity::class.java).close()
+
+        assertFalse(probe.service.onPairingConfirmationRequired("Late Laptop", "abcd1234"))
     }
 
     // -----------------------------------------------------------------
