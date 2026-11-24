@@ -221,7 +221,7 @@ class RemoteShareClient(
             val exportable = result.opt("exportable") as? Boolean ?: malformed("exportable is not a boolean")
             val keySize = when (val v = result.opt("key_size")) {
                 null, JSONObject.NULL -> 0
-                is Int -> v
+                is Int -> if (v < 0) malformed("key_size is negative") else v
                 else -> malformed("key_size is not an integer")
             }
             val publicKeyPem = optBytes(result, "public_key_pem")?.toString(Charsets.UTF_8)
