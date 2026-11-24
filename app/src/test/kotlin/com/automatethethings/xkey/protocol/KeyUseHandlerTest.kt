@@ -624,6 +624,26 @@ class KeyUseHandlerTest {
     }
 
     @Test
+    fun `software key material is zeroed after each use`() = runTest {
+        val flipped = swCiphertext(unb64(data)).also { it[it.size - 1] = (it[it.size - 1].toInt() xor 0x01).toByte() }
+        val requests = gatedRequests().filter { (_, params) -> JSONObject(params).getString("keyId").startsWith("sw-") } +
+            listOf(
+                // A failed decrypt and a key refused for its type.
+                MethodNames.LOCAL_SYMMETRIC_DECRYPT to """{"keyId":"$SW_AES","ciphertext":"${b64(flipped)}","aad":"$data"}""",
+                MethodNames.LOCAL_HMAC to """{"keyId":"$SW_AES","data":"$data"}""",
+                MethodNames.LOCAL_SYMMETRIC_ENCRYPT to """{"keyId":"$SW_HMAC_256","plaintext":"$data"}"""
+            )
+        requests.forEach { (method, params) ->
+            handedMaterial.clear()
+            call(method, params)
+            assertTrue("$method $params: the store handed out material", handedMaterial.isNotEmpty())
+            handedMaterial.forEach { material ->
+                assertTrue("$method $params: the key material is zeroed", material.all { it == 0.toByte() })
+            }
+        }
+    }
+
+    @Test
     fun `found - getPublicKey writes no audit entry`() = runTest {
         servedBy(PEER_OK) { result(call(MethodNames.LOCAL_GET_PUBLIC_KEY, """{"keyId":"$HW_EC","format":"der"}""")) }
         val keyUse = setOf(
