@@ -94,7 +94,7 @@ class StreamGenerationEchoTest {
 
     @Test
     fun pairingConfirmWithoutARepositoryEchoesTheGeneration() = runBlocking {
-        val answer = gatedSession(null).interceptOrRoute(confirm(id = 8, generation = 80, key = "ab".repeat(32)))
+        val answer = gatedSession(null).interceptOrRoute(confirm(id = 8, generation = 80uL, key = "ab".repeat(32)))
 
         assertEquals("80", rawGeneration(answer))
         assertEquals(ErrorCodes.PAIRING_REJECTED, errorCode(answer))
@@ -103,7 +103,7 @@ class StreamGenerationEchoTest {
     @Test
     fun pairingConfirmWithoutAPeerIdentityEchoesTheGeneration() = runBlocking {
         val answer = gatedSession(PairedDeviceRepository(InMemorySharedPreferences()))
-            .interceptOrRoute(confirm(id = 9, generation = 90, key = "ab".repeat(32)))
+            .interceptOrRoute(confirm(id = 9, generation = 90uL, key = "ab".repeat(32)))
 
         assertEquals("90", rawGeneration(answer))
         assertEquals(ErrorCodes.PAIRING_REJECTED, errorCode(answer))
@@ -111,7 +111,7 @@ class StreamGenerationEchoTest {
 
     @Test
     fun confirmAlreadyPairedEchoesTheGeneration() {
-        val answer = confirmAlreadyPaired(confirm(id = 10, generation = 100, key = "ab".repeat(32)))
+        val answer = confirmAlreadyPaired(confirm(id = 10, generation = 100uL, key = "ab".repeat(32)))
 
         assertEquals("100", rawGeneration(answer))
         assertTrue(JSONObject(String(answer!!, Charsets.UTF_8)).getJSONObject("result").getBoolean("confirmed"))
@@ -126,7 +126,7 @@ class StreamGenerationEchoTest {
         StreamSessionHarness(pairingCallback = callback(approve = true)).use { harness ->
             val desktop = harness.connectUnpaired()
 
-            val reply = desktop.raw(confirmText(id = 11, generation = 110, key = desktop.publicKeyHex))
+            val reply = desktop.raw(confirmText(id = 11, generation = 110uL, key = desktop.publicKeyHex))
 
             assertEquals("110", rawGeneration(reply))
             assertTrue("expected success, got $reply", JSONObject(reply).has("result"))
@@ -139,7 +139,7 @@ class StreamGenerationEchoTest {
         StreamSessionHarness(pairingCallback = callback(approve = false)).use { harness ->
             val desktop = harness.connectUnpaired()
 
-            val reply = desktop.raw(confirmText(id = 12, generation = 120, key = desktop.publicKeyHex))
+            val reply = desktop.raw(confirmText(id = 12, generation = 120uL, key = desktop.publicKeyHex))
 
             assertEquals("120", rawGeneration(reply))
             assertEquals(ErrorCodes.PAIRING_REJECTED, errorCode(reply))
@@ -152,7 +152,7 @@ class StreamGenerationEchoTest {
         StreamSessionHarness(pairingCallback = callback(approve = true)).use { harness ->
             val desktop = harness.connectUnpaired()
 
-            val reply = desktop.raw(confirmText(id = 13, generation = 130, key = "cd".repeat(32)))
+            val reply = desktop.raw(confirmText(id = 13, generation = 130uL, key = "cd".repeat(32)))
 
             assertEquals("130", rawGeneration(reply))
             assertEquals(ErrorCodes.PAIRING_REJECTED, errorCode(reply))
@@ -165,7 +165,7 @@ class StreamGenerationEchoTest {
         StreamSessionHarness().use { harness ->
             val desktop = harness.connectPaired()
 
-            val reply = desktop.raw(confirmText(id = 14, generation = 140, key = desktop.publicKeyHex))
+            val reply = desktop.raw(confirmText(id = 14, generation = 140uL, key = desktop.publicKeyHex))
 
             assertEquals("140", rawGeneration(reply))
             assertTrue("expected success, got $reply", JSONObject(reply).has("result"))
@@ -199,6 +199,73 @@ class StreamGenerationEchoTest {
     }
 
     // -----------------------------------------------------------------
+    // The largest uint64 generation, above Long.MAX_VALUE
+    // -----------------------------------------------------------------
+
+    @Test
+    fun rejectUnpairedEchoesTheMaxGeneration() = runBlocking {
+        val answer = gatedSession(PairedDeviceRepository(InMemorySharedPreferences()))
+            .interceptOrRoute("""{"jsonrpc":"2.0","id":21,"generation":$UINT64_MAX,"method":"local.getCapabilities"}""".toByteArray())
+
+        assertMaxGeneration(answer)
+        assertEquals(ErrorCodes.PAIRING_REQUIRED, errorCode(answer))
+    }
+
+    @Test
+    fun pairingConfirmWithoutARepositoryEchoesTheMaxGeneration() = runBlocking {
+        val answer = gatedSession(null).interceptOrRoute(confirm(id = 22, generation = ULong.MAX_VALUE, key = "ab".repeat(32)))
+
+        assertMaxGeneration(answer)
+        assertEquals(ErrorCodes.PAIRING_REJECTED, errorCode(answer))
+    }
+
+    @Test
+    fun confirmAlreadyPairedEchoesTheMaxGeneration() {
+        val answer = confirmAlreadyPaired(confirm(id = 23, generation = ULong.MAX_VALUE, key = "ab".repeat(32)))
+
+        assertMaxGeneration(answer)
+        assertTrue(JSONObject(String(answer!!, Charsets.UTF_8)).getJSONObject("result").getBoolean("confirmed"))
+    }
+
+    @Test
+    fun anApprovedPairingConfirmEchoesTheMaxGeneration() = runBlocking {
+        StreamSessionHarness(pairingCallback = callback(approve = true)).use { harness ->
+            val desktop = harness.connectUnpaired()
+
+            val reply = desktop.raw(confirmText(id = 24, generation = ULong.MAX_VALUE, key = desktop.publicKeyHex))
+
+            assertMaxGeneration(reply)
+            assertTrue("expected success, got $reply", JSONObject(reply).has("result"))
+            desktop.close()
+        }
+    }
+
+    @Test
+    fun aTransportMethodEchoesTheMaxGenerationOnSuccessAndError() = runBlocking {
+        val family = object : TransportMethods {
+            override fun handles(method: String) = method.startsWith("test.")
+            override suspend fun handle(request: Request): Response =
+                if (request.method == "test.ok") {
+                    Response.success(request.id, JSONObject().put("ok", true))
+                } else {
+                    Response.error(request.id, ErrorCodes.INVALID_PARAMS, "refused")
+                }
+        }
+        StreamSessionHarness(transportMethods = listOf(family)).use { harness ->
+            val desktop = harness.connectPaired()
+
+            val ok = desktop.raw("""{"jsonrpc":"2.0","id":25,"generation":$UINT64_MAX,"method":"test.ok"}""")
+            val refused = desktop.raw("""{"jsonrpc":"2.0","id":26,"generation":$UINT64_MAX,"method":"test.no"}""")
+
+            assertMaxGeneration(ok)
+            assertTrue(JSONObject(ok).getJSONObject("result").getBoolean("ok"))
+            assertMaxGeneration(refused)
+            assertEquals(ErrorCodes.INVALID_PARAMS, errorCode(refused))
+            desktop.close()
+        }
+    }
+
+    // -----------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------
 
@@ -214,17 +281,28 @@ class StreamGenerationEchoTest {
         override suspend fun onPairingConfirmationRequired(deviceName: String, publicKeyFingerprint: String) = approve
     }
 
-    /** Sends [json] exactly as written, so the `generation` literal is ours. */
+    /** Sends [json] exactly as written and returns the answer as written, so the `generation` literal is ours both ways. */
     private fun DesktopPeer.raw(json: String): String {
         send(noise.encrypt(json.toByteArray()))
-        return readEncrypted().toString()
+        return String(noise.decrypt(read()), Charsets.UTF_8)
     }
 
-    private fun confirmText(id: Long, generation: Long, key: String) =
+    private fun confirmText(id: Long, generation: ULong, key: String) =
         """{"jsonrpc":"2.0","id":$id,"generation":$generation,"method":"pairing.confirm",""" +
             """"params":{"publicKeyHex":"$key","deviceName":"desktop"}}"""
 
-    private fun confirm(id: Long, generation: Long, key: String) = confirmText(id, generation, key).toByteArray()
+    private fun confirm(id: Long, generation: ULong, key: String) = confirmText(id, generation, key).toByteArray()
+
+    /** Asserts [answer] carries generation 2^64-1 digit for digit and parses back to [ULong.MAX_VALUE]. */
+    private fun assertMaxGeneration(answer: String) {
+        assertEquals(UINT64_MAX, rawGeneration(answer))
+        assertEquals(ULong.MAX_VALUE, Response.fromJson(answer).generation)
+    }
+
+    private fun assertMaxGeneration(answer: ByteArray?) {
+        assertNotNull("the request must be answered", answer)
+        assertMaxGeneration(String(answer!!, Charsets.UTF_8))
+    }
 
     private fun rawGeneration(answer: ByteArray?): String? {
         assertNotNull("the request must be answered", answer)
@@ -238,6 +316,9 @@ class StreamGenerationEchoTest {
             ?: throw AssertionError("expected an error, got $answer")
 
     private companion object {
+        /** 2^64-1, the largest uint64 generation, above [Long.MAX_VALUE]. */
+        const val UINT64_MAX = "18446744073709551615"
+
         /** The `generation` member's number exactly as written, or null when absent. */
         fun rawGeneration(json: String): String? =
             Regex(""""generation":(\d+)[,}]""").find(json)?.groupValues?.get(1)

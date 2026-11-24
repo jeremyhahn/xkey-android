@@ -23,6 +23,7 @@ import android.util.Log
 import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.protocol.ErrorCodes
 import com.automatethethings.xkey.protocol.RequestHandler
+import com.automatethethings.xkey.protocol.Response
 import com.automatethethings.xkey.remote.BidirectionalMessageRouter
 import com.automatethethings.xkey.settings.InMemorySharedPreferences
 import com.automatethethings.xkey.settings.PairedDeviceRepository
@@ -68,7 +69,10 @@ class GattServerGenerationEchoTest {
 
         fun ByteArray.hex(): String = joinToString("") { "%02x".format(it) }
 
-        fun pairingConfirm(id: Long, generation: Long, keyHex: String): ByteArray =
+        /** 2^64-1, the largest uint64 generation, above [Long.MAX_VALUE]. */
+        const val UINT64_MAX = "18446744073709551615"
+
+        fun pairingConfirm(id: Long, generation: ULong, keyHex: String): ByteArray =
             ("""{"jsonrpc":"2.0","id":$id,"generation":$generation,"method":"pairing.confirm",""" +
                 """"params":{"deviceName":"desktop","publicKeyHex":"$keyHex"}}""").toByteArray()
 
@@ -140,7 +144,7 @@ class GattServerGenerationEchoTest {
         coEvery { callback.onPairingConfirmationRequired(any(), any(), any()) } returns true
         val desktop = connect(paired = false)
 
-        val answer = ask(desktop, pairingConfirm(6, 60, desktop.getLocalStaticPublicKey().hex()))
+        val answer = ask(desktop, pairingConfirm(6, 60uL, desktop.getLocalStaticPublicKey().hex()))
 
         assertEquals("60", rawGeneration(answer))
         assertTrue("expected success, got $answer", JSONObject(answer).has("result"))
@@ -151,7 +155,7 @@ class GattServerGenerationEchoTest {
         coEvery { callback.onPairingConfirmationRequired(any(), any(), any()) } returns false
         val desktop = connect(paired = false)
 
-        val answer = ask(desktop, pairingConfirm(7, 70, desktop.getLocalStaticPublicKey().hex()))
+        val answer = ask(desktop, pairingConfirm(7, 70uL, desktop.getLocalStaticPublicKey().hex()))
 
         assertEquals("70", rawGeneration(answer))
         assertEquals(ErrorCodes.PAIRING_REJECTED, errorCode(answer))
@@ -162,7 +166,7 @@ class GattServerGenerationEchoTest {
         coEvery { callback.onPairingConfirmationRequired(any(), any(), any()) } returns true
         val desktop = connect(paired = false)
 
-        val answer = ask(desktop, pairingConfirm(8, 80, "cd".repeat(32)))
+        val answer = ask(desktop, pairingConfirm(8, 80uL, "cd".repeat(32)))
 
         assertEquals("80", rawGeneration(answer))
         assertEquals(ErrorCodes.PAIRING_REJECTED, errorCode(answer))
@@ -176,7 +180,7 @@ class GattServerGenerationEchoTest {
         coEvery { callback.onPairingConfirmationRequired(any(), any(), any()) } returns true
         val desktop = connect(paired = false)
 
-        val answer = ask(desktop, pairingConfirm(9, 90, desktop.getLocalStaticPublicKey().hex()))
+        val answer = ask(desktop, pairingConfirm(9, 90uL, desktop.getLocalStaticPublicKey().hex()))
 
         assertEquals("90", rawGeneration(answer))
         val code = errorCode(answer)
@@ -187,10 +191,64 @@ class GattServerGenerationEchoTest {
     fun aPairingConfirmOnAnAdoptedSessionEchoesTheGeneration() = runBlocking<Unit> {
         val desktop = connect(paired = true)
 
-        val answer = ask(desktop, pairingConfirm(10, 100, desktop.getLocalStaticPublicKey().hex()))
+        val answer = ask(desktop, pairingConfirm(10, 100uL, desktop.getLocalStaticPublicKey().hex()))
 
         assertEquals("100", rawGeneration(answer))
         assertTrue(JSONObject(answer).getJSONObject("result").getBoolean("confirmed"))
+    }
+
+    // -----------------------------------------------------------------
+    // The largest uint64 generation, above Long.MAX_VALUE
+    // -----------------------------------------------------------------
+
+    @Test
+    fun rejectUnpairedEchoesTheMaxGeneration() = runBlocking<Unit> {
+        val desktop = connect(paired = false)
+
+        val answer = ask(
+            desktop,
+            """{"jsonrpc":"2.0","id":21,"generation":$UINT64_MAX,"method":"local.generateKey","params":{}}""".toByteArray()
+        )
+
+        assertMaxGeneration(answer)
+        assertEquals(ErrorCodes.PAIRING_REQUIRED, errorCode(answer))
+    }
+
+    @Test
+    fun anApprovedPairingConfirmEchoesTheMaxGeneration() = runBlocking<Unit> {
+        coEvery { callback.onPairingConfirmationRequired(any(), any(), any()) } returns true
+        val desktop = connect(paired = false)
+
+        val answer = ask(desktop, pairingConfirm(22, ULong.MAX_VALUE, desktop.getLocalStaticPublicKey().hex()))
+
+        assertMaxGeneration(answer)
+        assertTrue("expected success, got $answer", JSONObject(answer).has("result"))
+    }
+
+    @Test
+    fun aRejectedPairingConfirmEchoesTheMaxGeneration() = runBlocking<Unit> {
+        coEvery { callback.onPairingConfirmationRequired(any(), any(), any()) } returns false
+        val desktop = connect(paired = false)
+
+        val answer = ask(desktop, pairingConfirm(23, ULong.MAX_VALUE, desktop.getLocalStaticPublicKey().hex()))
+
+        assertMaxGeneration(answer)
+        assertEquals(ErrorCodes.PAIRING_REJECTED, errorCode(answer))
+    }
+
+    @Test
+    fun aPairingConfirmWithoutAStoreEchoesTheMaxGeneration() = runBlocking<Unit> {
+        server.destroy()
+        awaitScopeFinished(server)
+        server = newServer(null)
+        coEvery { callback.onPairingConfirmationRequired(any(), any(), any()) } returns true
+        val desktop = connect(paired = false)
+
+        val answer = ask(desktop, pairingConfirm(24, ULong.MAX_VALUE, desktop.getLocalStaticPublicKey().hex()))
+
+        assertMaxGeneration(answer)
+        val code = errorCode(answer)
+        assertTrue("code $code", code == ErrorCodes.PAIRING_REJECTED || code == ErrorCodes.PAIRING_REQUIRED)
     }
 
     // -----------------------------------------------------------------
@@ -251,6 +309,12 @@ class GattServerGenerationEchoTest {
         val reassembler = FragmentReassembler()
         val frame = fragments.mapNotNull { reassembler.addFragment(it) }.single()
         return String(desktop.decrypt(frame), Charsets.UTF_8)
+    }
+
+    /** Asserts [answer] carries generation 2^64-1 digit for digit and parses back to [ULong.MAX_VALUE]. */
+    private fun assertMaxGeneration(answer: String) {
+        assertEquals(UINT64_MAX, rawGeneration(answer))
+        assertEquals(ULong.MAX_VALUE, Response.fromJson(answer).generation)
     }
 
     private fun errorCode(answer: String): Int =
