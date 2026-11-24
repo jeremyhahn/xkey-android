@@ -660,13 +660,24 @@ class RequestHandler(
      * request method and the refusal message, which names at most a key or
      * credential id, never key material or request data. Recording never
      * changes the response.
+     *
+     * A refusal on a served connection (one with a [CallerSession]) that
+     * authenticated no peer writes no row: every row names the caller's
+     * peer, and each row counts against the log's retention and count
+     * limits, so an unauthenticated caller must not be able to push real
+     * entries out. A request with no [CallerSession] (in-process) records
+     * with whatever [currentPeerPublicKeyHex] returns.
      */
     private suspend fun auditPolicyDenied(method: String, e: ProtocolException) {
         try {
-            val peer = currentPeerPublicKeyHex()
+            val callerPeer = currentPeerPublicKeyHex()
+            if (callerPeer == null && currentCoroutineContext()[CallerSession] != null) {
+                Log.w(TAG, "policy denial on a connection with no peer not audited")
+                return
+            }
             AuditLogger.logPolicyDenied(
-                deviceId = peer,
-                deviceName = auditPeerName(peer),
+                deviceId = callerPeer,
+                deviceName = auditPeerName(callerPeer),
                 reason = e.message ?: "Operation denied",
                 operation = method
             )
