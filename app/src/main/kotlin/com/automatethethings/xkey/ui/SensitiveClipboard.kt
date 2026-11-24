@@ -69,14 +69,14 @@ internal object SensitiveClipboard {
         val token = newToken()
         var replaced = false
         val listener = ClipboardManager.OnPrimaryClipChangedListener {
-            val seen = readToken(clipboard)
+            val seen = tokenReader(clipboard)
             if (seen is TokenRead.Readable && seen.token != token) replaced = true
         }
         clipboard.setPrimaryClip(clip(label, text, token))
         clipboard.addPrimaryClipChangedListener(listener)
         handler.postDelayed({
             clipboard.removePrimaryClipChangedListener(listener)
-            val current = readToken(clipboard)
+            val current = tokenReader(clipboard)
             val ours = when (current) {
                 is TokenRead.Readable -> current.token == token
                 TokenRead.Unreadable -> !replaced
@@ -87,13 +87,23 @@ internal object SensitiveClipboard {
 
     private fun newToken(): String = UUID.randomUUID().toString()
 
-    private sealed interface TokenRead {
+    /**
+     * Clear the copies whose time is up and whose clip the clipboard still
+     * holds. Call when the app gains window focus.
+     */
+    fun retryPendingClears(clipboard: ClipboardManager) {
+    }
+
+    /** Reads the token of the clip on the clipboard; replaced in tests. */
+    internal var tokenReader: (ClipboardManager) -> TokenRead = ::readToken
+
+    internal sealed interface TokenRead {
         /** The clipboard could be read; [token] is null for a clip that is not ours or no clip. */
         data class Readable(val token: String?) : TokenRead
         data object Unreadable : TokenRead
     }
 
-    private fun readToken(clipboard: ClipboardManager): TokenRead {
+    internal fun readToken(clipboard: ClipboardManager): TokenRead {
         val description = try {
             clipboard.primaryClipDescription
         } catch (e: SecurityException) {
