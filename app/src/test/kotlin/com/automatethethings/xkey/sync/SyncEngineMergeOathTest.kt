@@ -19,6 +19,7 @@ import android.net.Uri
 import android.util.Log
 import com.automatethethings.xkey.oath.OathCredentialDao
 import com.automatethethings.xkey.oath.OathCredentialEntity
+import com.automatethethings.xkey.oath.OathRepository
 import com.automatethethings.xkey.oath.OathSecretManager
 import com.automatethethings.xkey.storage.XKeyDatabase
 import io.mockk.coEvery
@@ -56,11 +57,13 @@ class SyncEngineMergeOathTest {
     /** The table, by `oath_id`, as the DAO's insert-if-absent and in-place update leave it. */
     private val rows = linkedMapOf<String, OathCredentialEntity>()
     private lateinit var engine: SyncEngine
+    private lateinit var dao: OathCredentialDao
 
     @Before
     fun setUp() {
-        val dao = mockk<OathCredentialDao>()
+        dao = mockk<OathCredentialDao>()
         coEvery { dao.getByOathId(any()) } answers { rows[firstArg()] }
+        coEvery { dao.deleteByOathId(any()) } answers { rows.remove(firstArg<String>()) }
         coEvery { dao.insertIfAbsent(any()) } answers {
             val row = firstArg<OathCredentialEntity>()
             if (rows.containsKey(row.oathId)) {
@@ -207,6 +210,19 @@ class SyncEngineMergeOathTest {
         assertEquals(1, inserted.size)
         assertNull(inserted[0].issuer)
         assertEquals("host:user", inserted[0].accountName)
+    }
+
+    @Test
+    fun `a credential deleted on the phone is not re-inserted by the next merge`() = runTest {
+        val payload = JSONArray().put(credential("gone", "Acme", "alice"))
+        engine.mergeOath(payload)
+        OathRepository(dao, OathSecretManager()).deleteCredential("gone")
+        assertNull(rows["gone"])
+
+        val counts = engine.mergeOath(payload)
+
+        assertNull("a deleted id stays deleted", rows["gone"])
+        assertEquals(SyncEngine.ItemCounts(added = 0, updated = 0, skipped = 1), counts)
     }
 
     @Test
