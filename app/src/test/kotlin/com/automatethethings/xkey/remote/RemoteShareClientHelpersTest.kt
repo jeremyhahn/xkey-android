@@ -61,8 +61,15 @@ class RemoteShareClientHelpersTest {
         val b64 = Base64.getEncoder().encodeToString(secret)
         assertEquals(b64, got.getString(field))
         got.remove(field)
-        assertEquals(expectedParams.toMap(), got.toMap())
+        assertEquals(plain(expectedParams), plain(got))
         if (b64.isNotEmpty()) assertEquals(1, occurrences(out, b64.toByteArray(Charsets.US_ASCII)))
+    }
+
+    // Android's org.json has no toMap, so this converts objects and arrays to maps and lists.
+    private fun plain(value: Any?): Any? = when (value) {
+        is JSONObject -> value.keys().asSequence().associateWith { plain(value.get(it)) }
+        is org.json.JSONArray -> (0 until value.length()).map { plain(value.get(it)) }
+        else -> value
     }
 
     private fun malformed(block: () -> Unit) {
