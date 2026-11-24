@@ -687,7 +687,7 @@ class AuditLoggerDispatchTest {
 
     @Test
     fun `logOathCredentialCreated composes the label from issuer and account`() {
-        AuditLogger.logOathCredentialCreated("o1", "GitHub", "alice@example.com", "TOTP")
+        AuditLogger.logOathCredentialCreated("o1", "GitHub", "alice@example.com", "TOTP", null, null)
         val entry = only()
         assertEquals(AuditOperationType.OATH_CREDENTIAL_CREATED, entry.operationType)
         assertEquals("o1", entry.keyId)
@@ -700,7 +700,7 @@ class AuditLoggerDispatchTest {
 
     @Test
     fun `logOathCredentialCreated falls back to the account name without an issuer`() {
-        AuditLogger.logOathCredentialCreated("o1", null, "alice@example.com", "HOTP")
+        AuditLogger.logOathCredentialCreated("o1", null, "alice@example.com", "HOTP", null, null)
         val entry = only()
         assertEquals("alice@example.com", entry.keyLabel)
         assertFalse(details(entry).has("issuer"))
@@ -708,8 +708,8 @@ class AuditLoggerDispatchTest {
 
     @Test
     fun `logOathCredentialDeleted and logOathCodeGenerated carry no details`() {
-        AuditLogger.logOathCredentialDeleted("o1", "GitHub", "alice")
-        AuditLogger.logOathCodeGenerated("o1", null, "alice")
+        AuditLogger.logOathCredentialDeleted("o1", "GitHub", "alice", null, null)
+        AuditLogger.logOathCodeGenerated("o1", null, "alice", null, null)
 
         assertEquals(2, inserted.size)
         assertEquals(AuditOperationType.OATH_CREDENTIAL_DELETED, inserted[0].operationType)

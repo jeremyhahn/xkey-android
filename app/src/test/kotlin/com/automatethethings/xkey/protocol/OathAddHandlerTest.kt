@@ -89,7 +89,7 @@ class OathAddHandlerTest {
         every { Looper.getMainLooper() } returns mockk(relaxed = true)
 
         mockkObject(AuditLogger)
-        every { AuditLogger.logOathCredentialCreated(any(), any(), any(), any()) } returns Unit
+        every { AuditLogger.logOathCredentialCreated(any(), any(), any(), any(), any(), any()) } returns Unit
 
         val dao = mockk<OathCredentialDao>()
         coEvery { dao.insert(any()) } answers { inserted += firstArg<OathCredentialEntity>(); 1L }

@@ -3810,7 +3810,10 @@ class RequestHandler(
                 (period - (System.currentTimeMillis() / 1000 % period)).toInt()
             } else 0
 
-            AuditLogger.logOathCodeGenerated(credentialId, cred.issuer, cred.accountName)
+            val caller = auditCaller()
+            AuditLogger.logOathCodeGenerated(
+                credentialId, cred.issuer, cred.accountName, caller.peerPublicKeyHex, caller.deviceName
+            )
 
             val result = JSONObject().apply {
                 put("code", code)
@@ -3868,7 +3871,10 @@ class RequestHandler(
             )
 
             // The entry names the stored credential, not the caller's free-form name.
-            AuditLogger.logOathCredentialCreated(credentialId, issuer, accountName, type.uppercase())
+            val caller = auditCaller()
+            AuditLogger.logOathCredentialCreated(
+                credentialId, issuer, accountName, type.uppercase(), caller.peerPublicKeyHex, caller.deviceName
+            )
 
             val result = JSONObject().apply {
                 put("success", true)
@@ -3908,7 +3914,10 @@ class RequestHandler(
             // Recorded and deleted in one transaction, so no sync with another paired device adds it back.
             db.oathCredentialDao().deleteAndRecordDeletion(credentialId, System.currentTimeMillis())
 
-            AuditLogger.logOathCredentialDeleted(credentialId, cred.issuer, cred.accountName)
+            val caller = auditCaller()
+            AuditLogger.logOathCredentialDeleted(
+                credentialId, cred.issuer, cred.accountName, caller.peerPublicKeyHex, caller.deviceName
+            )
 
             val result = JSONObject().apply { put("deleted", true) }
             Response.success(request.id, result)

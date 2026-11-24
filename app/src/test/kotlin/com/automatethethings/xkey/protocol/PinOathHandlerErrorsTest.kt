@@ -89,7 +89,7 @@ class PinOathHandlerErrorsTest {
         every { Looper.getMainLooper() } returns mockk(relaxed = true)
 
         mockkObject(AuditLogger)
-        every { AuditLogger.logOathCredentialDeleted(any(), any(), any()) } returns Unit
+        every { AuditLogger.logOathCredentialDeleted(any(), any(), any(), any(), any()) } returns Unit
 
         oathDao = mockk(relaxed = true)
         val database = mockk<XKeyDatabase>(relaxed = true)
@@ -369,7 +369,7 @@ class PinOathHandlerErrorsTest {
         assertFalse(response.getJSONObject("result").getBoolean("deleted"))
         coVerify(exactly = 0) { oathDao.deleteAndRecordDeletion(any(), any()) }
         coVerify(exactly = 0) { oathDao.deleteByOathId(any()) }
-        verify(exactly = 0) { AuditLogger.logOathCredentialDeleted(any(), any(), any()) }
+        verify(exactly = 0) { AuditLogger.logOathCredentialDeleted(any(), any(), any(), any(), any()) }
     }
 
     @Test
