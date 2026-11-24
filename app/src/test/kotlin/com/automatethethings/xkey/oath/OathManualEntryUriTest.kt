@@ -8,7 +8,7 @@ import org.junit.Test
 /**
  * The manual-entry round trip: [otpauthUri] writes the label the way
  * [parseStructuredOathLabel] reads it back, so the persisted issuer and
- * account are the values typed in (#156); an external import keeps the
+ * account are the values typed in; an external import keeps the
  * separator split of third-party labels.
  */
 class OathManualEntryUriTest {

@@ -1,15 +1,5 @@
 #!/usr/bin/env bash
-# Tests build/docker/devcontainer/fetch.sh, the image build's download helper,
-# offline: it runs under sh with a stub curl first on PATH, which serves the
-# fixtures below, logs every call, and refuses one without the retry flags.
-# The cases: the primary download with a good and a bad checksum; a failed
-# GitHub release download recovered through the API asset endpoint, the asset
-# picked among several, with a good and a bad checksum; release JSON without
-# the asset, malformed, truncated or with a bad id; the release lookup and the
-# asset download failing; a URL that is not a GitHub release, with no
-# redirect, a redirect elsewhere, and a redirect to a GitHub release.
-#
-#   usage: scripts/fetch-test.sh    (make fetch-test, part of make lint-gates)
+# Tests build/docker/devcontainer/fetch.sh offline against a stub curl. `make fetch-test`.
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -35,13 +25,7 @@ ne() { [ "$1" != "$2" ]; }
 has() { [[ $1 == *"$2"* ]]; }
 lacks() { [[ $1 != *"$2"* ]]; }
 
-# The stub curl. Each URL's fixtures live under STUB_DIR, named by the URL
-# with every character outside [A-Za-z0-9._-] made `_`: <key>.body is served
-# (to -o, or stdout), <key>.redirect is what -w '%{redirect_url}' prints, and
-# <key>.rc makes the call fail with that exit code. A download with no body
-# fails as curl -f does on an HTTP error (22); a redirect lookup with no
-# redirect prints nothing. Each call appends "<get|redirect> <url> <Accept>"
-# to STUB_DIR/log.
+# Stub curl: serves STUB_DIR/<key>.body, .redirect and .rc per URL and logs each call.
 mkdir -p "${T}/bin"
 cat > "${T}/bin/curl" << 'EOF'
 #!/usr/bin/env bash

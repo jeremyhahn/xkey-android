@@ -196,7 +196,7 @@ class StreamResponseDrainTest {
         assertServeEndedQuietly(peer)
     }
 
-    /** Unpairing the desktop (#59) delivers nothing more: what is pending settles as lost. */
+    /** Unpairing the desktop delivers nothing more: what is pending settles as lost. */
     @Test
     fun anUnpairingWhileResultsAreBufferedDeliversNone() = runBlocking<Unit> {
         val peer = connect()

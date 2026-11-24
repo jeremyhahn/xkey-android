@@ -58,7 +58,7 @@ import org.junit.Test
  * URI whose issuer and account are percent-encoded the way
  * SyncEngine.mergeOath encodes them, `counter` for HOTP only, read back on
  * the structured-label path, and answers with the id the credential was
- * stored under (#152).
+ * stored under.
  *
  * The DAO records what is inserted, the secret manager passes the secret
  * through, and `Uri.parse` is backed by [URI] (the JVM has no android.net)

@@ -34,7 +34,7 @@ import org.junit.Before
 import org.junit.Test
 
 /**
- * The tracked scope holds its timers (#252): a wait on it ends on the event
+ * The tracked scope holds its timers: a wait on it ends on the event
  * it waits for, or when the test moves the scope's clock past its timer,
  * never because the wall clock ran on. The GATT server tests decide
  * "promptly" by that, not by a wall-clock bound a loaded runner misses.

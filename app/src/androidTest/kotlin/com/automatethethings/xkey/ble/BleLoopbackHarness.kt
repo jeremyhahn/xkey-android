@@ -176,13 +176,7 @@ class BleLoopbackHarness(
         check(responder.isHandshakeComplete()) { "responder handshake did not complete" }
         check(initiator.isHandshakeComplete()) { "initiator handshake did not complete" }
 
-        // Mirrors GattServer.handleHandshakeMessage: the session becomes the
-        // server's, the identity it trusts comes from the transcript, and the
-        // completed session is published last, so isSessionEstablished()
-        // reports it and isCurrent() holds for it. The real method cannot be
-        // driven here: it needs a BluetoothDevice, and it also confirms an
-        // already-paired desktop, which the tests of pairing.confirm must not
-        // have done for them.
+        // Mirrors GattServer.handleHandshakeMessage, which needs a BluetoothDevice and confirms pairing.
         writeField(server, "noiseSession", responder)
         writeField(
             server,

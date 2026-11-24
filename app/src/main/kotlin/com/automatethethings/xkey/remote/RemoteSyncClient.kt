@@ -86,8 +86,7 @@ class RemoteSyncClient(
 
     /** Runs a full bidirectional sync of all stores and records the sync time. */
     suspend fun syncAll(): SyncResult {
-        // A trust-store failure is recorded by its own audit entry and must
-        // not stop the OATH and password legs.
+        // A trust-store failure is audited and does not stop the OATH and password legs.
         val certs = try {
             syncTrustStore()
         } catch (e: CancellationException) {

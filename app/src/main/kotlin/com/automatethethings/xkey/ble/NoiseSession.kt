@@ -29,7 +29,7 @@ import kotlin.coroutines.cancellation.CancellationException
  *
  * Thread safety: This class is NOT thread-safe. Synchronize externally.
  *
- * ## Key material on the heap (#6)
+ * ## Key material on the heap
  *
  * So that key material does not outlive its use in process memory (a heap dump
  * or a later allocation can otherwise expose it), the secret arrays
@@ -75,8 +75,7 @@ class NoiseSession {
         private const val NONCE_SIZE = 8  // ChaCha20-Poly1305 uses 8-byte counter
         private const val TAG_SIZE = 16
 
-        // Noise reserves the counter value 2^64-1 (-1 as a signed Long):
-        // no message is encrypted or decrypted with it (#236)
+        // Noise reserves counter 2^64-1 (-1 as a signed Long).
         private const val RESERVED_NONCE = -1L
 
         // SharedPreferences keys
@@ -210,8 +209,7 @@ class NoiseSession {
     // Session keys after handshake
     private var sendKey: ByteArray? = null
     private var recvKey: ByteArray? = null
-    // Transport counters: recvNonce advances only on a frame that decrypts,
-    // and neither is ever used at RESERVED_NONCE (#236)
+    // recvNonce advances only on a frame that decrypts; neither counter is ever RESERVED_NONCE.
     private var sendNonce: Long = 0
     private var recvNonce: Long = 0
 
@@ -459,8 +457,7 @@ class NoiseSession {
         // This is critical for hash state synchronization with flynn/noise library!
         mixHash(ByteArray(0))
 
-        // e - our ephemeral public key (32 bytes)
-        // Per Noise XX spec, MixHash(local_e) MUST happen BEFORE MixKey(ee)
+        // e: MixHash(local_e) must come before MixKey(ee) (Noise XX).
         mixHash(ephemeralPublicKey!!)
 
         // ee - DH(e, re)
@@ -725,9 +722,7 @@ class NoiseSession {
         val ivSpec = IvParameterSpec(nonce)
         cipher.init(Cipher.DECRYPT_MODE, keySpec, ivSpec)
 
-        // Noise DecryptWithAd: a frame that fails authentication throws
-        // here and leaves recvNonce unchanged, so the next genuine frame
-        // still decrypts (#236)
+        // A frame that fails authentication throws and leaves recvNonce unchanged.
         val plaintext = cipher.doFinal(ciphertext)
         recvNonce++
         return plaintext
@@ -750,7 +745,7 @@ class NoiseSession {
     fun getStaticPublicKey(): ByteArray? = staticPublicKey?.copyOf()
 
     /**
-     * Test seam (#236): sets the transport counters, so that a test can put a
+     * Test seam: sets the transport counters, so that a test can put a
      * session at the reserved counter value without sending 2^64 messages;
      * production code must not call this.
      */
@@ -760,7 +755,7 @@ class NoiseSession {
     }
 
     /**
-     * Test seam (#6): the secret arrays this session holds right now, by field
+     * Test seam: the secret arrays this session holds right now, by field
      * name. These are the live arrays, not copies, so that a test can watch
      * them being overwritten; production code must not call this.
      */
@@ -775,13 +770,13 @@ class NoiseSession {
     }
 
     /**
-     * Test seam (#59): the next transport send nonce, so a test can prove a
+     * Test seam: the next transport send nonce, so a test can prove a
      * refused send consumed none. Production code must not call this.
      */
     internal fun sendNonceForTest(): Long = sendNonce
 
     /**
-     * Test seam (#59): runs inside msg3 processing, after the transport keys
+     * Test seam: runs inside msg3 processing, after the transport keys
      * are split and before the handshake is marked complete, so a test can
      * land a revocation in that window. Production code must not set this.
      */

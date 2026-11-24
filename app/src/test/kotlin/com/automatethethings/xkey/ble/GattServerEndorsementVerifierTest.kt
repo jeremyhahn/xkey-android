@@ -53,7 +53,7 @@ import org.junit.Test
 
 /**
  * TPM enrollment trusts an EK certificate only when `IDevIDVerifier` reports
- * it `Trusted` (#280).
+ * it `Trusted`.
  *
  * The private `GattServer.verifyEndorsementKey` is driven by reflection with a
  * parsed TCG-CSR-IDEVID that carries a CA-issued EK certificate, as the

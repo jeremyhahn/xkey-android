@@ -66,7 +66,7 @@ import org.junit.Test
 
 /**
  * Unpairing a desktop revokes its live TCP session, and a phone-initiated
- * send to a peer that is no longer paired is refused before encryption (#59).
+ * send to a peer that is no longer paired is refused before encryption.
  * Runs [TcpHsmServer] end to end on a loopback port against [DesktopPeer].
  */
 @OptIn(ExperimentalCoroutinesApi::class)
