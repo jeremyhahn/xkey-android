@@ -36,28 +36,93 @@ class QrCodeScannerHelper(
     private val context: Context,
     private val lifecycleOwner: LifecycleOwner,
     private val previewView: PreviewView,
-    private val onResult: (String) -> Unit
+    private val onResult: (String) -> Unit,
+    frameSource: FrameSource? = null
 ) {
+    /**
+     * Where the frames come from: the back camera, decoded by ML Kit, unless
+     * a test passes a source of its own.
+     */
+    interface FrameSource {
+        /** Starts delivering frames to [analyzer]; called by every [start]. */
+        fun bind(analyzer: (Frame) -> Unit)
+
+        /** Stops delivering frames. */
+        fun unbind()
+    }
+
+    /** One camera frame. */
+    interface Frame {
+        /**
+         * Decodes the frame and calls back once: [onBarcodes] with the raw
+         * values of the barcodes found (possibly none), or [onFailure]. The
+         * frame is released once decoded.
+         */
+        fun decode(onBarcodes: (List<String?>) -> Unit, onFailure: () -> Unit)
+
+        /** Releases a frame that is not decoded. */
+        fun close()
+    }
+
     private val cameraExecutor = Executors.newSingleThreadExecutor()
+    private val frames: FrameSource = frameSource ?: CameraFrames()
+
+    /** A frame is being decoded, or a value was delivered: later frames are dropped. */
+    @Volatile
     private var processing = false
 
     fun hasCameraPermission(): Boolean =
         ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
 
     fun start() {
-        val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
-        cameraProviderFuture.addListener({
-            val cameraProvider = cameraProviderFuture.get()
-            bindCamera(cameraProvider)
-        }, ContextCompat.getMainExecutor(context))
+        frames.bind(::analyze)
     }
 
     fun stop() {
         cameraExecutor.shutdown()
     }
 
+    private fun analyze(frame: Frame) {
+        if (processing) {
+            frame.close()
+            return
+        }
+        processing = true
+        frame.decode(
+            onBarcodes = { values ->
+                val value = values.firstOrNull { it != null }
+                if (value != null) {
+                    // Unbind first: onResult may call start() to scan again.
+                    frames.unbind()
+                    onResult(value)
+                } else {
+                    processing = false
+                }
+            },
+            onFailure = { processing = false }
+        )
+    }
+
+    /** The back camera, its frames decoded by ML Kit. */
+    private inner class CameraFrames : FrameSource {
+        private var cameraProvider: ProcessCameraProvider? = null
+
+        override fun bind(analyzer: (Frame) -> Unit) {
+            val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
+            cameraProviderFuture.addListener({
+                val provider = cameraProviderFuture.get()
+                cameraProvider = provider
+                bindCamera(provider, analyzer)
+            }, ContextCompat.getMainExecutor(context))
+        }
+
+        override fun unbind() {
+            cameraProvider?.unbindAll()
+        }
+    }
+
     @OptIn(ExperimentalGetImage::class)
-    private fun bindCamera(cameraProvider: ProcessCameraProvider) {
+    private fun bindCamera(cameraProvider: ProcessCameraProvider, analyzer: (Frame) -> Unit) {
         val preview = Preview.Builder().build().also {
             it.surfaceProvider = previewView.surfaceProvider
         }
@@ -70,35 +135,24 @@ class QrCodeScannerHelper(
         val scanner = BarcodeScanning.getClient()
 
         imageAnalysis.setAnalyzer(cameraExecutor) { imageProxy ->
-            if (processing) {
+            val mediaImage = imageProxy.image
+            if (mediaImage == null) {
                 imageProxy.close()
                 return@setAnalyzer
             }
+            analyzer(object : Frame {
+                override fun decode(onBarcodes: (List<String?>) -> Unit, onFailure: () -> Unit) {
+                    val image = InputImage.fromMediaImage(mediaImage, imageProxy.imageInfo.rotationDegrees)
+                    scanner.process(image)
+                        .addOnSuccessListener { barcodes -> onBarcodes(barcodes.map { it.rawValue }) }
+                        .addOnFailureListener { onFailure() }
+                        .addOnCompleteListener { imageProxy.close() }
+                }
 
-            val mediaImage = imageProxy.image
-            if (mediaImage != null) {
-                val image = InputImage.fromMediaImage(mediaImage, imageProxy.imageInfo.rotationDegrees)
-                processing = true
-                scanner.process(image)
-                    .addOnSuccessListener { barcodes ->
-                        for (barcode in barcodes) {
-                            barcode.rawValue?.let { value ->
-                                onResult(value)
-                                cameraProvider.unbindAll()
-                                return@addOnSuccessListener
-                            }
-                        }
-                        processing = false
-                    }
-                    .addOnFailureListener {
-                        processing = false
-                    }
-                    .addOnCompleteListener {
-                        imageProxy.close()
-                    }
-            } else {
-                imageProxy.close()
-            }
+                override fun close() {
+                    imageProxy.close()
+                }
+            })
         }
 
         cameraProvider.unbindAll()
