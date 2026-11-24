@@ -176,10 +176,7 @@ class CreateCredentialHandler(
         Log.d(TAG, "clientDataHash provided: ${clientDataHash != null}")
 
         if (clientDataHash == null) {
-            // This provider is signing the client data itself, so the origin it
-            // binds must be one Android verified for the caller. Deriving an
-            // origin from the requested rpId would let any app mint a passkey
-            // for a site it does not control.
+            // Bind the origin Android verified for the caller, never one derived from rpId.
             Log.w(TAG, "clientDataHash is null, constructing clientDataJSON")
             val challenge = try {
                 requestJson.getString("challenge")
@@ -272,10 +269,7 @@ class CreateCredentialHandler(
             UvRequirement.DISCOURAGED -> -1 // No auth required
         }
 
-        // Keystore refuses to create an auth-bound key when the device has no
-        // usable authenticator enrolled, which would fail the whole ceremony.
-        // CredentialSelectorActivity already skips the prompt in that case, so
-        // bind the key to match: no authenticator, no auth-bound key.
+        // No enrolled authenticator, no auth-bound key: Keystore would refuse it.
         val authDurationSeconds = if (requestedAuthDuration >= 0 && !canAuthenticateUser()) {
             Log.w(
                 TAG,
@@ -332,10 +326,7 @@ class CreateCredentialHandler(
                 publicKeyCose = publicKeyCose,
                 keySizeBits = 256,
                 strongBoxBacked = keystoreManager.isStrongBoxAvailable(),
-                // What the key IS, not what the ceremony asked for. Recording the
-                // request would claim an auth-bound key on a device with nothing
-                // enrolled, and the assertion path reads this flag to decide the
-                // UV bit — it would then sign UV=1 for an unverified ceremony.
+                // Record what the key is, not what was requested: the assertion path reads it to set UV.
                 biometricRequired = authDurationSeconds >= 0,
                 authDurationSeconds = authDurationSeconds,
                 exportable = false,

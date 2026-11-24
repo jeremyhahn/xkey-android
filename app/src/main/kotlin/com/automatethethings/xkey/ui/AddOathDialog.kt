@@ -182,12 +182,7 @@ object AddOathDialog {
             }
         })
 
-        // Build and show dialog.
-        //
-        // The positive button is wired after the dialog is shown rather than
-        // through setPositiveButton's listener, because that listener always
-        // dismisses: a form that fails validation has to stay on screen with
-        // its errors visible.
+        // Wire the positive button after show(), so a failed validation keeps the dialog open.
         val dialog = MaterialAlertDialogBuilder(context)
             .setTitle("Add Credential")
             .setView(scrollView)

@@ -175,13 +175,12 @@ class GattServerEnrollmentTest {
      * A reply that is not a well-formed enrollment package stops the ceremony
      * before anything is issued.
      *
-     * This used to script four chained requests and assert that a certificate
-     * came out the far end. That ceremony no longer exists: the phone now sends
+     * The phone sends
      * `remote.getTCGCSRIDevID` and everything it needs — CSR, EK certificate,
      * both public areas — arrives in that one reply, which it then verifies. A
      * complete run needs a real TPM to answer the credential challenge, so the
-     * property worth pinning here is the one the old flow got wrong: a
-     * conversation that cannot be verified issues nothing.
+     * property pinned here is that a conversation that cannot be verified
+     * issues nothing.
      *
      * Issuance itself is covered against real keys by
      * `ca.TcgEnrollmentIssuerTest`, and the namespace and gating by

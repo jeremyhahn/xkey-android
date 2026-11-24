@@ -1220,12 +1220,7 @@ class CertificateManagementActivity : AppCompatActivity() {
                     keystoreManager.generateKeyForAlgorithm(keyId, "ES256", -1)
                 }
 
-                // The signing key now exists, but the certificate that gives it
-                // a purpose does not. Everything from here on can throw --- a
-                // subject the DN parser refuses, a CSR that will not build, a CA
-                // that will not sign --- and none of it cleans up after itself,
-                // so an orphaned alias and key row would survive with nothing
-                // pointing at them and nothing to notice.
+                // From here on any failure must remove the new key and alias.
                 try {
                     val keyEntity = KeyEntity(
                         keyId = keyId,

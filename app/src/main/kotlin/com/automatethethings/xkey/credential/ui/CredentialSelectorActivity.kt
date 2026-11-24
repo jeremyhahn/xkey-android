@@ -267,12 +267,7 @@ class CredentialSelectorActivity : AppCompatActivity() {
 
         val executor = ContextCompat.getMainExecutor(this)
 
-        // The system Credential Manager starts this activity, but its prompt
-        // still takes a turn in the one prompt queue: it shows only once no
-        // other approval holds the screen, and hands the screen on when it
-        // is answered or the activity goes away for good. A configuration
-        // change keeps the entry: the AndroidX ceremony outlives the
-        // recreation, and the new instance takes the same key over.
+        // The prompt takes a turn in the shared prompt queue; a configuration change keeps its entry.
         val restored = restoredKey
         val key = restored ?: PromptOwnership.promptKey(intent, "credentialSelector")
         promptKey = key

@@ -63,7 +63,7 @@ import java.util.Base64
 
 /**
  * Pins what two requests for one key do when both wait in the approval queue
- * and the owner approves both (#178).
+ * and the owner approves both.
  *
  * Approval prompts take turns, so a request's checks run long before it acts.
  * Two creations of one new key id must not both reach the key generator (it

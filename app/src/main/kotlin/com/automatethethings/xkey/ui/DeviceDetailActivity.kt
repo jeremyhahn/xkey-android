@@ -1475,11 +1475,7 @@ class DeviceDetailActivity : AppCompatActivity() {
 
                 when (attestResult) {
                     is AttestationHelper.AttestationResult.Success -> {
-                        // Re-attesting the PEER (`remote.attestDevice`) records its
-                        // boot state, but must NOT touch deviceFingerprint — that
-                        // field is the phone's own attested-key SPKI bound at
-                        // pairing and echoed on reconnect (#93). Omitting it
-                        // preserves the reconnect binding.
+                        // Re-attesting the peer records its boot state but never touches the phone's own deviceFingerprint.
                         repository.updateDeviceAttestation(
                             publicKeyHex = publicKeyHex,
                             bootHashHex = attestResult.bootHashHex ?: "",
@@ -1535,7 +1531,7 @@ class DeviceDetailActivity : AppCompatActivity() {
     /**
      * Asks the user to compare this session's SAS with the code the desktop
      * shows, in the same dialog the sessions the phone accepts use. The session
-     * is trusted, and the attestation recorded, only on Allow (#137).
+     * is trusted, and the attestation recorded, only on Allow.
      */
     @VisibleForTesting
     internal fun sasConfirmation(): PairingConfirmationCallback = object : PairingConfirmationCallback {
@@ -1758,7 +1754,7 @@ class DeviceDetailActivity : AppCompatActivity() {
  * [activityGone] reports whether the screen that would show the fallback has
  * been finished or destroyed; it then gets no fallback. Cancellation, which is
  * how leaving the screen ends a pending SAS prompt, is not a failure: it is
- * rethrown, never handed to [onFailure] (#137).
+ * rethrown, never handed to [onFailure].
  */
 internal suspend fun runPhoneInitiatedReattest(
     activityGone: () -> Boolean,

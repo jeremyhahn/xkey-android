@@ -71,7 +71,7 @@ import org.junit.Test
 /**
  * A desktop that is already paired is confirmed when its reconnect handshake
  * completes, so the replies to the phone's own requests reach the response
- * router instead of being refused as unpaired (#59). An unknown
+ * router instead of being refused as unpaired. An unknown
  * desktop stays gated until `pairing.confirm`, and a removal during the
  * handshake confirms nothing. A `pairing.confirm` on the adopted session is
  * answered confirmed without a prompt; an unknown desktop's still

@@ -99,7 +99,7 @@ import org.junit.Test
 
 /**
  * Unpairing a desktop revokes its live stream session, and every
- * phone-initiated send revalidates the peer first (#59). The shared
+ * phone-initiated send revalidates the peer first. The shared
  * [StreamPairingSession] serves TCP and USB alike; here it runs over a
  * loopback socket against [DesktopPeer].
  */
@@ -392,7 +392,7 @@ class StreamPairingSessionRevocationTest {
     }
 
     /**
-     * `local.verifyUser` answers only a confirmed, paired session (#13): an
+     * `local.verifyUser` answers only a confirmed, paired session: an
      * unconfirmed one is refused by the gate, so the handler — and with it
      * the biometric prompt — is never reached.
      */

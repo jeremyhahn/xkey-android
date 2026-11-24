@@ -181,7 +181,7 @@ class UsbConnectedDesktopTest {
                 captured.sender.sendEncryptedMessage(REQUEST)
                 fail("a send captured for A must not go out once B replaced it")
             } catch (e: IOException) {
-                // A's connection is no longer the session's.
+                // A's connection is not the session's now.
             }
             b.assertNoFrame()
         }

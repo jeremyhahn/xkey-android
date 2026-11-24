@@ -51,7 +51,7 @@ import org.junit.Test
 /**
  * `local.attestDevice` on a session the *phone* opened.
  *
- * go-xkms (#1306) sends it right after the Noise handshake on every
+ * go-xkms sends it right after the Noise handshake on every
  * phone-initiated session and refuses the session without a verified answer.
  * On the sessions the phone accepts, [RequestHandler] answers it behind the
  * transport; here [BleClient] has to hand it to the same handler, bound to this

@@ -1,10 +1,5 @@
 #!/usr/bin/env bash
-# Tests that revert-red-main.yml resumes a partial run: its
-# run script, read from the workflow itself, against a fake forge (a curl stub
-# answering the API from files) and a bare repository standing in for the
-# remote (real git, behind a wrapper that logs every push). Each case starts
-# from a red merge of PR #7, which closes issue #3, and checks what the run
-# wrote. Needs bash, git and jq only. `make revert-red-main-test`.
+# Tests that revert-red-main.yml resumes a partial run, against a fake forge and a bare repository. `make revert-red-main-test`.
 set -euo pipefail
 
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
@@ -138,8 +133,7 @@ reply 404
 EOF
 chmod +x "${T}/bin/git" "${T}/bin/curl"
 
-# setup case -> FAKE and BARE for a fresh case: main green at A, then PR #7
-# (head F, closes #3) merged as M; main's CI red at M in a lint step.
+# setup case: main green at A, PR #7 (head F, closes #3) merged as M, CI red at M.
 setup() {
 	export FAKE="${T}/$1/fake" BARE="${T}/$1/bare.git"
 	local w="${T}/$1/work"
@@ -270,8 +264,7 @@ expect train "reland PRs" "$(writes "^POST /pulls reland/")" 0
 expect train "PR #7 comments" "$(writes "^POST comment #7$")" 1
 expect train "title" "$(jq -r '.title' "${FAKE}/pulls/7.json")" "WIP: feature"
 
-# 8. Main already carries a revert of the merge, with no revert PR: nothing is
-# written (the check reads git log itself; a `| grep -q` died of SIGPIPE).
+# 8. Main already carries a revert of the merge: nothing is written.
 setup carried
 gt() { "${REAL_GIT}" -C "${T}/carried/work" -c user.name=t -c user.email=t@t -c commit.gpgSign=false "$@"; }
 gt revert --no-edit -m 1 "${M}" > /dev/null

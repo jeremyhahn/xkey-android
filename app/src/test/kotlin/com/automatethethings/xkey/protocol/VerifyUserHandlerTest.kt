@@ -77,7 +77,7 @@ import org.junit.Before
 import org.junit.Test
 
 /**
- * `local.verifyUser` on the real [RequestHandler] (#13).
+ * `local.verifyUser` on the real [RequestHandler].
  *
  * The UVK is a software P-256 key behind the [UserVerificationKey] seam and the
  * biometric prompt is a [UserVerificationPrompt] that signs with it, so each
@@ -271,7 +271,7 @@ class VerifyUserHandlerTest {
     // -----------------------------------------------------------------
 
     /**
-     * Revocation cancels the request job (#59), and the pending prompt goes
+     * Revocation cancels the request job, and the pending prompt goes
      * with it. Dropping whatever the cancelled job returns is the transport's
      * part: it answers nothing on a revoked session.
      */

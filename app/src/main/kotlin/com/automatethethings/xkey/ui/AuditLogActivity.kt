@@ -241,11 +241,7 @@ class AuditLogActivity : AppCompatActivity() {
             setTitleTextColor(ContextCompat.getColor(this@AuditLogActivity, R.color.on_primary))
             elevation = 0f
 
-            // The menu is installed through onCreateOptionsMenu below, not here.
-            // setSupportActionBar wraps this toolbar in a ToolbarActionBar, which
-            // replaces any menu-item click listener set beforehand and clears the
-            // menu to repopulate it from the activity — so inflating here left
-            // export, clear-filters and both delete actions unreachable.
+            // The menu comes from onCreateOptionsMenu: setSupportActionBar replaces anything set here.
         }
 
         val subtitle = TextView(this).apply {

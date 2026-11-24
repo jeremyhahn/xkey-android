@@ -925,34 +925,18 @@ object MethodNames {
     const val LOCAL_GENERATE_IDEVID_CSR = "local.generateIDevIDCSR"
     const val LOCAL_STORE_IDEVID_CERTIFICATE = "local.storeIDevIDCertificate"
 
-    // Android-native device enrollment (local.* - desktop/xkms is the CA,
-    // this phone is the enrollee). The TCG family below cannot serve this
-    // direction: it is specified in TPM2 primitives -- an endorsement key, a
-    // TPMT_PUBLIC IAK, a credential activation -- and Android has none of them.
+    // Android-native device enrollment (local.*): the desktop is the CA, this phone the enrollee.
     const val LOCAL_GET_DEVICE_ENROLLMENT_REQUEST = "local.getDeviceEnrollmentRequest"
     const val LOCAL_STORE_DEVICE_CREDENTIAL = "local.storeDeviceCredential"
 
-    // TCG-CSR-IDEVID Attestation Enrollment Methods
-    // These methods support TPM2-based device identity enrollment following the
-    // TCG specification for Initial Device Identifier (IDevID) certificates.
+    // TCG-CSR-IDEVID attestation enrollment methods (TPM2 IDevID).
     const val LOCAL_GET_TCG_CSR_IDEVID = "local.getTCGCSRIDevID"
     const val LOCAL_ACTIVATE_CREDENTIAL = "local.activateCredential"
     const val LOCAL_GET_ATTESTATION_QUOTE = "local.getAttestationQuote"
     const val LOCAL_GET_IAK_PUBLIC_KEY = "local.getIAKPublicKey"
     const val LOCAL_STORE_ENROLLMENT_CERTS = "local.storeEnrollmentCerts"
 
-    // TCG-CSR-IDEVID enrollment driven from this phone (phone -> desktop).
-    //
-    // The namespace names the enrollee, not the sender: `local.*` asks the
-    // recipient of the message to enrol, `remote.*` asks the desktop to. When
-    // this phone is the Certificate Authority the desktop is the enrollee, so
-    // the ceremony is `remote.*` throughout. The desktop's bridge routes only
-    // these four; the `local.*` twins above are the other direction, where the
-    // desktop is the CA and the phone enrols.
-    //
-    // There is deliberately no remote.getIAKPublicKey or
-    // remote.generateIDevIDCSR: both public keys arrive inside the
-    // remote.getTCGCSRIDevID result, which is what the TCG ceremony specifies.
+    // TCG-CSR-IDEVID enrollment with this phone as CA: remote.* asks the desktop to enrol; public keys arrive in remote.getTCGCSRIDevID.
     const val REMOTE_GET_TCG_CSR_IDEVID = "remote.getTCGCSRIDevID"
     const val REMOTE_ACTIVATE_CREDENTIAL = "remote.activateCredential"
     const val REMOTE_GET_ATTESTATION_QUOTE = "remote.getAttestationQuote"
@@ -1080,8 +1064,7 @@ data class LocalGenerateKeyParams(
         fun fromJson(params: JSONObject): LocalGenerateKeyParams {
             val keyId = params.getStringOrNull("keyId")
                 ?: throw ProtocolException("Missing 'keyId' parameter", errorCode = ErrorCodes.INVALID_PARAMS)
-            // go-xkms sends `algorithm` as a name string ("ES256", "AES-256",
-            // "HMAC-SHA256"); base callers may send the COSE integer. Accept both.
+            // algorithm arrives as a name ("ES256") or a COSE integer; accept both.
             val algoRaw = params.opt("algorithm")
             val algorithm = when (algoRaw) {
                 is Number -> algoRaw.toInt()
@@ -2206,10 +2189,7 @@ data class LocalSignFido2AssertionResult(
     }
 }
 
-// ============================================================
-// Remote protocol message types for remote.* methods
-// (phone -> laptop via xkmsd bridge)
-// ============================================================
+// Remote protocol message types for remote.* methods (phone to laptop).
 
 /**
  * Information about a xkmsd backend available on the laptop.
@@ -2871,10 +2851,7 @@ data class LocalBiometricPendingParams(
     }
 }
 
-// ============================================================
-// IDevID Certificate Exchange Protocol Types
-// (Corresponds to xkey/pkg/phone/protocol_idevid.go)
-// ============================================================
+// IDevID certificate exchange types (xkey/pkg/phone/protocol_idevid.go).
 
 /**
  * Parameters for local.getCABundle method.
@@ -3680,10 +3657,7 @@ data class LocalStoreIDevIDCertificateResult(
     }
 }
 
-// ============================================================
-// Android-native device enrollment (this phone is the enrollee)
-// (Corresponds to xkey/pkg/pairing/protocol_device_enrollment.go)
-// ============================================================
+// Android-native device enrollment types (xkey/pkg/pairing/protocol_device_enrollment.go).
 
 /** Wire tag for the evidence format below, so a verifier never guesses. */
 const val ATTESTATION_FORMAT_ANDROID_KEY = "android-key-attestation"
@@ -3865,10 +3839,7 @@ data class LocalStoreDeviceCredentialResult(
     }
 }
 
-// ============================================================
-// TCG-CSR-IDEVID Attestation Enrollment Protocol Types
-// (Corresponds to xkey/pkg/phone/protocol_attestation.go)
-// ============================================================
+// TCG-CSR-IDEVID attestation enrollment types (xkey/pkg/phone/protocol_attestation.go).
 
 /**
  * Result of local.getTCGCSRIDevID request.
@@ -4402,15 +4373,7 @@ data class LocalStoreEnrollmentCertsResult(
     }
 }
 
-// ============================================================
-// TCG-CSR-IDEVID enrollment, phone as Certificate Authority
-// (Corresponds to xkey/pkg/pairing/protocol_remote.go and
-//  xkey/pkg/pairing/protocol_attestation.go on the desktop.)
-//
-// The JSON tags below are the wire contract. The Kotlin here and the Go there
-// share no generated code, so a renamed key is a silent break: it deserializes
-// to a zero value on the far side rather than failing.
-// ============================================================
+// TCG-CSR-IDEVID enrollment with the phone as CA; the JSON tags are the wire contract with xkey/pkg/pairing.
 
 /**
  * Parameters for remote.getTCGCSRIDevID.

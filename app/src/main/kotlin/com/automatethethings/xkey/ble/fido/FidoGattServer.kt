@@ -362,9 +362,7 @@ class FidoGattServer(
             }
             if (overflowNow) {
                 Log.w(TAG, "FIDO notification queue full; closing the session")
-                // Not on this thread: it is inside the session's send lock,
-                // and the GATT thread may hold the session while it waits
-                // for that lock.
+                // Not on this thread: it holds the send lock the GATT thread may wait for.
                 scope.launch { synchronized(session) { session.close() } }
             }
         }
@@ -683,8 +681,7 @@ class BiometricFidoUserPrompt(
         } catch (e: BiometricException) {
             if (e.errorCode in UNAVAILABLE_CODES) UserCheck.UNAVAILABLE else UserCheck.DECLINED
         } catch (e: CancellationException) {
-            // The client went away or sent CANCEL: never a user check (a
-            // CancellationException is an IllegalStateException).
+            // Client gone or CANCEL: never a user check (CancellationException is an IllegalStateException).
             throw e
         } catch (e: IllegalStateException) {
             // The launcher is not registered: no prompt can be shown.

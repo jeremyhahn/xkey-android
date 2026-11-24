@@ -303,9 +303,7 @@ class DesktopKeyShareTest {
         val tcpRouter = BidirectionalMessageRouter(mockk<RequestHandler>())
         val tcp = ScriptedMessageSender(tcpRouter).apply { succeedWith(accepted); confirmedPeer = peerA }
 
-        // B's BLE session is revoked and its teardown deferred: the
-        // handler-wide peer key still names B, but B's connection confirms no
-        // one and is no longer live. TCP is the only live transport.
+        // B's BLE session is revoked with teardown deferred; TCP is the only live transport.
         ble.confirmedPeer = null
         val s = ShareSession.of(listOf(ShareSession.Transport(tcp, tcpRouter))) { true }!!
         assertSame(tcp, s.sender)

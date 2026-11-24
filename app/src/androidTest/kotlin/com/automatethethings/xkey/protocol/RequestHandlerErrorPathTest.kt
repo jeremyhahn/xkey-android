@@ -527,8 +527,7 @@ class RequestHandlerErrorPathTest {
     /** Deleting something that is already gone is a success, not an error. */
     @Test
     fun deletingAnUnknownKeyReportsNothingDeleted() {
-        // local.deleteKey answers deleted = materialRemoved || rowsDeleted > 0:
-        // an unknown key succeeds but says nothing was deleted (#143).
+        // An unknown key succeeds with deleted = false (materialRemoved || rowsDeleted > 0).
         val response = call("local.deleteKey", JSONObject().put("keyId", "never-existed-$runId"))
         assertFalse(response.ok().getBoolean("deleted"))
     }
@@ -1272,9 +1271,7 @@ class RequestHandlerErrorPathTest {
         )
     }
 
-    // ------------------------------------------------------------------
     // OATH
-    // ------------------------------------------------------------------
 
     @Test
     fun generatingACodeForAnUnknownCredentialIsInvalidParams() {

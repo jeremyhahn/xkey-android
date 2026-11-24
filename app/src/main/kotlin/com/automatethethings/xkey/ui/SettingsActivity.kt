@@ -271,14 +271,7 @@ class SettingsActivity : AppCompatActivity() {
             ?: return
         val rootLinearLayout = scrollView.getChildAt(0) as? LinearLayout ?: return
 
-        // The XML layout still declares an older, superseded copy of the
-        // authentication cards. They are detached rather than merely hidden: a
-        // GONE view is still in the hierarchy, so those duplicates keep a second
-        // switch titled "Require Biometric Authentication", a second
-        // "Per operation" radio and a second credential-provider switch in the
-        // tree — none of which is wired to anything. Anything walking the tree
-        // by label (accessibility services, automation) reaches the dead copy
-        // first, because the XML cards precede the programmatic ones.
+        // Detach the XML's superseded authentication cards, so label lookups never reach the unwired copies.
         detachFromParent(binding.cardBiometricRequired)
         detachFromParent(binding.cardAuthMode)
         detachFromParent(binding.cardTimeWindow)
@@ -595,9 +588,7 @@ class SettingsActivity : AppCompatActivity() {
             setPadding(dp(16), dp(12), dp(16), dp(16))
         }
 
-        // Who signs device identity certificates. Three answers, so a radio
-        // group rather than the switch this used to be: a boolean could say
-        // "this phone" or "not this phone", never "the xkms server".
+        // Who signs device identity certificates: three choices, so a radio group.
         contentPadding.addView(createSubsectionLabel(getString(R.string.settings_ca_source_title)))
         val caSourceGroup = RadioGroup(this).apply {
             orientation = RadioGroup.VERTICAL
@@ -653,9 +644,7 @@ class SettingsActivity : AppCompatActivity() {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
             )
-            // Every other text field on this screen saves on focus loss. This
-            // one used to be persisted only as a side effect of "Fetch CA
-            // Bundle", so a user who typed a URL and left the screen lost it.
+            // Save on focus loss, like every other text field here.
             setOnFocusChangeListener { _, hasFocus ->
                 if (!hasFocus && !isInitializing) saveCurrentCAServerUrl()
             }
@@ -1519,10 +1508,7 @@ class SettingsActivity : AppCompatActivity() {
             }
         }
 
-        // Auto-sign toggle listener. The load coroutine above assigns isChecked
-        // after this listener exists, so without the guard every visit to
-        // Settings re-fires it: it rewrites the setting, logs a settings-changed
-        // audit row, and starts the foreground service the user never touched.
+        // Guarded: the load coroutine sets isChecked after this listener exists.
         autoSignSwitch.setOnCheckedChangeListener { _, isChecked ->
             if (isInitializing) return@setOnCheckedChangeListener
             lifecycleScope.launch {
@@ -1924,11 +1910,7 @@ class SettingsActivity : AppCompatActivity() {
     private fun createRadioOption(text: String, description: String, isChecked: Boolean = false): RadioButton {
         return RadioButton(this).apply {
             id = View.generateViewId()
-            // The description goes on the button's own second line rather than a
-            // sibling TextView: a RadioButton has to stay a direct child of the
-            // RadioGroup for mutual exclusivity to work. It was previously
-            // accepted and silently dropped, so every settings_*_description
-            // string on this screen was invisible.
+            // The description is the button's second line: a RadioButton must stay a direct child of its RadioGroup.
             this.text = if (description.isBlank()) {
                 text
             } else {
@@ -2057,9 +2039,7 @@ class SettingsActivity : AppCompatActivity() {
      */
     private fun createLabeledEditText(label: String, hint: String): EditText {
         return EditText(this).apply {
-            // The label was accepted and dropped, leaving the DANE, SPKI and
-            // Direct server-URL fields sharing one identical placeholder and no
-            // way to tell them apart — on screen or through a screen reader.
+            // Each server-URL field gets its own label.
             this.hint = if (hint.isBlank()) label else "$label ($hint)"
             contentDescription = label
             inputType = android.text.InputType.TYPE_CLASS_TEXT

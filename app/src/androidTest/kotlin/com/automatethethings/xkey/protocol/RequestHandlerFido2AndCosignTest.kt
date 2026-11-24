@@ -457,7 +457,7 @@ class RequestHandlerFido2AndCosignTest {
     /**
      * Co-signing is an Android-side extension: the desktop hands over a
      * content hash and the phone signs it only once the owner approves a
-     * prompt on the phone (#177). This suite's handler has no biometric
+     * prompt on the phone. This suite's handler has no biometric
      * launcher, so a well-formed request is refused with BIOMETRIC_FAILED and
      * nothing is signed. The approved path, with its result shape, is pinned
      * by the JVM test CosignRequestHandlerTest.

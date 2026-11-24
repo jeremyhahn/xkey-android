@@ -1,36 +1,5 @@
 #!/bin/sh
-# Install a PINNED, checksum-verified trivy.
-#
-#   usage: scripts/install-trivy.sh <install-dir>
-#
-# The ONE installer for trivy in this repo. `make install-tools` calls it, and
-# so must any CI step that installs trivy outside the image, so the scanner on a
-# developer's machine and the scanner in CI are the same binary — and neither
-# can drift from the other by editing one of them.
-#
-# WHY NOT `curl .../install.sh | sh`
-# ---------------------------------
-# That is what this replaces. It fetched a script from a
-# MUTABLE ref (contrib/install.sh on `main`) and executed it, unread and
-# unverified, as the build user. Anyone who could change that file — upstream
-# compromise, account takeover, a MITM on the fetch — would get arbitrary code
-# execution on the runner, which in CI can hold a token with write scopes.
-# Pulling the security scanner itself through an
-# unverified channel inverts the point of running it.
-#
-# WHAT THIS GUARANTEES, AND WHAT IT DOES NOT
-# ------------------------------------------
-# Guarantees: the version is fixed (no silent upgrade to whatever shipped
-# today), the bytes are checked against the release's published SHA-256 before
-# anything is executed, and nothing from the download is ever run as a script.
-# A corrupted or tampered-in-transit tarball is refused.
-#
-# The SHA-256 is pinned in scripts/tool-pins.sh, not fetched beside the
-# tarball, so a release rewritten upstream after the pin is refused too.
-#
-# To bump trivy: edit TRIVY_VERSION and both TRIVY_SHA256_* in
-# scripts/tool-pins.sh (from the release's trivy_<v>_checksums.txt), run
-# this, and re-run `make security`. The devcontainer image reads the same pins.
+# Install the trivy pinned in scripts/tool-pins.sh, verified against its SHA-256 before anything runs. Usage: scripts/install-trivy.sh <install-dir>
 
 set -eu
 
@@ -80,21 +49,7 @@ case "${OS}:${ARCH}" in
 		;;
 esac
 
-# NO version-based idempotency fast path — deliberately removed.
-#
-# It used to `exit 0` when an existing ${INSTALL_DIR}/trivy self-reported the
-# pinned version. That trusted the binary's own `--version` string, which any
-# corrupted or planted binary can print: the skip blessed a file it never
-# verified, so a security scanner could be silently swapped and this installer
-# would still report success. Self-reported version is not a trust anchor.
-#
-# A trustworthy skip would hash the on-disk binary against the pinned EXTRACTED
-# binary's SHA-256 (as scripts/install-shellcheck.sh now does). trivy cannot pin
-# that in-repo: scripts/tool-pins.sh pins the tarball, not the binary. The honest fix is therefore to ALWAYS run the
-# verified path below: download, check the tarball against the published SHA-256,
-# extract, install. The cost is one download per explicit invocation (this is an
-# explicitly-invoked install step, not a per-build hook), and correctness is
-# absolute — the installed binary is always one whose bytes were just verified.
+# Always download and verify: a binary's self-reported version is not a trust anchor.
 
 BASE_URL="https://github.com/aquasecurity/trivy/releases/download/v${VERSION}"
 TMP=$(mktemp -d)

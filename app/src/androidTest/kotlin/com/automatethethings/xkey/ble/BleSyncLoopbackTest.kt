@@ -192,9 +192,7 @@ class BleSyncLoopbackTest {
         )
     }
 
-    // -----------------------------------------------------------------
     // OATH
-    // -----------------------------------------------------------------
 
     /**
      * OATH secrets replicate in Base32 over the Noise channel, so the phone must

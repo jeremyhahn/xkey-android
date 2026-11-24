@@ -297,7 +297,7 @@ object DesktopShareGate {
      * and [DesktopKeyShare.send], built from the grant rows
      * ([isKeySharedWithPeer]) and the pairing record ([isRevocationPending]).
      * As in protocol/Handler.kt's canShareKeyWithPeer, a peer whose unpair
-     * revocation is pending (#174) has no grant: it may have been re-paired
+     * revocation is pending has no grant: it may have been re-paired
      * under the same key before its old rows were deleted.
      */
     fun peerGrant(

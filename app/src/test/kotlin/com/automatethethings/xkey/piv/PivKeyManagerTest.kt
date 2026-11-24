@@ -67,7 +67,7 @@ import java.util.Date
  * [PivKeyManager.importCertificate] checks a certificate against the slot's
  * live Keystore key, so it is tested over a mocked [PivSlotDao] and a
  * [FakePivKeystore] holding a JDK-generated P-256 key in place of the
- * AndroidKeyStore entry (#173). The `piv_slots` row is only a cache: tests
+ * AndroidKeyStore entry. The `piv_slots` row is only a cache: tests
  * where it disagrees with the Keystore pin that the Keystore decides.
  */
 class PivKeyManagerTest {

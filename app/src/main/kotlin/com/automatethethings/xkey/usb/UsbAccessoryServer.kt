@@ -179,9 +179,7 @@ class UsbAccessoryServer(
             val fd = usbManager.openAccessory(accessory)
             when {
                 this.accessory !== accessory -> {
-                    // Detached on this thread during the open, which has
-                    // already told the owner: the descriptor is for a gone
-                    // accessory.
+                    // Detached during the open: the descriptor is for a gone accessory.
                     Log.w(TAG, "USB accessory detached while opening")
                     closeQuietly(fd)
                     return
@@ -214,10 +212,7 @@ class UsbAccessoryServer(
     internal fun open(context: Context, fd: ParcelFileDescriptor, accessoryInfo: String) {
         synchronized(lock) {
             fileDescriptor = fd
-            // Each connection is its own session, so a PER_SESSION
-            // approval given before a detach does not carry over to
-            // the next attach (#134). The id rides with every request
-            // on this connection; nothing handler-wide is set.
+            // Each connection is its own session: a PER_SESSION approval does not carry across a reattach.
             val connectionId = "usb:${UUID.randomUUID()}"
             lastConnectionId = connectionId
             inputStream = FileInputStream(fd.fileDescriptor)

@@ -55,7 +55,7 @@ import org.junit.Before
 import org.junit.Test
 
 /**
- * A PER_SESSION approval belongs to the connection it was given on (#134).
+ * A PER_SESSION approval belongs to the connection it was given on.
  *
  * Each transport assigns a connection its id at connect and routes every
  * request on it with that id, so a detach and reattach gives USB a new one,

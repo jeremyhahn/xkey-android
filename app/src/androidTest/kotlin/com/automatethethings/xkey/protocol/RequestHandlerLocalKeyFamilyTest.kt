@@ -355,7 +355,7 @@ class RequestHandlerLocalKeyFamilyTest {
 
     /**
      * Widening a key to every peer needs a confirmed peer and the owner's
-     * approval on the phone (#178). This handler is headless: with no
+     * approval on the phone. This handler is headless: with no
      * confirmed peer the request is refused outright, and with one there is
      * still no prompt to approve on, so the key stays private either way.
      */
@@ -429,9 +429,7 @@ class RequestHandlerLocalKeyFamilyTest {
         )
     }
 
-    // ------------------------------------------------------------------
     // local.decrypt (RSA-OAEP)
-    // ------------------------------------------------------------------
 
     /**
      * The desktop encrypts to the phone's RSA public key and asks the phone to

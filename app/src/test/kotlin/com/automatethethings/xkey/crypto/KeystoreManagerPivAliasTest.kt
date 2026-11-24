@@ -43,7 +43,7 @@ import org.junit.Test
  * row in step. The general key operations of a real [KeystoreManager] must not
  * resolve or delete it by its raw alias, while a general key whose logical id
  * merely starts with `xkey_piv_` (stored at `xkey_key_xkey_piv_*`) must still
- * work (#173).
+ * work.
  */
 class KeystoreManagerPivAliasTest {
 

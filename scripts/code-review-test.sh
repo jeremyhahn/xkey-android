@@ -1,68 +1,6 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2016,SC2154 # workflow text is matched literally; extract assigns by name
-# code-review-test.sh -- regression fixtures for .github/workflows/code-review.yml
-# (template v5.10.10, v5.10.11, v5.12.5, v5.12.6, v5.12.7, v5.12.8, v5.12.9,
-# v5.12.10 and v5.12.11).
-#
-# pull_request_target runs the base branch's copy of the workflow, so a change
-# to it is never exercised by its own pull request's review run. These
-# fixtures run the changed programs offline instead. The code under test is
-# read out of the workflow by marker, never copied: each start marker must be
-# found exactly once, or the test stops with FATAL (exit 9) and measures
-# nothing. Nothing reaches the network: forge reads are stubbed functions, and
-# curl on PATH is a stub that fails the run if anything calls it.
-#
-#   A. Twins are runs of the same pull request: the run-name, the guard's read
-#      of its own run's display_title, and the twin filter (keeps a run of the
-#      same PR, drops this run and another PR's run on the same sha).
-#   B. Owner-resume freshness, on GitHub and Gitea timeline fixtures.
-#   C. The resume marker is written and read back; the reconcile block takes
-#      a leftover label off and keeps a fresh one.
-#   D. api_all (both copies) joins every page through stdin, past the 128 KiB
-#      argument limit, and fails closed on a failed or unreadable page.
-#   E. lock_wait (v5.12.5) and both of its callers, the Codex login refresh
-#      and the review: each flock waits for what the job's budget has left
-#      past $WORK/job-start, less what the job needs after the lock (normal
-#      and large reviews, a wait past 600 s), and dies when no time is left or
-#      the start time is unreadable or not a number. The clock (date +%s) and
-#      flock are stubbed.
-#   F. The gate (v5.12.6) reads the twins once and never waits: an APPROVED
-#      head passes with a twin queued; otherwise a twin whose `Codex review`
-#      is queued or in progress fails it at once (exit 3), naming the run; no
-#      twin and no approval fails as before; a failed or unreadable list of
-#      runs or jobs fails closed. Its timeout is 10 minutes. The gate's own
-#      get() runs against a stub curl that answers from fixtures. v5.12.11:
-#      a live PR base other than BASE_REF fails; the live hold is read before
-#      the exemption exit and a PR that answers no label list fails closed;
-#      get_all fails on a failed page or a page count that is not a number.
-#   G. The gate's handoff (v5.12.7): after a pass, the gate job of every newer
-#      run of the PR on the head (higher check suite) whose gate ended failure
-#      or cancelled is re-run; an older run, a run on another head, another
-#      PR's run and a newer green gate are left alone. v5.12.11: a newer run
-#      not yet ended is polled (HANDOFF_POLL_S) until it ends, then its red
-#      gate is re-run; when HANDOFF_WAIT_S expires on a red gate the step
-#      fails with ::error:: (exit 5), on a gate still running it warns; a run
-#      whose `Codex review` is queued or in progress, or whose gate has not
-#      started, is left to its own gate at once. The gate's actions: is
-#      write. An API error is a warning and the step exits 0.
-#   H. supersede (v5.12.8) cancels this PR's queued or running runs on an
-#      older head, each once; never a same-head run (by head_sha or by
-#      run-name), another PR's run, this run or a newer one, or a run whose
-#      `Codex review` or `Code Review (opencode)` job is in progress. It does
-#      nothing when the event's head is not the live head or the PR is
-#      closed. Its token is actions: write and pull-requests: read, its
-#      timeout 5 minutes. An API error is a warning and the step exits 0.
-#   I. Which jobs take a runner (v5.12.9, v5.12.10, v5.12.11): each job's
-#      `if:` and the gate's name are read out of the workflow and evaluated
-#      with jq against event contexts. A draft takes no runner; review runs
-#      only on an event that requests a review (not `labeled`, or a
-#      code-review, task:ready, agent:*, model:* or effort:* label); scope
-#      (v5.12.11) runs on every non-draft event of an open PR; the gate runs
-#      on every non-draft event, always as `Code Review (codex)`, and a
-#      skipped gate never carries that name; a fork's head starts no review.
-#
-# Needs bash and jq (the lint-gates job has no python3).
-# CODE_REVIEW_WORKFLOW overrides the workflow path (for a mutation check).
+# Offline regression fixtures for .github/workflows/code-review.yml, extracted by marker; curl is stubbed. Needs bash and jq.
 set -euo pipefail
 
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
@@ -86,8 +24,7 @@ printf '#!/bin/sh\necho "curl $*" >> "%s/curl.log"\nexit 99\n' "${T}" > "${T}/bi
 chmod +x "${T}/bin/curl"
 export PATH="${T}/bin:${PATH}"
 
-# extract VAR FILE START END WHAT: VAR is the text of FILE between START,
-# which must occur exactly once, and the first END after it.
+# extract VAR FILE START END WHAT: VAR is FILE's text between START (exactly once) and the next END.
 extract() {
 	local got
 	got=$(jq -Rrsj --arg s "$3" --arg e "$4" '
@@ -507,12 +444,7 @@ for s in lock-refresh.sh lock-review.sh; do
 		"the job's start time (${L}/job-start) is not a number"
 done
 
-# ---- F: the gate reads the twins once and never waits (v5.12.6) -----------
-# The gate's whole run script runs under bash, its own get() talking to a
-# stub curl (first on PATH for these runs only) that answers each API path
-# from a fixture file, HTTP 404 for a path with none and HTTP 500 for a path
-# marked to fail. sleep is a function that stops the run: the gate waits for
-# nothing.
+# ---- F: the gate reads the twins once and never waits; curl and sleep are stubbed ----
 extract gjob "${WORKFLOW}" $'\n  gate:\n' $'\n    steps:\n' "the gate job"
 check "F the gate's timeout is 10 minutes" "$(yn contains "${gjob}" $'\n    timeout-minutes: 10\n')" yes
 GATE_START=$'\n      - name: Require a Codex approval of the head, or a no-review change\n        run: |\n'
@@ -669,7 +601,7 @@ gate_run
 check "F an own run with no workflow fails closed over an approval" \
 	"${RC} $(yn contains "${OUT}" "cannot read this run's workflow") $(yn contains "${OUT}" "approved ${SHA}.")" "3 yes no"
 
-# (e) v5.12.11: the live PR's base, read first and again with the holds.
+# (e) The live PR's base, read first and again with the holds.
 gate_setup
 gverdict APPROVED
 gate_run
@@ -694,7 +626,7 @@ gate_run
 check "F a PR retargeted off BASE_REF fails a docs-only change too" \
 	"${RC} $(yn contains "${OUT}" "PR 12 was retargeted from main to dev;") $(yn contains "${OUT}" "no code changed")" "3 yes no"
 
-# (f) v5.12.11: the live hold fails closed and is read before the exemption.
+# (f) The live hold fails closed and is read before the exemption.
 gate_setup
 gverdict APPROVED
 gput /pulls/12 '{"base": {"ref": "main"}}'
@@ -738,7 +670,7 @@ check "F the live hold is read before the exemption exit" \
 	"$(yn before "$(pos <(printf '%s' "${gate}") $'\n          holds\n          n=$(jq \'length\' <<<"$files")\n')" \
 		"$(pos <(printf '%s' "${gate}") 'no code changed')")" yes
 
-# (g) v5.12.11: get_all fails on a failed page, never a partial list.
+# (g) get_all fails on a failed page, never a partial list.
 gate_setup
 gverdict APPROVED
 gput "/pulls/12/reviews?&per_page=100&page=2" '[{"id": 99}]'
@@ -767,8 +699,7 @@ check "G the gate's actions: is write, for the handoff" \
 	"$(yn contains "${gjob}" $'\n    permissions:\n      contents: read\n      # v5.12.7: write, for the re-run of a newer twin\'s gate only.\n      actions: write\n      pull-requests: read\n    env:\n')" yes
 check "G the handoff follows the gate step" \
 	"$(yn before "$(pos "${WORKFLOW}" "${GATE_END}")" "$(pos "${WORKFLOW}" "${gjob_rr}")")" yes
-# sleep moves the clock on (SECONDS) and, on its first call, puts the
-# fixtures in ${G}/next in place: a run that ends while the handoff waits.
+# sleep advances SECONDS and, on its first call, swaps in the next fixtures.
 {
 	printf '%s\n' 'sleep() { echo "SLEPT $*"; SECONDS=$((SECONDS + $1)); if [ -d "$G/next" ]; then cp "$G"/next/* "$G"/; rm -rf "$G/next"; fi; }'
 	printf '%s' "${rerun}${RR_END}"
@@ -827,9 +758,7 @@ check "G a pass re-runs only the newer same-head runs' red gates" \
 	"${RC} $(reruns)" "0 /actions/jobs/5100/rerun /actions/jobs/5110/rerun"
 check "G ... and says so" "$(yn contains "${OUT}" "Run 510 is newer on ${SHA} and its gate (job 5100) ended red: re-run")" yes
 check "G ... a newer green gate is left alone" "$(yn contains "${OUT}" "Run 514: its gate did not end red; nothing to re-run.")" yes
-# (b) v5.12.11: a newer red gate whose run has not ended is waited for, polled
-# every HANDOFF_POLL_S, and re-run once the run ends; past HANDOFF_WAIT_S the
-# step fails with an ::error:: (exit 5), never a warning.
+# (b) A newer red gate still running is polled and re-run when it ends; past HANDOFF_WAIT_S the step fails (exit 5).
 check "G the handoff's bound is 300 s and its poll 15 s by default" \
 	"$(yn contains "${rerun}" $'HANDOFF_POLL_S=${HANDOFF_POLL_S:-15}\n          HANDOFF_WAIT_S=${HANDOFF_WAIT_S:-300}\n')" yes
 rr_setup
@@ -1027,13 +956,7 @@ for broken in /pulls/12 /actions/runs/600 "$(sup_list pending)" "/actions/runs/5
 		"0 yes []"
 done
 
-# ---- I: which jobs take a runner, and the gate's name (v5.12.9 - v5.12.11) -
-# Each job's `if:` and the gate's `name:` are read from the workflow and
-# translated to jq: paths gain a leading dot, && and || become and/or,
-# contains(), !contains(), startsWith() and always() become jq, and the
-# name's `C && 'A' || 'B'` becomes `if C then "A" else "B" end`. Each is
-# then evaluated against an event context. The translator knows only these
-# forms: anything else left in the text fails jq, and the case with it.
+# ---- I: which jobs take a runner, and the gate's name: `if:` expressions translated to jq ----
 gh2jq() { # expression text on stdin -> jq program
 	jq -Rrs '
 		gsub("\\$\\{\\{|\\}\\}"; "")
@@ -1058,8 +981,7 @@ IF_SUP=$(job_if supersede) IF_SCOPE=$(job_if scope) IF_REVIEW=$(job_if review)
 IF_OPEN=$(job_if review-opencode) IF_GATE=$(job_if gate)
 check "I the gate's if: is the draft clause alone" \
 	"$(jq -Rrs --arg s $'\n    if: >-\n      always() && github.event.pull_request.draft != true\n    # v5.12.2' 'split($s) | length - 1' "${WORKFLOW}")" 1
-# ctx SERVER ACTION LABEL DRAFT: an event on PR 12 (labels code-review and
-# task:ready, plus LABEL when it is added), its head in this repository.
+# ctx SERVER ACTION LABEL DRAFT: an event on PR 12 with its head in this repository.
 ctx() {
 	jq -cn --arg srv "$1" --arg a "$2" --arg l "$3" --argjson d "$4" '{
 		github: {server_url: $srv, repository: "o/r", event: ({action: $a,
@@ -1109,8 +1031,7 @@ labeled/needs-coordinator/false|1 0 0 0 1:${CX}
 labeled/code-review/true|0 0 0 0 0:${NR}
 labeled/dept:software/true|0 0 0 0 0:${NR}
 EOF
-# The opencode job (Gitea only) keeps the shared condition; supersede never
-# runs off GitHub.
+# The opencode job keeps the shared condition; supersede runs only on GitHub.
 while IFS='|' read -r ev want; do
 	IFS=/ read -r a l d <<<"${ev}"
 	check "I gitea ${a}${l:+ ${l}}$(dsfx "${d}")" "$(jobs_for "${GT}" "${a}" "${l}" "${d}")" "${want}"
@@ -1139,15 +1060,14 @@ for a in opened synchronize reopened ready_for_review edited labeled unlabeled; 
 	done
 done
 check "I a skipped gate never posts the required check; every non-draft suite carries it and its guard; a draft takes no runner" "[${bad}]" "[]"
-# v5.12.11: scope's if: is the draft clause and the open state alone, so the
-# guard runs wherever the gate runs on an open PR; never on a closed one.
+# scope runs on every non-draft event of an open PR, never a closed one.
 check "I scope's if: is the draft clause and the open state" \
 	"$(jq -Rrs --arg s $'\n  scope:\n' 'split($s) | .[1] // ""' "${WORKFLOW}" | jq -Rrs --arg s $'\n    if: >-\n      github.event.pull_request.draft != true\n      && github.event.pull_request.state == \'open\'\n    # v5.12.3' 'split($s) | length - 1')" 1
 closed_ctx=$(ctx "${GH}" labeled dept:software false | jq -c '.github.event.pull_request.state = "closed"')
 check "I scope skips a closed PR" "$(b01 "$(jq -n --argjson x "${closed_ctx}" "\$x | (${IF_SCOPE})")")" 0
 check "I review and review-opencode keep the shared condition (an unrelated label starts neither)" \
 	"$(jobs_for "${GT}" labeled ci:full false | cut -c3-5)" "0 0"
-# A fork's head never takes the codex runner (v5.10.6), under the shared condition.
+# A fork's head never takes the codex runner.
 fork_ctx=$(ctx "${GH}" opened "" false | jq -c '.github.event.pull_request.head.repo.full_name = "fork/r"')
 check "I a fork's head starts no review" "$(b01 "$(jq -n --argjson x "${fork_ctx}" "\$x | (${IF_REVIEW})")")" 0
 

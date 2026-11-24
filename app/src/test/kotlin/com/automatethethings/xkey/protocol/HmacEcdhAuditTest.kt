@@ -123,8 +123,7 @@ class HmacEcdhAuditTest {
         mockkObject(XKeyDatabase.Companion)
         every { XKeyDatabase.getInstance(any()) } returns database
 
-        // local.ecdh runs only from API 31 (#206); Build.VERSION.SDK_INT
-        // reads as 0 on the JVM, so stand in a device that has it.
+        // local.ecdh needs API 31; SDK_INT is 0 on the JVM, so stand in a device that has it.
         mockkObject(KeystoreCapabilities)
         every { KeystoreCapabilities.supportsEcdh(any()) } returns true
 

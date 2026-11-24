@@ -1,17 +1,5 @@
 # syntax=docker/dockerfile:1@sha256:4edf897a3ffa55b89f906fc8cc78afdb3f1834cc9c7083565e611a8a7d5fe99e
-# The syntax line names the BuildKit frontend that parses this file, an image
-# like any FROM, so it is pinned by digest too (docker/dockerfile:1's index,
-# 2026-10-22): a trusted build pulls it (--pull) and runs
-# that frontend, never one a pull request tagged on the daemon.
-# The project devcontainer, one image for development and CI, in three stages:
-# `base` (JDK, Android SDK, Gradle, the read-only dependency cache, a non-root
-# user), `toolchain` (base plus the Makefile's tools) and `integration` (base
-# plus the source, hardened by compose.yaml). Both finals are FROM base. Every
-# version and SHA-256 comes from scripts/tool-pins.sh; the Makefile passes
-# BASE_IMAGE from it (`make docker-build`).
-#
-# Build-time proxy (devcontainer.md section 4): APT_PROXY, from the caller's
-# DEVCACHE_APT_PROXY, never a tracked file. Empty means no proxy.
+# The project devcontainer: base, toolchain and integration stages; versions from scripts/tool-pins.sh, APT_PROXY optional.
 
 ARG BASE_IMAGE
 
@@ -20,11 +8,7 @@ FROM ${BASE_IMAGE} AS fetch
 ARG APT_PROXY=
 ARG TARGETARCH
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
-# 80retries: every apt-get in this stage retries a transient mirror error
-# (an HTTP 500 on one index or package) instead of failing the build. base
-# copies the same file, and toolchain and integration inherit it from base.
-# The value lives in apt-retries.conf alone; scripts/apt-retry-test.sh checks
-# every stage has it and that apt-get recovers with it.
+# apt-get retries transient mirror errors (apt-retries.conf, checked by scripts/apt-retry-test.sh).
 COPY build/docker/devcontainer/apt-retries.conf /etc/apt/apt.conf.d/80retries
 RUN if [ -n "${APT_PROXY}" ]; then echo "Acquire::http::Proxy \"${APT_PROXY}\";" > /etc/apt/apt.conf.d/01proxy; fi \
  && apt-get update && apt-get install -y --no-install-recommends ca-certificates curl unzip \
@@ -68,33 +52,14 @@ RUN . /tmp/tool-pins.sh; \
     check "${ANDROID_BUILD_TOOLS_ARCHIVE}" "${ANDROID_BUILD_TOOLS_SHA256}" "build-tools/${ANDROID_BUILD_TOOLS}"; \
     rm -rf /tmp/clt clt.zip "${ANDROID_HOME}/.temp"
 
-# ---- warm: build-only. Fills the Gradle dependency cache by running the
-# gates once, then proves it complete; only the cache leaves it, as Gradle's
-# read-only cache. Both runs are uid 1000, as at run time, so AGP cannot
-# install an SDK package into the root-owned SDK: one off its pin fails here.
-#
-# It runs nothing the toolchain tag does not hash (image-tag.sh): the Gradle build files, copied in one by one (keep these COPY lines
-# equal to image-tag.sh's list), and a stub app this Dockerfile writes. The
-# checkout's sources and tests never enter it, so the tag names everything
-# that shapes the image, for the reuse a pull request's run and a developer's
-# make do. A trusted run reuses neither a tag nor the build cache (Makefile
-# IMAGE_FRESH). No RUN takes a --mount=type=cache: BuildKit
-# shares such a cache by name, outside any tag and past --no-cache. ----
+# ---- warm: fills and proves the Gradle cache from the build files image-tag.sh hashes (keep the COPY lines equal to its list). ----
 FROM fetch AS warm
 RUN useradd --uid 1000 --create-home --shell /bin/bash builder \
  && install -d -o 1000 -g 1000 /src /opt/gradle-ro-cache
 USER 1000
 ENV PATH=/opt/gradle/bin:/opt/jbr/bin:${PATH} GRADLE_USER_HOME=/tmp/gradle-home
 WORKDIR /src
-# The stub: a class and its JUnit test, a manifest, a string and a view-binding
-# layout, so every gate task has work and resolves what it resolves for the
-# real app: the compile and runtime classpaths, kapt's processors, the unit
-# test runtime, AGP's aapt2, lint's jars, and JaCoCo's agent and report jars
-# (testDebugUnitTest, lintDebug and coverageReport resolve theirs only by
-# running). The build files declare every dependency, the sources none, so the
-# real gates need nothing the stub's do not; were one ever to, make lint, build
-# or coverage would fail in CI, which runs them offline on this image.
-# The directories are made here, as uid 1000, so Gradle can write under them.
+# The stub app makes every gate task resolve the real app's dependencies; directories made as uid 1000 so Gradle can write.
 RUN mkdir -p gradle/wrapper app/src/main/res/values app/src/main/res/layout \
       app/src/main/kotlin/com/automatethethings/xkey/warm app/src/test/kotlin/com/automatethethings/xkey/warm
 COPY --chown=1000:1000 <<EOF app/src/main/AndroidManifest.xml
@@ -135,15 +100,7 @@ class WarmTest {
     }
 }
 EOF
-# gradle-quiesce: run after each gradle run below, before its Gradle home is
-# copied or deleted. `gradle --no-daemon` returns while JVMs it started still
-# run: the single-use build daemon (gradle.properties' jvmargs differ from the
-# client's) still closing and cleaning caches/modules-2, and any Kotlin compile
-# daemon. A cp -a then copies a cache mid-cleanup, and an rm -rf races new
-# entries ("Directory not empty", #183). The runs pass
-# kotlin.compiler.execution.strategy=in-process, so no Kotlin daemon starts;
-# this stops the Gradle daemons and waits for every java process in the step
-# to exit: TERM at 10 s, KILL at 20 s, and the image build fails at 30 s.
+# gradle-quiesce: stop the Gradle daemons and wait for every java process before the cache is copied or deleted (TERM 10 s, KILL 20 s, fail 30 s).
 COPY --chmod=0755 <<'EOF' /usr/local/bin/gradle-quiesce
 #!/bin/bash
 set -euo pipefail
@@ -169,15 +126,7 @@ done
 echo "gradle-quiesce: JVMs outlived the build: $(jvms | tr '\n' ' ')" >&2
 exit 1
 EOF
-# gradle-retry <log> <gradle args...>: the online run below, its output to
-# log, retried while a failed attempt's log says Gradle could not download a
-# dependency or a repository answered HTTP 429 Too Many Requests: a
-# repository's transient error or rate limit must not fail the image.
-# GRADLE_RETRY_ATTEMPTS attempts (default 5), the first wait
-# GRADLE_RETRY_DELAY s (default 30) and doubling (30, 60, 120, 240 s: a rate
-# limit gets about 7.5 minutes to lift), gradle-quiesce between them so no
-# JVM of the failed attempt still writes the cache. Any other failure, or the
-# last download failure, prints the log's tail and exits with gradle's status.
+# gradle-retry <log> <gradle args...>: retry a dependency download failure or HTTP 429 with doubling waits (GRADLE_RETRY_ATTEMPTS, GRADLE_RETRY_DELAY); any other failure exits.
 COPY --chmod=0755 <<'EOF' /usr/local/bin/gradle-retry
 #!/bin/bash
 set -uo pipefail
@@ -206,23 +155,14 @@ COPY --chown=1000:1000 settings.gradle.kts build.gradle.kts gradle.properties ./
 COPY --chown=1000:1000 gradle/libs.versions.toml gradle/gradle-daemon-jvm.properties gradle/
 COPY --chown=1000:1000 gradle/wrapper/gradle-wrapper.properties gradle/wrapper/
 COPY --chown=1000:1000 app/build.gradle.kts app/
-# The gates' tasks, online, download every dependency they use. A run that
-# could not download a dependency is retried (gradle-retry, above); the build
-# still fails closed: a dependency still unresolved after the last attempt,
-# or the stub failing its own test or lint, fails the image build.
+# Run the gates online to download every dependency; still unresolved after retries fails the build.
 RUN gradle-retry /tmp/warm.log --no-daemon --console=plain -Pkotlin.compiler.execution.strategy=in-process \
       assembleDebug testDebugUnitTest coverageReport lintDebug; \
     gradle-quiesce; \
     cp -a "${GRADLE_USER_HOME}/caches/modules-2" /opt/gradle-ro-cache/; \
     find /opt/gradle-ro-cache -name '*.lock' -delete; \
     rm -f /opt/gradle-ro-cache/modules-2/gc.properties
-# lint's intellij-core jar shades lz4-java 1.11.0 (CVE-2026-106451): its
-# classes, no native libraries. No newer lint ships a fixed copy, and a
-# shaded copy is not a dependency a constraint can raise, so the classes and
-# Maven metadata of the pinned fixed release replace it in the cache, at the
-# same entry names (1.11.0 and 1.11.4 have the same file list). A shaded
-# copy already at or past the pin is left alone. The proof below runs lint
-# on the patched jar.
+# Replace lint's shaded lz4-java classes in the cache with the fixed release (CVE-2026-106451); the proof below runs lint on it.
 RUN . /tmp/tool-pins.sh; \
     cd /tmp; \
     fetch "https://repo1.maven.org/maven2/at/yawk/lz4/lz4-java/${LZ4_JAVA_VERSION}/lz4-java-${LZ4_JAVA_VERSION}.jar" lz4.jar "${LZ4_JAVA_SHA256}"; \
@@ -237,17 +177,7 @@ RUN . /tmp/tool-pins.sh; \
       echo "lz4-java ${v} -> ${LZ4_JAVA_VERSION} in ${j##*/}"; \
     done; \
     rm -rf lz4 lz4.jar
-# lint's kotlin-compiler jar shades jline 3.24.1 for the Kotlin REPL:
-# jline-builtins (CVE-2026-77422) and jline-remote-telnet (CVE-2026-56740,
-# CVE-2026-56741). No newer lint ships fixed copies, and a shaded copy is not
-# a dependency a constraint can raise. lint never starts the REPL, and in the
-# jar only jline's own console and widget packages refer to builtins (telnet
-# and ssh live under it); the REPL's line reader needs only jline's reader
-# and terminal, which stay. So the builtins, console and widget packages and
-# the Maven metadata of jline-builtins, -remote-telnet and -remote-ssh leave
-# the jar, which is repacked in place; nothing left in it refers to them. A
-# jar without jline-builtins is left alone. The proof below runs lint on the
-# stripped jar.
+# Strip jline-builtins and the remote-telnet/ssh packages from lint's kotlin-compiler jar (unused REPL code with CVEs); the proof below runs lint on it.
 RUN cd /tmp; \
     pom=META-INF/maven/org.jline/jline-builtins/pom.properties; \
     find /opt/gradle-ro-cache -name 'kotlin-compiler-*.jar' -print0 | while IFS= read -r -d '' j; do \
@@ -268,10 +198,7 @@ RUN cd /tmp; \
       echo "jline builtins, console and widget stripped from ${j##*/}"; \
     done; \
     rm -rf kc kc.jar
-# The proof: the same tasks again, --offline, from clean outputs and a fresh
-# writable GRADLE_USER_HOME holding only a copy of that cache (no build cache,
-# no configuration cache, so every task resolves its dependencies again). A
-# dependency the cache lacks fails the image build here, not a gate at run time.
+# The proof: the same tasks offline from a fresh GRADLE_USER_HOME holding only the cache.
 RUN rm -rf build app/build .gradle .kotlin "${GRADLE_USER_HOME}"; \
     mkdir -p /tmp/proof-home/caches; \
     cp -a /opt/gradle-ro-cache/modules-2 /tmp/proof-home/caches/; \
@@ -294,18 +221,12 @@ RUN if [ -n "${APT_PROXY}" ]; then echo "Acquire::http::Proxy \"${APT_PROXY}\";"
  && rm -rf /var/lib/apt/lists/* /etc/apt/apt.conf.d/01proxy \
  && useradd --uid 1000 --create-home --shell /bin/bash builder \
  && install -d -o 1000 -g 1000 -m 1777 /gradle-home
-# /gradle-home: compose.yaml's GRADLE_USER_HOME volume. An empty named volume
-# takes this directory's owner and mode, so the image user owns it and any
-# non-root uid (make docker-run runs as the caller's) can write it
-# (devcontainer.md section 5).
+# /gradle-home: compose.yaml's GRADLE_USER_HOME volume, owned by the image user.
 COPY --from=fetch /opt/jbr /opt/jbr
 COPY --from=fetch /opt/gradle /opt/gradle
 COPY --from=fetch /opt/android-sdk /opt/android-sdk
 COPY --from=warm --chown=0:0 /opt/gradle-ro-cache /opt/gradle-ro-cache
-# GRADLE_RO_DEP_CACHE serves every dependency from the image; GRADLE_OFFLINE
-# makes the Makefile pass --offline, so nothing downloads at run time
-# (devcontainer.md sections 4 and 5). GRADLEW runs the pinned distribution
-# directly: the wrapper would download it again into a fresh GRADLE_USER_HOME.
+# Dependencies come from the image cache, offline; GRADLEW runs the pinned distribution directly.
 ENV JAVA_HOME=/opt/jbr \
     ANDROID_HOME=/opt/android-sdk \
     ANDROID_SDK_ROOT=/opt/android-sdk \
@@ -326,19 +247,11 @@ RUN if [ -n "${APT_PROXY}" ]; then echo "Acquire::http::Proxy \"${APT_PROXY}\";"
 COPY --from=fetch /opt/tools/trivy /opt/tools/actionlint /usr/local/bin/
 USER 1000
 
-# ---- integration: base plus make and the source ----
-# The suites run through the Makefile with the image's Gradle, offline.
-# TODO(#35): how this stage reaches a device or emulator is not decided yet; until then `make integration-test` stops at device-check.
+# ---- integration: base plus make and the source; suites run offline ----
+# TODO(#35): device or emulator access; until then `make integration-test` stops at device-check.
 FROM base AS integration
 ARG APT_PROXY=
-# CUSTOMIZE (xkey-android): the Debian counterpart of an Alpine image's
-# `ARG APK_INDEX_SUM` and `apk upgrade --no-cache`. APT_INDEX_SUM (scripts/apt-index-sum.sh) is the
-# package index checksum the image's tag hashes; a new one misses the cache
-# from this RUN on, so `apt-get upgrade` takes the fixed packages that base's
-# cached upgrade layer does not have. base and toolchain do not declare it.
-# APT::Update::Error-Mode=any, as apt-index-sum.sh's probe: an index that
-# cannot be refreshed fails the build, so a stale upgrade never caches under
-# the new tag (scripts/image-tag-test.sh checks it).
+# APT_INDEX_SUM (scripts/apt-index-sum.sh) busts the cache so apt-get upgrade takes fixed packages; a failed index refresh fails the build.
 ARG APT_INDEX_SUM=
 USER root
 RUN if [ -n "${APT_PROXY}" ]; then echo "Acquire::http::Proxy \"${APT_PROXY}\";" > /etc/apt/apt.conf.d/01proxy; fi \

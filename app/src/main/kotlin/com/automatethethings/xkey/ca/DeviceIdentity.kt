@@ -311,8 +311,7 @@ class DeviceIdentity(private val context: Context) {
      */
     private fun securityLevelOf(leaf: X509Certificate): String {
         val ext = leaf.getExtensionValue(KEY_DESCRIPTION_OID) ?: return LEVEL_SOFTWARE
-        // attestationSecurityLevel is the second field of the KeyDescription
-        // SEQUENCE, an ENUMERATED: 0 software, 1 TEE, 2 StrongBox.
+        // attestationSecurityLevel, KeyDescription's second field: 0 software, 1 TEE, 2 StrongBox.
         val level = readAttestationSecurityLevel(ext) ?: return LEVEL_SOFTWARE
         return when (level) {
             1 -> LEVEL_TEE
@@ -326,8 +325,7 @@ class DeviceIdentity(private val context: Context) {
         var i = 0
         if (extensionValue[i++].toInt() and 0xFF != 0x04) return null
         i += lengthOctets(extensionValue, i).second
-        // KeyDescription ::= SEQUENCE { attestationVersion INTEGER,
-        //                               attestationSecurityLevel ENUMERATED, ... }
+        // KeyDescription ::= SEQUENCE { attestationVersion INTEGER, attestationSecurityLevel ENUMERATED, ... }
         if (extensionValue[i++].toInt() and 0xFF != 0x30) return null
         i += lengthOctets(extensionValue, i).second
         if (extensionValue[i++].toInt() and 0xFF != 0x02) return null

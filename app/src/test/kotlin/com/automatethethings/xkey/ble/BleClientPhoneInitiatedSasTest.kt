@@ -48,7 +48,7 @@ import org.junit.Before
 import org.junit.Test
 
 /**
- * The SAS on a session the *phone* opened (#137).
+ * The SAS on a session the *phone* opened.
  *
  * The sessions the phone accepts show the user the `NNNN-NNNN-NNNN` code before
  * they are trusted; one the phone dials must too, or a machine in the middle

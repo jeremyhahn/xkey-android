@@ -681,9 +681,7 @@ class AuditLoggerDispatchTest {
         assertEquals(2, json.length())
     }
 
-    // -----------------------------------------------------------------------
     // OATH
-    // -----------------------------------------------------------------------
 
     @Test
     fun `logOathCredentialCreated composes the label from issuer and account`() {

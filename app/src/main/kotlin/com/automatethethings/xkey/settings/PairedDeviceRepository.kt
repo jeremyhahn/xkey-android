@@ -50,7 +50,7 @@ data class PairedDeviceData(
     val bootHashHex: String? = null,           // verifiedBootHash from RootOfTrust
     val bootStateVerified: Boolean = false,
     val securityLevel: String? = null,         // "software", "tee", "strongbox"
-    val deviceFingerprint: String? = null,     // SHA256 of the phone's OWN attested leaf SPKI, captured at pairing; echoed on reconnect (#93)
+    val deviceFingerprint: String? = null,     // SHA256 of the phone's OWN attested leaf SPKI, captured at pairing; echoed on reconnect
     // Per-device settings
     val requireAttestationForKeyUse: Boolean = false,
     val requireAttestationForKeyAttestation: Boolean = true,
@@ -278,11 +278,7 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
         var stillPending = false
         val evicted = synchronized(storeLock) {
             val devices = storedDevices().toMutableList()
-            // Remove stale entries for this device: the same key, or the same BLE radio
-            // re-pairing under a new Noise static key. The device name is no identity: two
-            // desktops can share a host name, and matching on it would silently unpair the
-            // other one and revoke its grants. The pairing carries nothing else stable, so a
-            // TCP or USB re-pairing under a new key adds a second entry the user can remove.
+            // Remove stale entries with the same key or BLE radio; the device name is no identity.
             val evicted = devices.filter {
                 it.publicKeyHex == publicKeyHex ||
                     (bleAddress != null && it.bleAddress == bleAddress)
@@ -299,10 +295,7 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
             stillPending = publicKeyHex in readPending()
             evictedKeys
         }
-        // A stale entry replaced under a different key is no longer paired:
-        // a live session with it must not outlive the record. Listeners run
-        // outside the store's lock, so one that takes a transport lock can
-        // never deadlock against a send that reads the store.
+        // Close live sessions of a replaced entry; listeners run outside the store lock.
         notifyRemoved(evicted)
         // A key re-paired while its earlier revocation never committed: retry
         // it now, not only at the next start. Until it commits, the request
@@ -322,7 +315,7 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
     /**
      * Removes the device paired under [publicKeyHex] and tells every
      * [PairedDeviceRemovalListener] about it, so a transport tears down a live
-     * session with that peer (#59). Listeners are told even when no record
+     * session with that peer. Listeners are told even when no record
      * matched: the record may already be gone while a session still runs.
      * They are told after the record is gone and outside the store's lock.
      */
@@ -388,7 +381,7 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
     }
 
     /**
-     * Send-time revalidation (#59): throws [PeerNotPairedException] unless
+     * Send-time revalidation: throws [PeerNotPairedException] unless
      * [publicKeyHex], a session's authenticated remote static key, is still
      * paired. A transport calls it before it encrypts a phone-initiated
      * request, so a refused send consumes no nonce and writes nothing.
@@ -432,10 +425,7 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
                 bootHashHex = bootHashHex,
                 securityLevel = securityLevel,
                 bootStateVerified = bootStateVerified,
-                // The reconnect binding is the phone's OWN attested-key SPKI,
-                // captured at pairing (see updateDeviceFingerprint). A null here
-                // preserves it: verifying the PEER's attestation (`remote.attestDevice`)
-                // must not overwrite the phone's own reconnect fingerprint.
+                // Null keeps the phone's own reconnect fingerprint; peer attestation never overwrites it.
                 deviceFingerprint = deviceFingerprint ?: devices[idx].deviceFingerprint
             )
             saveDevices(devices)
@@ -505,7 +495,7 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
     }
 
     /**
-     * Keys whose sharing grants are still to be dropped (#174), each tagged
+     * Keys whose sharing grants are still to be dropped, each tagged
      * with the generation of the removal that queued it: written in the same
      * prefs edit that removes the pairing, so the two persist or vanish
      * together, and cleared by [completeRevocation] only once the delete for
@@ -568,7 +558,7 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
 
     /**
      * Runs [write], which inserts a sharing grant for [publicKeyHex], bound to
-     * the key's current pairing (#174). Every grant writer goes through here.
+     * the key's current pairing. Every grant writer goes through here.
      *
      * Refused, returning false without running [write], when the key is not
      * paired or a revocation of it is pending. Otherwise a marker naming the
@@ -809,15 +799,15 @@ fun interface PairedDeviceRemovalListener {
 
     /**
      * [publicKeyHex] was paired again while an earlier removal's grant
-     * revocation is still pending (#174). Not a removal: the device stays
+     * revocation is still pending. Not a removal: the device stays
      * paired. Same threading as [onDeviceRemoved].
      */
     fun onRevocationPending(publicKeyHex: String) {}
 }
 
 /**
- * Drops the per-key sharing grants of every device that stops being paired
- * (#174). Without it a desktop that re-pairs under the same static key would
+ * Drops the per-key sharing grants of every device that stops being paired.
+ * Without it a desktop that re-pairs under the same static key would
  * get its old `SELECTED_PEERS` grants back, since access control reads
  * `key_sharing_policies` by peer key alone.
  *
@@ -970,7 +960,7 @@ class PairedDeviceGrantCleanup(
 
 /**
  * A phone-initiated send was refused because the session's peer is no longer
- * paired (#59). Nothing was encrypted or written. An [IOException], so
+ * paired. Nothing was encrypted or written. An [IOException], so
  * [com.automatethethings.xkey.remote.MessageSender] callers keep their contract.
  */
 class PeerNotPairedException(val publicKeyHex: String?) :

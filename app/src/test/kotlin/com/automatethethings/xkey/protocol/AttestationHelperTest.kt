@@ -160,9 +160,7 @@ class AttestationHelperTest {
 
     @Test
     fun `the device fingerprint is the SHA-256 of the LEAF SPKI, not the root`() = runTest {
-        // The chain is [leaf, ..., root]; the per-device attested key is the
-        // LEAF (index 0), and its SubjectPublicKeyInfo — not the whole DER and
-        // not the shared attestation root — is what binds the device (#93).
+        // The device is bound by the leaf's SubjectPublicKeyInfo, not the whole DER or the shared root.
         val leaf = TestCertificates.der(TestCertificates.LEAF_C_PEM)
         val root = TestCertificates.der(TestCertificates.ROOT_CA_C_STRONGBOX_PEM)
         respondWith { nonce ->

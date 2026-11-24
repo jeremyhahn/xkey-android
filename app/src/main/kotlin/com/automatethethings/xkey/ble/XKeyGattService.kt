@@ -153,8 +153,8 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
 
     /**
      * Where the pairing confirmation is raised: the app-wide record of the
-     * resumed screen, never a reference one activity sets and another clears
-     * (#320). Tests may pin it with [setActivity].
+     * resumed screen, never a reference one activity sets and another clears.
+     * Tests may pin it with [setActivity].
      */
     @VisibleForTesting
     internal var promptHost: PromptHost = PromptActivityTracker
@@ -366,8 +366,7 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
         // Initialize advertiser
         advertiser = Advertiser(bluetoothAdapter)
 
-        // The FIDO BLE authenticator: its own GATT server, so the xkey
-        // service's table and callbacks are untouched.
+        // The FIDO BLE authenticator runs its own GATT server.
         val db = XKeyDatabase.getInstance(this)
         fidoGattServer = FidoGattServer(
             context = this,
@@ -489,8 +488,7 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
         // Acquire wake lock to keep BLE active while advertising
         acquireWakeLock()
 
-        // A stopAdvertising() while this start waits on the stack wins: the
-        // start then publishes nothing (no FIDO service, no advertising).
+        // A stopAdvertising() during this start wins: nothing is published.
         val token = advertisingGeneration.begin() ?: run {
             isStartingAdvertising = false
             return
@@ -774,7 +772,7 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
             Log.e(TAG, "RequestHandler not initialized, cannot handle USB accessory")
             return
         }
-        // One observer of the slot's server for the service's lifetime (#134).
+        // One observer of the slot's server for the service's lifetime.
         usbAttachPath.observe()
 
         // Check if native USB is enabled before accepting the accessory
@@ -786,10 +784,7 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
             }
 
             val usbRouter = BidirectionalMessageRouter(handler)
-            // The password and seal stores are served over USB only, so their
-            // methods go to this session rather than the RequestHandler BLE and
-            // TCP share. A vault per session: every new USB connection starts
-            // locked, while its failed-unlock counter persists with the PINs'.
+            // Password and seal stores are USB-only: a vault per session starts locked; its failed-unlock counter persists.
             val passwordVault = PasswordVault(
                 FilePasswordVaultFactorStore(java.io.File(filesDir, PASSWORD_VAULT_DIR)),
                 PinSettingsVaultUnlockAttemptStore(PinSettingsRepository(this@XKeyGattService))
@@ -801,8 +796,7 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
                 ),
                 SealStoreMethods(SealStore(java.io.File(filesDir, SEAL_STORE_DIR)))
             )
-            // The slot drops a server that closes, so the next attach builds
-            // a fresh one without a service restart (#134).
+            // The slot drops a closed server, so the next attach builds a fresh one.
             usbAttachPath.attach {
                 open(
                     context = this@XKeyGattService,
@@ -1118,10 +1112,7 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
                 return false
             }
 
-            // Store the PEER's boot state. deviceFingerprint is intentionally
-            // omitted: it is the phone's own attested-key SPKI bound at pairing
-            // and echoed on reconnect (#93), not the peer's boot hash. Passing
-            // the boot hash here previously corrupted the reconnect binding.
+            // Store the peer's boot state; deviceFingerprint is the phone's own pairing binding and is omitted.
             pairedDeviceRepository?.updateDeviceAttestation(
                 publicKeyHex = publicKeyHex,
                 bootHashHex = result.bootHashHex ?: "",

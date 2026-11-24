@@ -55,7 +55,7 @@ import java.util.Base64
  * names and error codes; uniqueness and range of every error code are checked
  * in [ProtocolConstantsTest]. `local.pivImportCert` is driven through the
  * [RequestHandler] dispatch over a real [PivKeyManager] and a mocked
- * [PivSlotDao] (#173), with only the handler's Android edges mocked, as in
+ * [PivSlotDao], with only the handler's Android edges mocked, as in
  * [PinOathHandlerErrorsTest].
  */
 @OptIn(ExperimentalCoroutinesApi::class)

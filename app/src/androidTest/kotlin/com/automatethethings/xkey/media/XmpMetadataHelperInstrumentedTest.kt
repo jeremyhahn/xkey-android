@@ -143,8 +143,7 @@ class XmpMetadataHelperInstrumentedTest {
     fun aJpegFallsBackToItsSidecarWhenExifHasNothing() {
         val file = jpeg()
         val data = sampleData(hash = "d".repeat(64))
-        // A PNG-style sidecar next to a JPEG: the reader tries EXIF, finds
-        // nothing, and must still pick the signature up.
+        // A PNG-style sidecar next to a JPEG: no EXIF, but the signature is still found.
         File(XmpMetadataHelper.getSidecarPath(file.path)).writeText(data.toJsonString())
 
         val read = XmpMetadataHelper.readSignature(file.path)
@@ -178,7 +177,7 @@ class XmpMetadataHelperInstrumentedTest {
     }
 
     /**
-     * #47, Codex review 6661: an encoder JPEG given `0xFF` fill bytes before
+     * An encoder JPEG given `0xFF` fill bytes before
      * [first] (null: the first marker after SOI) and before the kept table
      * [retained], with an EXIF APP1 added first when [withApp1], signed through
      * the real `writeSignature` under ExifInterface 1.4.2. The signature must
@@ -311,8 +310,7 @@ class XmpMetadataHelperInstrumentedTest {
         val file = jpeg()
         XmpMetadataHelper.writeSignature(file.path, sampleData())
 
-        // The URI reader only knows how to read EXIF, so anything else is a miss
-        // even when the underlying bytes do carry a signature.
+        // The URI reader reads only EXIF, so anything else is a miss.
         val read = XmpMetadataHelper.readSignatureFromUri(
             context.contentResolver,
             Uri.fromFile(file),

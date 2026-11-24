@@ -125,8 +125,7 @@ class MainActivity : AppCompatActivity() {
             gattService = binder.getService()
             serviceBound = true
 
-            // Prompts need no registration here: PromptActivityTracker hosts
-            // them on whichever screen is in front (#320).
+            // PromptActivityTracker hosts prompts on whichever screen is in front.
 
             // Start observing service state
             observeServiceState()
@@ -1229,12 +1228,7 @@ class MainActivity : AppCompatActivity() {
      * Sets up the bottom navigation bar with tab switching logic.
      */
     private fun setupBottomNavigation() {
-        // The bar is drawn over the scroll view, whose viewport otherwise runs to
-        // the bottom of the screen. Anything scrolled to the very end of a tab then
-        // comes to rest underneath the bar: visible enough for Espresso to consider
-        // it displayed, but with its centre covered, so taps land on the bar instead.
-        // End the viewport at the top of the bar. The height is measured rather than
-        // hard-coded because it grows with the gesture-navigation inset.
+        // End the scroll viewport at the top of the bar, measured because it grows with the gesture inset.
         binding.bottomNavigation.doOnLayout { nav ->
             binding.nestedScrollView.updateLayoutParams<ViewGroup.MarginLayoutParams> {
                 bottomMargin = nav.height

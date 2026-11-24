@@ -124,8 +124,7 @@ class BleClient(
         private const val HANDSHAKE_TIMEOUT_MS = 30_000L
         private const val REQUEST_TIMEOUT_MS = 60_000L
         private const val MTU_REQUEST_TIMEOUT_MS = 5_000L
-        // How long a disconnect waits for the fragments queued ahead of it
-        // before it wakes the request still waiting (#63).
+        // How long a disconnect waits for queued fragments before waking the waiting request.
         private const val DRAIN_DEADLINE_MS = 5_000L
 
         // Default MTU (minimum guaranteed)
@@ -168,9 +167,7 @@ class BleClient(
     private var bluetoothAdapter: BluetoothAdapter? = null
     private var bleScanner: BluetoothLeScanner? = null
 
-    // GATT connection: the one being set up, then the one [connection] carries.
-    // Written under connectionLock, where the GATT callbacks read it to tell a
-    // stale GATT object's callback from the current one's; see ownsGatt.
+    // The GATT connection, written under connectionLock so callbacks can tell a stale GATT object; see ownsGatt.
     @Volatile
     private var gattConnection: BluetoothGatt? = null
 
@@ -276,14 +273,11 @@ class BleClient(
      * Each is tagged with the [Connection] it arrived on, so the consumer
      * reassembles it in that connection's own buffer: see [Inbound]. The
      * stack's disconnect is queued behind them, so a reply that arrived before
-     * it still reaches its request (#63).
+     * it still reaches its request.
      */
     private val inboundFragments = Channel<Inbound>(Channel.UNLIMITED)
 
-    // Pending response for the request/response pattern, and the connection
-    // its request went out on, so a disconnect wakes only its own connection's
-    // waiter. Both guarded by pendingResponseLock; see takePendingResponse for
-    // why it is taken rather than merely completed.
+    // Pending response and its connection, guarded by pendingResponseLock; see takePendingResponse.
     private var pendingResponse: CompletableDeferred<ByteArray>? = null
     private var pendingResponseConnection: Connection? = null
 
@@ -292,10 +286,7 @@ class BleClient(
     // Mutex for state management
     private val stateMutex = Mutex()
 
-    // Serialises encrypt-then-send. The send nonce must reach the wire in the
-    // order it was taken, and sendCharacteristicWrite has a single completion
-    // slot. Separate from stateMutex, which sendRequest holds while it waits:
-    // the answer to a desktop request has to go out in the meantime.
+    // Serialises encrypt-then-send so nonces reach the wire in order; separate from stateMutex.
     private val writeMutex = Mutex()
 
     // Scanning state
@@ -316,16 +307,9 @@ class BleClient(
                 inboundFragmentHook?.invoke()
                 val source = event.connection
                 when (event) {
-                    // Every fragment of its connection is ahead of it, so a
-                    // reply among them has already reached its request. Only
-                    // now is a request still waiting on it woken (#63).
+                    // Every earlier fragment is handled, so a waiting request can now be woken.
                     is Inbound.Disconnected -> takePendingResponse(source)?.cancel()
-                    // Reassembled in its own connection's buffer, so a
-                    // fragment queued before its connection ended never starts
-                    // or finishes a message of the next one. Only this
-                    // consumer touches a connection's buffer, so no reset can
-                    // race it. Once its connection has ended, the message is
-                    // only a reply: see handleCompleteMessage.
+                    // Reassembled in the connection's own buffer; after the connection ends the message is only a reply.
                     is Inbound.Fragment -> try {
                         val completeMessage = source.reassembler.addFragment(event.bytes)
                         if (completeMessage != null) {
@@ -454,8 +438,7 @@ class BleClient(
             }
         }
 
-        // Trusted only once the user confirms the SAS (#137). Outside
-        // stateMutex: a disconnect or destroy() must not wait for the user.
+        // Trusted only after the user confirms the SAS; outside stateMutex so disconnect never waits for the user.
         val deviceName = device.name ?: "Unknown"
         val trusted = try {
             confirmShortAuthString(established, deviceName, address)
@@ -507,10 +490,7 @@ class BleClient(
         Log.d(TAG, "Sending request: ${request.size} bytes")
 
         return stateMutex.withLock {
-            // Held for the whole exchange so this request owns the waiter it
-            // installed; the teardown paths only ever discard their own. Bound
-            // to the connection whose session it encrypts with: that
-            // connection's disconnect wakes it without waiting for this mutex.
+            // Held for the exchange so this request owns its waiter; the connection's disconnect wakes it without this mutex.
             val pending = installPendingResponse(current)
             try {
                 // Encrypt, fragment and send
@@ -574,9 +554,7 @@ class BleClient(
      */
     @SuppressLint("MissingPermission")
     suspend fun destroy() {
-        // Fail pending GATT callbacks first. They are awaited on the caller's
-        // coroutine rather than on `scope`, so an in-flight connect() would
-        // otherwise keep holding stateMutex until its own timeout expires.
+        // Fail pending GATT callbacks first so an in-flight connect() releases stateMutex.
         val cause = BleClientException("BleClient destroyed")
         scanDeferred?.completeExceptionally(cause)
         scanDeferred = null
@@ -845,7 +823,7 @@ class BleClient(
      * no ack is coming for it on a connection that has ended — and wakes the
      * request waiting for a reply on it, unless [wakeWaiter] is false because
      * the inbound consumer will once it has drained the connection's
-     * fragments (#63).
+     * fragments.
      */
     private fun releaseConnection(
         ended: Pair<Connection, ((Int) -> Unit)?>?,
@@ -897,17 +875,7 @@ class BleClient(
                     Log.d(TAG, "Remote key verified successfully")
                 }
 
-                // Step 4: Send handshake message 3 (-> s, se). Transport keys
-                // are derived before it goes out: the desktop sends
-                // local.attestDevice the moment it reads message 3, and a
-                // request landing before finalizeHandshake would be mistaken
-                // for a handshake reply.
-                //
-                // writeMutex is held from finalization until the stack
-                // acknowledges message 3's last write. The answer to that
-                // request goes out under the same lock, so it waits for
-                // message 3 instead of taking the single write-completion slot
-                // from it while the stack is still busy with its write.
+                // Send message 3 after deriving transport keys, holding writeMutex until its last write is acknowledged.
                 val msg3 = session.createHandshakeMessage3()
                 writeMutex.withLock {
                     session.finalizeHandshake()
@@ -977,14 +945,7 @@ class BleClient(
             throw BleClientException("Short authentication string not confirmed")
         }
 
-        // Trusted only if it is still the connection. The check and the
-        // publication are one step under connectionLock, the lock a GATT
-        // disconnect ends the connection under (swapConnection) before it
-        // ever waits for stateMutex: a drop either ended it first, and this
-        // sees it, or ends it after, a trusted connection it then releases.
-        // stateMutex is held too, against disconnect() and destroy(). Lock
-        // order stateMutex -> connectionLock, as everywhere; nothing in the
-        // step suspends.
+        // Check and publish trust in one step under connectionLock; lock order stateMutex -> connectionLock.
         return stateMutex.withLock {
             val trusted = synchronized(connectionLock) {
                 if (connection === current && current.requests.isActive) {
@@ -1146,18 +1107,7 @@ class BleClient(
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
             Log.d(TAG, "Connection state changed: status=$status, newState=$newState")
 
-            // One step under connectionLock: whether gatt is still the
-            // client's and, only if it is, the dial's deferred and, on a
-            // disconnect, the end of its own connection, with the write that
-            // connection left on the stack. A late callback from a GATT object
-            // the client has moved on from, while the next connection is
-            // dialled or once it is up, must not complete or fail anything of
-            // that connection's or tear it down. The connection is ended only
-            // if this is its GATT object, and what is released below is the
-            // one it ended, so not even a check gone stale could end, cancel
-            // or wake another connection's. The disconnect is queued behind
-            // the fragments in the same step, as no fragment of the
-            // connection can be queued after it (#63).
+            // Under connectionLock: act only if gatt is still the client's, so a stale callback cannot touch the next connection.
             var disconnectQueued = false
             val owned = takeIfOwned(gatt) {
                 val ended = if (
@@ -1193,17 +1143,7 @@ class BleClient(
                     dial?.completeExceptionally(
                         BleClientException("Connection failed with status: $status")
                     )
-                    // Before the teardown below, which waits on stateMutex: a
-                    // request holds that mutex while its write waits for an ack
-                    // the dropped link will never send, or while it waits for
-                    // a reply that will never come. Ended above, so no write
-                    // is admitted to the connection; released here, outside
-                    // connectionLock, which the resumed writer may need at
-                    // once: its request workers are cancelled and its write
-                    // failed. Its request's waiter is woken by the inbound
-                    // consumer once the reply queued ahead of the disconnect,
-                    // if any, has reached it, or at the drain deadline (#63).
-                    // The teardown then finds the connection already ended.
+                    // Release the dropped connection's write and workers before the teardown, which waits on stateMutex.
                     releaseConnection(ended, "disconnected from GATT server", wakeWaiter = !disconnectQueued)
                     if (disconnectQueued && ended != null) {
                         val previous = ended.first
@@ -1230,9 +1170,7 @@ class BleClient(
             }
         }
 
-        // The dial's steps below are completed only by the client's own GATT
-        // object, checked in the same step as reading the deferred: see
-        // onConnectionStateChange.
+        // Only the client's own GATT object completes the dial's steps; see onConnectionStateChange.
 
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
             Log.d(TAG, "Services discovered: status=$status")
@@ -1287,11 +1225,7 @@ class BleClient(
 
         private fun handleCharacteristicWrite(gatt: BluetoothGatt, status: Int) {
             Log.d(TAG, "Characteristic write: status=$status")
-            // Taken before it runs; see Connection.pendingWrite. Only by the
-            // connection's own GATT object: a stale one's ack would complete
-            // the new connection's write before the stack has done it. Run
-            // outside connectionLock, which the resumed writer's next
-            // fragment needs.
+            // Only the connection's own GATT object completes its write; run outside connectionLock.
             val completion = synchronized(connectionLock) {
                 connection?.takeIf { it.gatt === gatt }?.pendingWrite?.getAndSet(null)
             }
@@ -1322,14 +1256,7 @@ class BleClient(
         private fun handleCharacteristicChanged(gatt: BluetoothGatt, value: ByteArray) {
             if (value.isEmpty()) return
 
-            // Hand off without blocking the stack's callback thread, and only
-            // from the client's own GATT object, queued in the same step as
-            // the check: a late notification from a connection the client
-            // has moved on from would land in the next one's reassembly.
-            // Tagged with the connection read in that same step, so the
-            // consumer can still tell it from the next connection's once
-            // this one has ended. Before a connection has a session the
-            // desktop has nothing to send, so there is nothing to keep.
+            // Queue notifications from the client's own GATT object only, tagged with their connection.
             val queued = takeIfOwned(gatt) {
                 connection?.takeIf { it.gatt === gatt }?.let { owner ->
                     inboundFragments.trySend(Inbound.Fragment(owner, value))
@@ -1355,8 +1282,8 @@ class BleClient(
      *
      * Once [source] has ended, the message is decrypted by its own session
      * and only a reply is kept, and only for a request that went out on
-     * [source]: the desktop may have answered just before it disconnected
-     * (#63). A handshake message or a request from the desktop is dropped,
+     * [source]: the desktop may have answered just before it disconnected.
+     * A handshake message or a request from the desktop is dropped,
      * and nothing is written.
      */
     private fun handleCompleteMessage(source: Connection, message: ByteArray) {
@@ -1375,10 +1302,7 @@ class BleClient(
             // this never fails while the channel is open.
             source.handshakeResponses.trySend(message)
         } else {
-            // Decrypted here, on the single consumer, so the receive nonce
-            // advances in arrival order whichever way the message is going.
-            // A message that fails authentication leaves the nonce where it
-            // was, so dropping it costs nothing but the message.
+            // Decrypt on the single consumer so the receive nonce advances in arrival order; a failed message leaves it.
             val plaintext = try {
                 session.decrypt(message)
             } catch (e: Exception) {
@@ -1396,11 +1320,7 @@ class BleClient(
                 return
             }
 
-            // Route to the request that is waiting, if one still is. Taking
-            // the deferred rather than completing it in place means a
-            // duplicated or late reply cannot satisfy a request that a later
-            // one already superseded. An ended connection's reply goes only
-            // to a request that went out on it.
+            // Take the waiting request's deferred so a late or duplicate reply cannot satisfy a later request.
             val waiter = if (ended) takePendingResponse(source) else takePendingResponse()
             if (waiter == null) {
                 Log.w(TAG, "Discarding a response no request is waiting for")
@@ -1450,10 +1370,7 @@ class BleClient(
         // Under this connection's job: a disconnect cancels the worker, even
         // while the handler waits for the user to approve.
         scope.launch(requests) {
-            // Nothing is served or answered until the user confirms the SAS
-            // (#137): the desktop asks the moment it reads message 3, so this
-            // waits. A rejected session answers nothing; its disconnect
-            // cancels this worker.
+            // Serve nothing until the user confirms the SAS; a rejected session answers nothing.
             if (!owner.sasConfirmed.await()) return@launch
             val response = try {
                 when {
@@ -1567,8 +1484,7 @@ class BleClient(
         // Cancel pending operations
         takePendingResponse()?.cancel()
 
-        // Clean up GATT connection. Retired in one step with clearing it, so
-        // its late callbacks are told from the next dial's: see ownsGatt.
+        // Clean up the GATT connection, retiring it in the same step; see ownsGatt.
         val gatt = synchronized(connectionLock) {
             gattConnection.also { retired ->
                 if (retired != null) retiredGatts += retired

@@ -208,11 +208,7 @@ class GetCredentialHandler(
         Log.d(TAG, "clientDataHash provided: ${clientDataHash != null}")
 
         if (clientDataHash == null) {
-            // Browser didn't provide clientDataHash - construct clientDataJSON
-            // ourselves. Because this provider is signing the client data, the
-            // origin it binds must be one Android verified for the caller.
-            // Deriving an origin from the requested rpId would let any app
-            // obtain an assertion for a site it does not control.
+            // No clientDataHash: build clientDataJSON with the origin Android verified, never one from rpId.
             Log.w(TAG, "clientDataHash is null, constructing clientDataJSON")
             val challenge = try {
                 requestJson.getString("challenge")
@@ -257,9 +253,7 @@ class GetCredentialHandler(
             )
         }
 
-        // Decide user verification BEFORE building authenticator data: the UV
-        // bit is inside authData, which is what gets signed, so it cannot be
-        // corrected afterwards.
+        // Decide UV before building authData, which is signed.
         val uvRequirement = UvRequirement.fromJson(requestJson.optString("userVerification"))
 
         // An auth-bound key forces CryptoObject-backed verification during

@@ -1,29 +1,4 @@
-# nightly-template: v1.12 — the known-red and long-horizon jobs, off the push path.
-# v1.12: a timeout-minutes on every job, so a hung run ends itself.
-# v1.10: CI_IMAGE_NAMESPACE is the repository Actions variable of that name.
-# v1.9: a `lint-sweeps` job runs the repository's `make -k lint-sweeps` in its
-# toolchain image, nightly and on dispatch only, when the Makefile (or a
-# tracked *.mk) defines the target; without one it prints OK and passes.
-# This file is kept in step with a shared template; change both together.
-# (adapted: no fips job, which builds and tests Go under GODEBUG=fips140=only;
-# this repository has no Go code, so there is nothing for it to run.)
-# (adapted: no GO_VERSION env, which only the fips job read.)
-# (adapted: lint-sweeps builds the toolchain image with this repository's
-# `make docker-build-toolchain` and runs it by ID, as ci.yml does; there is no
-# registry-cache pull or Go module credential file. The Makefile defines no
-# lint-sweeps target today, so the job prints OK and passes.)
-# (adapted: the trivy version comes from TRIVY_VERSION in scripts/tool-pins.sh,
-# the one pin the Makefile and scripts/install-trivy.sh read, in place of a
-# .trivy-version file; skip-dirs are the generated Gradle output, as in
-# `make trivy-fs`.)
-#
-# Jobs that are known-red with tracked issues, or that verify a slow-moving
-# property, do not run per push. They run here nightly, plus on demand via
-# workflow_dispatch, and are not in any merge gate.
-#
-# Companion files: .trivyignore at the repository root (a missing ignore file
-# is a fatal trivy flag error) and scripts/install-trivy.sh (pinned and
-# checksum-verified; also what `make install-tools` runs).
+# Known-red and slow jobs, nightly and on dispatch, outside every merge gate; trivy version from scripts/tool-pins.sh.
 
 name: Nightly
 
@@ -72,8 +47,7 @@ jobs:
             echo "has_target=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # CUSTOMIZE (xkey-android): the toolchain image as ci.yml's lint-gates
-      # job builds it, run by the ID its build wrote.
+      # The toolchain image as ci.yml's lint-gates job builds it, run by ID.
       - name: Build the toolchain image
         if: ${{ steps.probe.outputs.has_target == 'true' }}
         env:
@@ -102,10 +76,7 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
-      # One declaration of the trivy version, shared by both paths below and by
-      # the Makefile, so the scanner in CI and on a developer's machine are the
-      # same build. CUSTOMIZE (xkey-android): read as ONE bare token from
-      # scripts/tool-pins.sh's TRIVY_VERSION line; fail on anything else.
+      # The trivy version: one bare token from TRIVY_VERSION in scripts/tool-pins.sh; anything else fails.
       - name: Resolve pinned trivy version
         id: trivy_version
         run: |
@@ -116,9 +87,7 @@ jobs:
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
-      # CUSTOMIZE (xkey-android): skip-dirs are the generated Gradle output and
-      # caches; nothing that ships in a release is skipped. The tracked
-      # build/docker (the devcontainer images) is scanned.
+      # Skip generated Gradle output and caches; build/docker is scanned.
       #
       # trivy-action is pinned to a full commit SHA; the trailing comment names
       # the tag. When bumping it, take the peeled `<tag>^{}` entry of

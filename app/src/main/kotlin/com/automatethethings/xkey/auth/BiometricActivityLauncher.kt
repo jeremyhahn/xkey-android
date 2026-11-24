@@ -780,9 +780,7 @@ internal class PendingAuthentications(
         val key = NotificationKeys.approval(id.toString())
         val turnCame = CompletableDeferred<Boolean>()
         queued[id] = turnCame
-        // Becoming ACTIVE only wakes this caller; the launch runs here. The
-        // queue deadline is the owner's: a turn that comes as it passes is
-        // either ACTIVE or expired and handed straight on.
+        // Becoming ACTIVE only wakes this caller; the launch runs here, and a turn past the queue deadline is handed on.
         prompts.enqueue(
             key,
             kind,
@@ -836,11 +834,7 @@ internal class PendingAuthentications(
             }
         } finally {
             queued.remove(id, turnCame)
-            // Withdrawn, if it has not settled: off the screen or out of the
-            // line. One withdrawn with its turn has its prompt ended unshown,
-            // so a late tap on its notification prompts for nothing, and a
-            // prompt already up (a co-sign's timeout, a cancelled caller) is
-            // taken down here, before the next request's turn starts.
+            // Withdraw an unsettled request: end its unshown prompt or take down the one on screen before the next turn.
             prompts.end(key) { wasActive ->
                 if (wasActive && !expirePrompt(id.toString())) cancelPrompt(id.toString())
             }

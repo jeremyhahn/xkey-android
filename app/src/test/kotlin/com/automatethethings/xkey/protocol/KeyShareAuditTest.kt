@@ -74,7 +74,7 @@ import org.junit.rules.TemporaryFolder
 
 /**
  * Every key-sharing transfer leaves one audit record naming the caller
- * device (#222): `local.importSharedKey` (a key leaving the phone) records
+ * device: `local.importSharedKey` (a key leaving the phone) records
  * KEY_EXPORTED, `local.shareSymmetric` (key material arriving) KEY_CREATED,
  * and `local.sharePublicKey` (a public key arriving) CONTACT_IMPORTED. No
  * entry carries key bytes, and a request that changes nothing records nothing.

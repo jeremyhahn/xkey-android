@@ -95,9 +95,7 @@ class CertificateManagementActivityUiTest {
 
         val now = System.currentTimeMillis()
         runBlocking {
-            // Distinct createdAt values keep the "ORDER BY created_at DESC"
-            // ordering deterministic, so adapter positions can be derived
-            // from the same DAO query the screen observes.
+            // Distinct createdAt values make the created_at DESC order, and so adapter positions, deterministic.
             dao.insert(
                 certificate(
                     serial = validSerial,

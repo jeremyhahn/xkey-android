@@ -100,9 +100,7 @@ class OathActivity : AppCompatActivity() {
 
     private var isFabVisible = true
 
-    // Desktop OATH (remote.oathAdd / remote.oathGenerate). The service is
-    // bound without BIND_AUTO_CREATE: with no desktop connected the screen
-    // behaves exactly as before.
+    // Desktop OATH, bound without BIND_AUTO_CREATE: without a desktop the screen works alone.
     private var gattService: XKeyGattService? = null
     private var serviceBindRequested = false
     private lateinit var desktopActions: OathDesktopActions
@@ -955,7 +953,7 @@ class OathDesktopActions(
 
     sealed interface Outcome {
         data class Copied(val desktopId: String) : Outcome
-        /** A desktop code, readable only through [deadline] (ruling 554). */
+        /** A desktop code, readable only through [deadline]. */
         class Code(val deadline: DesktopCodeDeadline) : Outcome {
             override fun toString(): String = "Code($deadline)"
         }
