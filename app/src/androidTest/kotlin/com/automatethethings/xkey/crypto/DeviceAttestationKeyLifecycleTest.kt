@@ -194,6 +194,38 @@ class DeviceAttestationKeyLifecycleTest {
         assertTrue(verify(chain.first(), message, dak.sign(message)))
     }
 
+    /**
+     * A key pair generated without an attestation challenge carries one
+     * self-signed certificate. A mint refuses exactly that chain, since it has
+     * no hardware-rooted path; `chain()` must not hand it out because it was
+     * found already stored.
+     */
+    @Test
+    fun aStoredKeyWithASelfSignedChainIsReplacedRatherThanReturned() {
+        KeyPairGenerator.getInstance(KeyProperties.KEY_ALGORITHM_EC, ANDROID_KEYSTORE).run {
+            initialize(
+                KeyGenParameterSpec.Builder(DeviceAttestationKey.ALIAS, KeyProperties.PURPOSE_SIGN)
+                    .setAlgorithmParameterSpec(ECGenParameterSpec("secp256r1"))
+                    .setDigests(KeyProperties.DIGEST_SHA256)
+                    .build()
+            )
+            generateKeyPair()
+        }
+        val planted = keyStore.getCertificateChain(DeviceAttestationKey.ALIAS)
+        assertEquals("precondition: an unattested key has a lone certificate", 1, planted.size)
+
+        val dak = DeviceAttestationKey()
+        val chain = dak.chain()
+
+        assertTrue("a stored lone certificate is not an attestation chain", chain.size >= 2)
+        assertFalse(
+            "the unattested key is replaced, not kept",
+            (planted[0] as X509Certificate).publicKey.encoded.contentEquals(chain.first().publicKey.encoded)
+        )
+        val message = randomBytes(32)
+        assertTrue("sign() uses the replacement", verify(chain.first(), message, dak.sign(message)))
+    }
+
     // -----------------------------------------------------------------
     // Signing failures
     // -----------------------------------------------------------------
