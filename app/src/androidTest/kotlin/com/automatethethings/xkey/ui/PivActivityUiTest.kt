@@ -37,6 +37,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.automatethethings.xkey.R
 import com.automatethethings.xkey.piv.PivAlgorithm
+import com.automatethethings.xkey.piv.PivKeyManager
 import com.automatethethings.xkey.piv.PivSlot
 import com.automatethethings.xkey.piv.PivSlotDao
 import com.automatethethings.xkey.piv.PivSlotEntity
@@ -318,6 +319,11 @@ class PivActivityUiTest {
      */
     @Test
     fun generateKeyDialog_offersEverySupportedAlgorithm() {
+        // Ed25519 and X25519 are offered only where the Keystore makes them
+        // in secure hardware: the activity's manager decides, by API level
+        // and a probe key. A manager over the same store answers the same,
+        // since the probe's answer is kept for the process.
+        val supported = runBlocking { PivKeyManager(dao).availableAlgorithms() }
         val scenario = launch()
         val slot = emptyPrimarySlot()
         assertShownTextInTree(scenario, slot.label)
@@ -327,8 +333,6 @@ class PivActivityUiTest {
             .inRoot(isDialog())
             .check(matches(isDisplayed()))
 
-        // Ed25519 and X25519 are offered only where the Keystore makes them.
-        val supported = PivAlgorithm.entries.filter { it.isAvailableOn(Build.VERSION.SDK_INT) }
         val missing = supported.filterNot { isDisplayedInDialog(it.displayName) }
         val unexpected = (PivAlgorithm.entries - supported.toSet()).filter { isDisplayedInDialog(it.displayName) }
 
@@ -346,10 +350,17 @@ class PivActivityUiTest {
         )
     }
 
-    /** On Android 13 and later the dialog offers Ed25519 and X25519, with no API note. */
+    /**
+     * Where the Keystore makes Ed25519 and X25519 in secure hardware, the
+     * dialog offers both, with no note.
+     */
     @Test
     fun generateKeyDialog_offersCurve25519OnAndroid13AndLater() {
-        assumeTrue("Ed25519 and X25519 need API 33", Build.VERSION.SDK_INT >= 33)
+        val offered = runBlocking { PivKeyManager(dao).availableAlgorithms() }
+        assumeTrue(
+            "Ed25519 and X25519 need API 33 and a Keystore that makes them in secure hardware",
+            PivAlgorithm.ED25519 in offered && PivAlgorithm.X25519 in offered
+        )
         val scenario = launch()
         val slot = emptyPrimarySlot()
         assertShownTextInTree(scenario, slot.label)
