@@ -166,6 +166,31 @@ class TcpHsmServerConfirmDeadlineTest {
         server.closeAndAwaitListening(next)
     }
 
+    /**
+     * A refused pairing.confirm ends the connection: a second confirm sent
+     * behind it raises no second prompt and is not answered, so a client
+     * cannot repeat the prompt until the user approves one by mistake.
+     */
+    @Test
+    fun aSecondPairingConfirmAfterARefusalRaisesNoPromptAndTheConnectionCloses() = runBlocking {
+        approve = false
+        val desktop = DesktopPeer(Socket(InetAddress.getLoopbackAddress(), port))
+        desktop.handshake()
+        withTimeout(TIMEOUT_MS) { server.state.first { it is TcpHsmState.Connected } }
+
+        // Both sent before the first is answered, as a client repeating the prompt would.
+        desktop.send(desktop.noise.encrypt(confirmText(1, desktop.publicKeyHex).toByteArray()))
+        desktop.send(desktop.noise.encrypt(confirmText(2, desktop.publicKeyHex).toByteArray()))
+
+        val first = desktop.readEncrypted()
+        assertEquals(1L, first.getLong("id"))
+        assertEquals(ErrorCodes.PAIRING_REJECTED, first.getJSONObject("error").getInt("code"))
+        desktop.assertClosedByPhone((TIMEOUT_MS).toInt())
+        assertEquals("one prompt per connection", 1, prompts.get())
+        assertTrue(!repo.isDeviceKnown(desktop.publicKeyHex))
+        server.closeAndAwaitListening(desktop)
+    }
+
     private fun confirmText(id: Long, key: String) =
         """{"jsonrpc":"2.0","id":$id,"method":"pairing.confirm",""" +
             """"params":{"publicKeyHex":"$key","deviceName":"desktop"}}"""
