@@ -960,7 +960,8 @@ class PinManagementActivity : AppCompatActivity() {
                 }
             }
             .setNegativeButton(R.string.button_cancel, null)
-            .show()
+            .create()
+            .let { SecureScreens.show(it) }
     }
 
     private fun showSetUserPinDialog() {
@@ -1006,7 +1007,8 @@ class PinManagementActivity : AppCompatActivity() {
                 }
             }
             .setNegativeButton(R.string.button_cancel, null)
-            .show()
+            .create()
+            .let { SecureScreens.show(it) }
     }
 
     private fun showChangeSoPinDialog() {
@@ -1053,7 +1055,8 @@ class PinManagementActivity : AppCompatActivity() {
                 }
             }
             .setNegativeButton(R.string.button_cancel, null)
-            .show()
+            .create()
+            .let { SecureScreens.show(it) }
     }
 
     private fun showChangeUserPinDialog() {
@@ -1103,7 +1106,8 @@ class PinManagementActivity : AppCompatActivity() {
                 }
             }
             .setNegativeButton(R.string.button_cancel, null)
-            .show()
+            .create()
+            .let { SecureScreens.show(it) }
     }
 
     private fun showResetLockoutDialog() {
@@ -1134,7 +1138,8 @@ class PinManagementActivity : AppCompatActivity() {
                 }
             }
             .setNegativeButton(R.string.button_cancel, null)
-            .show()
+            .create()
+            .let { SecureScreens.show(it) }
     }
 
     // -------------------------------------------------------------------------
