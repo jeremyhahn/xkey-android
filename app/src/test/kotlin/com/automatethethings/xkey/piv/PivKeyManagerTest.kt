@@ -35,6 +35,7 @@ import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.bouncycastle.asn1.x500.X500Name
@@ -735,6 +736,110 @@ class PivKeyManagerTest {
 
         assertEquals(PivAlgorithm.ED25519, info.algorithm)
         assertArrayEquals(edKey.public.encoded, info.publicKeyDer)
+    }
+
+    // -------------------------------------------------------------------------
+    // Slot users during a regenerate
+    // -------------------------------------------------------------------------
+
+    /**
+     * Slot 9A holds an ES384 key A; another manager regenerates it as ES256
+     * key B. A sign that starts once the Keystore holds B and before B's row
+     * is written must wait for the row and sign with B as ES256, never pair
+     * A's ES384 row with B.
+     */
+    @Test
+    fun `sign during a regenerate waits for it and signs with the new key's algorithm`() = runTest(StandardTestDispatcher()) {
+        val oldKey = KeyPairGenerator.getInstance("EC").apply { initialize(ECGenParameterSpec("secp384r1")) }
+            .generateKeyPair()
+        val newKey = PivTestCertificates.ecKeyPair()
+        val message = "signed during a regenerate".toByteArray()
+
+        val signature = whileRegenerating(
+            oldKey,
+            PivTestCertificates.slotRow(oldKey.public.encoded, algorithm = PivAlgorithm.ES384),
+            PivAlgorithm.ES256,
+            newKey
+        ) { manager().sign(PivSlot.AUTHENTICATION, message) }
+
+        val verifier = Signature.getInstance("SHA256withECDSA").apply {
+            initVerify(newKey.public)
+            update(message)
+        }
+        assertTrue("the signature is not B's ES256 signature", verifier.verify(signature))
+    }
+
+    /** As for sign: an agree during an ES256-to-X25519 regenerate agrees with the new X25519 key. */
+    @Test
+    fun `agree during a regenerate waits for it and agrees with the new key`() = runTest(StandardTestDispatcher()) {
+        val newKey = PivTestCertificates.x25519KeyPair()
+        val peer = PivTestCertificates.x25519KeyPair()
+        val peerRaw = PivPublicKeyEncoding.pivPublicKeyValue(peer.public.encoded)
+
+        val secret = whileRegenerating(
+            slotKey,
+            PivTestCertificates.slotRow(slotKey.public.encoded),
+            PivAlgorithm.X25519,
+            newKey
+        ) { manager().agree(PivSlot.AUTHENTICATION, peerRaw) }
+
+        val expected = KeyAgreement.getInstance("XDH").run {
+            init(peer.private)
+            doPhase(newKey.public, true)
+            generateSecret()
+        }
+        assertArrayEquals(expected, secret)
+    }
+
+    /**
+     * getCertificate during a regenerate from ES256 key A with an imported
+     * certificate to X25519 key B answers for B (no certificate), never A's.
+     */
+    @Test
+    fun `getCertificate during a regenerate waits for it and answers for the new key`() = runTest(StandardTestDispatcher()) {
+        val oldRow = PivTestCertificates.slotRow(slotKey.public.encoded, PivTestCertificates.selfSigned(slotKey))
+
+        val certificate = whileRegenerating(slotKey, oldRow, PivAlgorithm.X25519, PivTestCertificates.x25519KeyPair()) {
+            manager().getCertificate(PivSlot.AUTHENTICATION)
+        }
+
+        assertNull("the replaced key's certificate was returned", certificate)
+    }
+
+    /**
+     * Slot 9A holds [oldKey] with [oldRow]; a generation of [algorithm] makes
+     * [newKey] and is held after the Keystore holds it and before its row is
+     * written. [use] starts there, must not finish while the generation holds
+     * the slot, and its result is returned once the generation is done.
+     */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private suspend fun <T> TestScope.whileRegenerating(
+        oldKey: KeyPair,
+        oldRow: PivSlotEntity,
+        algorithm: PivAlgorithm,
+        newKey: KeyPair,
+        use: suspend () -> T
+    ): T {
+        keystore.live = oldKey
+        var row = oldRow
+        coEvery { pivSlotDao.getBySlotId("9A") } answers { row }
+        val upsertGate = CompletableDeferred<Unit>()
+        coEvery { pivSlotDao.upsert(any()) } coAnswers {
+            upsertGate.await()
+            row = firstArg()
+            1L
+        }
+
+        val generate = launch { manager(generates = newKey).generateKey(PivSlot.AUTHENTICATION, algorithm) }
+        runCurrent()
+        assertTrue("generate did not reach its upsert", keystore.live === newKey)
+        val using = async { use() }
+        runCurrent()
+        assertFalse("the slot was used while a generation held it", using.isCompleted)
+
+        upsertGate.complete(Unit)
+        generate.join()
+        return using.await()
     }
 
     /**
