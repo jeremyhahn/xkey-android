@@ -203,6 +203,7 @@ class TransparentBiometricActivityTest {
 
     @Test
     fun withNoEnrolledAuthenticator_reportsThePromptErrorAndEchoesTheRequestId() {
+        assumeNoEnrolledStrongBiometric()
         val requestId = newRequestId()
 
         awaitResultFor(TransparentBiometricActivity.createIntent(context, requestId))
@@ -229,6 +230,7 @@ class TransparentBiometricActivityTest {
     /** The lock-screen flag takes a different configuration path through onCreate. */
     @Test
     fun lockScreenRequest_stillReportsAResult() {
+        assumeNoEnrolledStrongBiometric()
         val requestId = newRequestId()
 
         awaitResultFor(
@@ -252,6 +254,7 @@ class TransparentBiometricActivityTest {
     /** A description is added to the prompt builder only when one was supplied. */
     @Test
     fun aDescribedRequest_stillReportsAResult() {
+        assumeNoEnrolledStrongBiometric()
         val requestId = newRequestId()
 
         awaitResultFor(
@@ -272,11 +275,12 @@ class TransparentBiometricActivityTest {
 
     @Test
     fun theActivityTearsItselfDownAfterReporting() {
+        assumeNoEnrolledStrongBiometric()
         val scenario = ActivityScenario.launch<TransparentBiometricActivity>(
             TransparentBiometricActivity.createIntent(context, newRequestId())
         )
 
-        awaitCondition("The prompt activity should finish once it has reported") {
+        awaitCondition("The prompt activity should finish once it has reported", PROMPT_TIMEOUT_MS) {
             scenario.state == Lifecycle.State.DESTROYED
         }
     }
@@ -288,7 +292,7 @@ class TransparentBiometricActivityTest {
             TransparentBiometricActivity.createIntent(context, NotificationKeys.wakeOnly("uiTest-unqueued"))
         )
 
-        awaitCondition("The prompt activity should finish without prompting") {
+        awaitCondition("The prompt activity should finish without prompting", PROMPT_TIMEOUT_MS) {
             scenario.state == Lifecycle.State.DESTROYED
         }
     }
@@ -337,7 +341,7 @@ class TransparentBiometricActivityTest {
 
         assertTrue(
             "Expected a ${TransparentBiometricActivity.ACTION_BIOMETRIC_RESULT} broadcast",
-            latch.await(BROADCAST_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            latch.await(PROMPT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
         )
     }
 
@@ -348,8 +352,6 @@ class TransparentBiometricActivityTest {
     }
 
     companion object {
-        private const val BROADCAST_TIMEOUT_SECONDS = 15L
-
         /** Results captured by the registered receiver for the current test. */
         private val results = mutableListOf<Intent>()
     }
