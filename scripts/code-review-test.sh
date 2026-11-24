@@ -541,6 +541,11 @@ gfail() { : > "${G}/fail-$(gkey "$1")"; }                  # path
 RUNS_Q="/actions/workflows/3/runs?head_sha=${SHA}&status=queued&per_page=100"
 RUNS_P="/actions/workflows/3/runs?head_sha=${SHA}&status=in_progress&per_page=100"
 REVIEWS="/pulls/12/reviews?&per_page=100&page=1"
+live_pr() { # author head-repo: the live PR into main of o/r, labelled for review
+	jq -cn --arg a "$1" --arg h "$2" '{base: {ref: "main", repo: {full_name: "o/r"}}, head: {repo: {full_name: $h}}, user: {login: $a}, labels: [{name: "code-review"}, {name: "task:ready"}]}'
+}
+TRUSTED_AUTHORS=$(sed -n "s/^  TRUSTED_AUTHORS: '\(.*\)'$/\1/p" "${WORKFLOW}")
+TRUSTED_PR=$(sed -n "s/^  TRUSTED_PR: '\(.*\)'$/\1/p" "${WORKFLOW}")
 gate_setup() { # a code change, no twin, no verdict
 	rm -rf "${G}"
 	mkdir -p "${G}"
@@ -548,7 +553,7 @@ gate_setup() { # a code change, no twin, no verdict
 	gput /actions/runs/500 '{"id": 500, "workflow_id": 3}'
 	gput "${RUNS_Q}" '{"workflow_runs": []}'
 	gput "${RUNS_P}" '{"workflow_runs": []}'
-	gput /pulls/12 '{"base": {"ref": "main"}, "labels": [{"name": "code-review"}, {"name": "task:ready"}]}'
+	gput /pulls/12 "$(live_pr xkey-android-agent[bot] o/r)"
 	gput "${REVIEWS}" '[]'
 	gput "/pulls/12/reviews?&per_page=100&page=2" '[]'
 }
@@ -564,7 +569,7 @@ gate_run() {
 	RC=0
 	OUT=$(cd "${G}" && PATH="${T}/gbin:${PATH}" G="${G}" GH_API_TOKEN=t FORGE=github REVIEWER="${REVIEWER}" \
 		REPO_API="${GAPI}" PR_NUM=12 EVENT_SHA="${SHA}" BASE_SHA="${OTHER_SHA}" BASE_REF=main \
-		NO_REVIEW_PATHS='^docs/.+$' DOCS_PATHS='^docs/.+$' SCOPE_SKIP=false SCOPE_RESULT=success \
+		NON_CODE_PATHS='^docs/.+$' ROW_BRANCH='^row/[0-9]+-' HEAD_REF=row/1-x TRUSTED_AUTHORS="${TRUSTED_AUTHORS}" TRUSTED_PR="${TRUSTED_PR}" SCOPE_RESULT=success \
 		REVIEW_RESULT=skipped GITHUB_RUN_ID=500 bash "${T}/gate.sh" 2>&1) || RC=$?
 }
 reads() { jq -Rrs --arg p "$1" 'split("\n") | map(select(. == $p)) | length' "${G}/urls"; }
@@ -668,8 +673,8 @@ check "F an own run with no workflow fails closed over an approval" \
 gate_setup
 gverdict APPROVED
 gate_run
-check "F an approved head reads the live PR three times (base, holds before the exemption, holds after the twins)" \
-	"${RC} $(reads /pulls/12)" "0 3"
+check "F an approved head reads the live PR four times (base, holds before the exemption, the row check, holds after the twins)" \
+	"${RC} $(reads /pulls/12)" "0 4"
 gate_setup
 gverdict APPROVED
 gput /pulls/12 '{"base": {"ref": "dev"}, "labels": [{"name": "code-review"}]}'
@@ -687,7 +692,7 @@ gput "/compare/${OTHER_SHA}...${SHA}" '{"files": [{"filename": "docs/a.md"}]}'
 gput /pulls/12 '{"base": {"ref": "dev"}, "labels": []}'
 gate_run
 check "F a PR retargeted off BASE_REF fails a docs-only change too" \
-	"${RC} $(yn contains "${OUT}" "PR 12 was retargeted from main to dev;") $(yn contains "${OUT}" "no review is required")" "3 yes no"
+	"${RC} $(yn contains "${OUT}" "PR 12 was retargeted from main to dev;") $(yn contains "${OUT}" "no code changed")" "3 yes no"
 
 # (f) v5.12.11: the live hold fails closed and is read before the exemption.
 gate_setup
@@ -706,14 +711,22 @@ gate_setup
 gput "/compare/${OTHER_SHA}...${SHA}" '{"files": [{"filename": "docs/a.md"}]}'
 gate_run
 check "F a docs-only change with no hold passes with no review" \
-	"${RC} $(yn contains "${OUT}" "no review is required")" "0 yes"
+	"${RC} $(yn contains "${OUT}" "no code changed")" "0 yes"
+for who in "outsider o/r" "xkey-android-agent[bot] x/r"; do
+	gate_setup
+	gput "/compare/${OTHER_SHA}...${SHA}" '{"files": [{"filename": "docs/a.md"}]}'
+	gput /pulls/12 "$(live_pr ${who})"
+	gate_run
+	check "F a docs-only change from ${who} (an outside author or a fork) needs an approval" \
+		"${RC} $(yn contains "${OUT}" "fork or an untrusted author") $(yn contains "${OUT}" "no code changed")" "3 yes no"
+done
 for hold in needs-owner needs-coordinator; do
 	gate_setup
 	gput "/compare/${OTHER_SHA}...${SHA}" '{"files": [{"filename": "docs/a.md"}]}'
 	gput /pulls/12 "$(jq -cn --arg h "${hold}" '{base: {ref: "main"}, labels: [{name: "code-review"}, {name: $h}]}')"
 	gate_run
 	check "F a hold (${hold}) refuses an exempt change" \
-		"${RC} $(yn contains "${OUT}" "PR 12 is on hold (${hold})") $(yn contains "${OUT}" "no review is required")" "3 yes no"
+		"${RC} $(yn contains "${OUT}" "PR 12 is on hold (${hold})") $(yn contains "${OUT}" "no code changed")" "3 yes no"
 done
 gate_setup
 gverdict APPROVED
@@ -723,7 +736,7 @@ check "F a hold refuses an approval of the head" \
 	"${RC} $(yn contains "${OUT}" "PR 12 is on hold (needs-owner)") $(yn contains "${OUT}" "approved ${SHA}.")" "3 yes no"
 check "F the live hold is read before the exemption exit" \
 	"$(yn before "$(pos <(printf '%s' "${gate}") $'\n          holds\n          n=$(jq \'length\' <<<"$files")\n')" \
-		"$(pos <(printf '%s' "${gate}") 'no review is required.')")" yes
+		"$(pos <(printf '%s' "${gate}") 'no code changed')")" yes
 
 # (g) v5.12.11: get_all fails on a failed page, never a partial list.
 gate_setup
@@ -1053,7 +1066,7 @@ ctx() {
 			pull_request: {draft: $d, state: "open", head: {repo: {full_name: "o/r"}},
 				labels: ([{name: "code-review"}, {name: "task:ready"}] + (if $l == "" then [] else [{name: $l}] end) | unique)}}
 			+ (if $a == "labeled" then {label: {name: $l}} else {} end))},
-		needs: {scope: {outputs: {skip: "false"}}, review: {outputs: {agent: "opencode"}}}}'
+		needs: {scope: {outputs: {skip: "false", code: "true", row: "true"}}, review: {outputs: {agent: "opencode"}}}}'
 }
 b01() { if [ "$1" = true ]; then echo 1; else echo 0; fi; }
 # jobs_for SERVER ACTION LABEL DRAFT: "scope review opencode supersede gate:name"
