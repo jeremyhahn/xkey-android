@@ -461,6 +461,12 @@ class PivKeyManager(
         } else {
             val privateKey = keyStore.getKey(alias, null)
                 ?: throw IllegalStateException("No key found in Android Keystore for PIV slot ${slot.hexId} (${slot.label})")
+            if (set != null) {
+                // A hardware slot key signs with its own set: refuse any other before signing.
+                val live = keyStore.getCertificate(alias)?.publicKey?.encoded
+                    ?: throw UnsupportedAlgorithmException(set.wireName)
+                MlDsaParameterSet.requireSpkiSet(live, set)
+            }
 
             signatureAlgorithm = when (algorithm) {
                 PivAlgorithm.ES256 -> "SHA256withECDSA"

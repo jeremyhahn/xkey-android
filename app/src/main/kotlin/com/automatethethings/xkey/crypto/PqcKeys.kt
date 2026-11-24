@@ -47,6 +47,21 @@ enum class MlDsaParameterSet(
 
         /** The set whose SPKI OID is [oid], or null. */
         fun fromOid(oid: String): MlDsaParameterSet? = entries.firstOrNull { it.oid == oid }
+
+        /** The set an SPKI's algorithm OID names, or null for any other key. */
+        fun fromSpki(spki: ByteArray): MlDsaParameterSet? = runCatching {
+            fromOid(org.bouncycastle.asn1.x509.SubjectPublicKeyInfo.getInstance(spki).algorithm.algorithm.id)
+        }.getOrNull()
+
+        /**
+         * Refuses to go on unless [spki] is a [set] key: a key signs only with
+         * its own set, whatever set a caller asked for.
+         *
+         * @throws UnsupportedAlgorithmException if [spki] is not a [set] key.
+         */
+        fun requireSpkiSet(spki: ByteArray, set: MlDsaParameterSet) {
+            if (fromSpki(spki) != set) throw UnsupportedAlgorithmException(set.wireName)
+        }
     }
 }
 

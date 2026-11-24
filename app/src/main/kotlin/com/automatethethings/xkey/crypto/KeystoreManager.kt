@@ -1462,9 +1462,7 @@ class KeystoreManager(
     ): ByteArray = withAliasGate(alias) {
         val current = publicKeyDERAt(alias) ?: throw KeyNotFoundException(alias)
         if (!current.contentEquals(approvedPublicKeyDer)) throw ApprovedKeyChangedException(alias)
-        if (mlDsaSetOf(current) != set) {
-            throw UnsupportedAlgorithmException(set.wireName)
-        }
+        MlDsaParameterSet.requireSpkiSet(current, set)
         if (!keyStore.containsAlias(alias)) {
             try {
                 return@withAliasGate pqcStore.sign(alias, data, userAuthenticatedAt)
@@ -1525,13 +1523,6 @@ class KeystoreManager(
         )
         return spki
     }
-
-    /** The ML-DSA set an SPKI's algorithm OID names, or null for any other key. */
-    private fun mlDsaSetOf(spki: ByteArray): MlDsaParameterSet? = runCatching {
-        MlDsaParameterSet.fromOid(
-            org.bouncycastle.asn1.x509.SubjectPublicKeyInfo.getInstance(spki).algorithm.algorithm.id
-        )
-    }.getOrNull()
 
     // -------------------------------------------------------------------------
     // RSA Decryption
