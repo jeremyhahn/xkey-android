@@ -644,6 +644,24 @@ class KeyUseHandlerTest {
     }
 
     @Test
+    fun `software key material is zeroed after each HMAC use`() = runTest {
+        val requests = listOf(SW_HMAC_256, SW_HMAC_384, SW_HMAC_512).map { keyId ->
+            MethodNames.LOCAL_HMAC to """{"keyId":"$keyId","data":"$data"}"""
+        } + listOf(
+            // A key refused for its type.
+            MethodNames.LOCAL_HMAC to """{"keyId":"$SW_AES","data":"$data"}"""
+        )
+        requests.forEach { (method, params) ->
+            handedMaterial.clear()
+            call(method, params)
+            assertTrue("$method $params: the store handed out material", handedMaterial.isNotEmpty())
+            handedMaterial.forEach { material ->
+                assertTrue("$method $params: the key material is zeroed", material.all { it == 0.toByte() })
+            }
+        }
+    }
+
+    @Test
     fun `found - getPublicKey writes no audit entry`() = runTest {
         servedBy(PEER_OK) { result(call(MethodNames.LOCAL_GET_PUBLIC_KEY, """{"keyId":"$HW_EC","format":"der"}""")) }
         val keyUse = setOf(
