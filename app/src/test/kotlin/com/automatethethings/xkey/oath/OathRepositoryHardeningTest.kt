@@ -26,6 +26,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -181,7 +182,96 @@ class OathRepositoryHardeningTest {
         assertEquals(2L, dao.getByOathId(id)!!.counter)
     }
 
+    @Test
+    fun `an exhausted HOTP counter imports and then fails every generation without moving`() = runBlocking {
+        val ids = listOf(
+            repository.importFromUri("otpauth://hotp/h?secret=$SECRET&counter=9223372036854775807"),
+            repository.importStructured(
+                type = "hotp", issuer = null, accountName = "h2", secret = SECRET, counter = Long.MAX_VALUE
+            )
+        )
+        assertEquals(2, dao.count())
+
+        for (id in ids) {
+            repeat(2) { attempt ->
+                val error = failureOf { repository.generateCode(id) }
+                assertTrue("$id attempt $attempt: ${error?.javaClass}", error is OathCounterExhaustedException)
+                assertFalse("the message must not carry the secret", error!!.message.orEmpty().contains(SECRET))
+            }
+            assertEquals(Long.MAX_VALUE, dao.getByOathId(id)!!.counter)
+            assertEquals("integer", storedCounterType(id))
+        }
+    }
+
+    @Test
+    fun `the last HOTP counter value yields its code once and then the counter is exhausted`() = runBlocking {
+        val last = Long.MAX_VALUE - 1
+        val id = repository.addCredential(
+            issuer = "A", accountName = "hotp", secret = RFC_SEED, type = "HOTP", counter = last
+        )
+
+        val code = withTimeout(TIMEOUT_MS) { repository.generateCode(id) }
+
+        assertEquals(OathEngine.generateHotpCode(RFC_SEED, last, "SHA1", 6), code)
+        assertEquals(Long.MAX_VALUE, dao.getByOathId(id)!!.counter)
+        assertEquals("integer", storedCounterType(id))
+        val error = failureOf { repository.generateCode(id) }
+        assertTrue("${error?.javaClass}", error is OathCounterExhaustedException)
+        assertEquals(Long.MAX_VALUE, dao.getByOathId(id)!!.counter)
+    }
+
+    @Test
+    fun `an exhausted HOTP counter shows no code in the list or the details`() = runBlocking {
+        val id = repository.addCredential(
+            issuer = "A", accountName = "hotp", secret = RFC_SEED, type = "HOTP", counter = Long.MAX_VALUE
+        )
+
+        assertEquals(
+            OathCurrentCode.Unavailable,
+            OathCurrentCode.currentCode(dao.getByOathId(id)!!, { it.secretEncrypted }, System.currentTimeMillis())
+        )
+        val row = repository.observeAll().first().single { it.credential.oathId == id }
+        assertEquals(OathRepository.NO_CODE, row.code)
+        assertTrue(row.codeError)
+    }
+
+    @Test
+    fun `a claim that never succeeds without the counter moving ends in an error, not a loop`() = runBlocking {
+        val id = repository.addCredential(
+            issuer = "A", accountName = "hotp", secret = RFC_SEED, type = "HOTP", counter = 3
+        )
+        val stuck = OathRepository(
+            object : OathCredentialDao by dao {
+                override suspend fun claimCounter(oathId: String, expected: Long): Int = 0
+            },
+            secretManager
+        )
+
+        val error = failureOf { stuck.generateCode(id) }
+
+        assertTrue("${error?.javaClass}", error is IllegalStateException)
+        assertFalse("not an exhausted counter", error is OathCounterExhaustedException)
+        assertFalse("the message must not carry the secret", error!!.message.orEmpty().contains("1234567890"))
+        assertEquals(3L, dao.getByOathId(id)!!.counter)
+    }
+
+    /** What [block] throws, bounded so a claim loop fails the test instead of hanging it. */
+    private suspend fun failureOf(block: suspend () -> Unit): Throwable? =
+        runCatching { withTimeout(TIMEOUT_MS) { block() } }.exceptionOrNull()
+
+    /** The SQLite storage class of the row's counter: a claim past the maximum would store a REAL. */
+    private fun storedCounterType(oathId: String): String =
+        database.openHelper.readableDatabase
+            .query("SELECT typeof(counter) FROM oath_credentials WHERE oath_id = ?", arrayOf<Any?>(oathId))
+            .use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                cursor.getString(0)
+            }
+
     private companion object {
+        /** Long enough for any real generation; a claim loop runs into it. */
+        const val TIMEOUT_MS = 5_000L
+
         /** The RFC 4226 appendix D seed. */
         val RFC_SEED = "12345678901234567890".toByteArray(Charsets.US_ASCII)
 

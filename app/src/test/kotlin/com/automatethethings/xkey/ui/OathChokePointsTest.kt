@@ -100,6 +100,24 @@ class OathChokePointsTest {
     }
 
     @Test
+    fun theHotpCounterAdvancesOnlyBelowItsMaximum() {
+        assertEquals(
+            "counter + 1 outside OathCredentialDao.claimCounter",
+            mapOf("oath/OathCredentialDao.kt" to 1),
+            occurrences(Regex("""counter \+ 1"""))
+        )
+        val advance = sourceRoot.resolve("oath/OathCredentialDao.kt").readLines().single { "counter + 1" in it }
+        assertTrue(
+            "claimCounter advances the counter past Long.MAX_VALUE: $advance",
+            "@Query" in advance && "counter < 9223372036854775807" in advance
+        )
+        assertTrue(
+            "generateCode claims in a loop with no progress check",
+            occurrences(Regex("""while \(!claimed\)""")).isEmpty()
+        )
+    }
+
+    @Test
     fun noCallerPassesACapturedCode() {
         val mentions = sourceRoot.walkTopDown()
             .filter { it.isFile && it.extension == "kt" && "shownCode" in it.readText() }
