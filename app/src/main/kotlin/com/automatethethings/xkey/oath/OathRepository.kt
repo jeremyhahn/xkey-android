@@ -518,12 +518,19 @@ class OathRepository(
             ?: throw NoSuchElementException("No OATH credential found with oathId: $oathId")
 
         val code = when (credential.oathType) {
-            "TOTP" -> OathEngine.generateTotpCode(
-                secret = secretManager.decryptSecret(credential.secretEncrypted),
-                algorithm = credential.algorithm,
-                digits = credential.digits,
-                periodSeconds = credential.periodSeconds
-            )
+            "TOTP" -> {
+                val secret = secretManager.decryptSecret(credential.secretEncrypted)
+                try {
+                    OathEngine.generateTotpCode(
+                        secret = secret,
+                        algorithm = credential.algorithm,
+                        digits = credential.digits,
+                        periodSeconds = credential.periodSeconds
+                    )
+                } finally {
+                    secret.fill(0)
+                }
+            }
             "HOTP" -> {
                 // A code is handed out only once its counter value is claimed
                 // (compare-and-set, one statement): two callers that read the
@@ -540,12 +547,17 @@ class OathRepository(
                 var hotpCode: String
                 while (true) {
                     val tried = credential.counter
-                    hotpCode = OathEngine.generateHotpCode(
-                        secret = secretManager.decryptSecret(credential.secretEncrypted),
-                        counter = tried,
-                        algorithm = credential.algorithm,
-                        digits = credential.digits
-                    )
+                    val secret = secretManager.decryptSecret(credential.secretEncrypted)
+                    hotpCode = try {
+                        OathEngine.generateHotpCode(
+                            secret = secret,
+                            counter = tried,
+                            algorithm = credential.algorithm,
+                            digits = credential.digits
+                        )
+                    } finally {
+                        secret.fill(0)
+                    }
                     if (dao.claimCounter(oathId, tried) > 0) break
                     credential = dao.getByOathId(oathId)
                         ?: throw NoSuchElementException("No OATH credential found with oathId: $oathId")
