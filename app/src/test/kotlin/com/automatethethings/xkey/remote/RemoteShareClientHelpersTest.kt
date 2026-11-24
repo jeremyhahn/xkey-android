@@ -103,6 +103,19 @@ class RemoteShareClientHelpersTest {
         assertArrayEquals(ByteArray(16) { (it + 1).toByte() }, secret)
     }
 
+    @Test
+    fun `encodeWithSecret escapes a field name holding a quote or backslash`() {
+        assertRoundTrip(JSONObject(), "a\"b", byteArrayOf(1, 2, 3))
+        assertRoundTrip(JSONObject().put("key_id", "k1"), "c\\d", byteArrayOf(4, 5, 6))
+        assertRoundTrip(JSONObject().put("key_id", "k1"), "e\",\"key_id\":\"x", byteArrayOf(7))
+    }
+
+    @Test
+    fun `encodeWithSecret refuses a field the params already hold`() {
+        val params = JSONObject().put("key", "plain")
+        assertThrows(IllegalArgumentException::class.java) { encode(params, "key", byteArrayOf(1, 2)) }
+    }
+
     // parseShareResult
 
     private fun shareResult() = JSONObject().put("accepted", true).put("import_id", "imp-1").put("backend", "software")
