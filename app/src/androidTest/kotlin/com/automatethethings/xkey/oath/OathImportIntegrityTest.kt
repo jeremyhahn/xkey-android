@@ -43,7 +43,7 @@ import org.junit.runner.RunWith
  * counter 0 and only then advanced by an `UPDATE`. Anything failing between the
  * two left the credential permanently behind the server, which for HOTP means it
  * never authenticates again. The decisive check here uses a DAO that refuses
- * `updateCounter` outright, so the counter can only be correct if it was part of
+ * `updateCounter` and `claimCounter` outright, so the counter can only be correct if it was part of
  * the insert.
  *
  * The database is in-memory, so nothing touches the on-device credential table.
@@ -210,6 +210,13 @@ class OathImportIntegrityTest {
             throw AssertionError(
                 "importFromUri must not need a second write to set the counter " +
                     "(oathId=$oathId, counter=$counter)"
+            )
+        }
+
+        override suspend fun claimCounter(oathId: String, expected: Long): Int {
+            throw AssertionError(
+                "importFromUri must not need a second write to set the counter " +
+                    "(oathId=$oathId, counter=$expected)"
             )
         }
     }

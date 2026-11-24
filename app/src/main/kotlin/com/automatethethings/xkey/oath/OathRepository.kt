@@ -16,9 +16,11 @@ package com.automatethethings.xkey.oath
 
 import android.net.Uri
 import android.util.Log
+import com.automatethethings.xkey.audit.AuditLogger
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import java.net.URLEncoder
+import java.security.MessageDigest
 import java.util.UUID
 
 /**
@@ -41,6 +43,24 @@ data class OathCredentialWithCode(
     val secondsRemaining: Int,
     val codeError: Boolean = false
 )
+
+/** What [OathRepository.upsertStructured] did with one synced item. */
+enum class SyncMergeOutcome {
+    /** No row had the id: one was added. */
+    ADDED,
+
+    /** A row had the id: it was updated in place. */
+    UPDATED,
+
+    /** The id was deleted on the phone: nothing was written. */
+    DELETED,
+
+    /**
+     * A row had the id with other key material (secret, type, algorithm,
+     * digits or period): nothing was written and an audit entry names the id.
+     */
+    CONFLICT
+}
 
 /**
  * The `otpauth://` URI ([Key Uri Format](https://github.com/google/google-authenticator/wiki/Key-Uri-Format))
@@ -247,7 +267,158 @@ class OathRepository(
         return importParsed(uri, structuredLabel = true)
     }
 
+    /**
+     * Merge a credential a paired peer synced, under the peer's [oathId]: the
+     * one entry point that turns a synced item into an OATH row. The fields
+     * are decoded and validated as [importStructured] does them. While no
+     * row has [oathId] one is added under it. A row with other key material
+     * (secret, type, algorithm, digits or period) is a conflict: the wire
+     * item carries no timestamp, so nothing is written and an audit entry
+     * names the id. Otherwise the row's label is updated in place
+     * ([OathCredentialDao.updateSynced]), keeping its primary key,
+     * creation time and usage statistics, with the HOTP counter the larger
+     * of the stored one and [counter]. Merging the same item again therefore
+     * never adds a second row. An id deleted on the phone
+     * ([deleteCredential]) is never added back: the deletion check and each
+     * insert run in one DAO transaction
+     * ([OathCredentialDao.insertIfAbsentUnlessDeleted]), and a row still
+     * stored under a deleted id is removed.
+     *
+     * @return what the merge did with the item ([SyncMergeOutcome]).
+     * @throws IllegalArgumentException if [oathId] is blank or the fields are
+     *         invalid (for example a secret that is not Base32); nothing is written.
+     */
+    suspend fun upsertStructured(
+        oathId: String,
+        type: String,
+        issuer: String?,
+        accountName: String,
+        secret: String,
+        algorithm: String = "SHA1",
+        digits: Int = 6,
+        period: Int = 30,
+        counter: Long? = null
+    ): SyncMergeOutcome {
+        require(oathId.isNotBlank()) { "Missing OATH credential id" }
+        // A row an interrupted merge left beside the deletion record goes too, in the same transaction.
+        if (dao.removeIfDeleted(oathId)) return SyncMergeOutcome.DELETED
+        val otpType = type.lowercase()
+        val parsed = parseOathUri(
+            otpauthUri(
+                type = otpType,
+                issuer = issuer,
+                accountName = accountName,
+                secret = secret,
+                algorithm = algorithm,
+                digits = digits,
+                period = period,
+                counter = if (otpType == "hotp") counter ?: 0L else null
+            ),
+            structuredLabel = true
+        )
+        val encryptedSecret = secretManager.encryptSecret(parsed.secret)
+        val entity = OathCredentialEntity(
+            oathId = oathId,
+            oathType = parsed.type,
+            algorithm = parsed.algorithm,
+            digits = parsed.digits,
+            periodSeconds = parsed.periodSeconds,
+            counter = parsed.counter,
+            issuer = parsed.issuer,
+            accountName = parsed.accountName,
+            secretEncrypted = encryptedSecret,
+            source = "local",
+            createdAt = System.currentTimeMillis()
+        )
+        // Never REPLACE: that deletes the row and inserts a new one, losing its usage statistics.
+        // The deletion check and the insert are one transaction: a delete cannot land between them.
+        insertedUnlessDeleted(entity)?.let { return it }
+        val stored = dao.getByOathId(oathId)
+        if (stored != null && !sameKeyMaterial(stored, entity, parsed.secret)) {
+            // The wire item has no timestamp to say which copy is newer: the phone's key material is kept.
+            AuditLogger.logOathSyncConflict(oathId)
+            return SyncMergeOutcome.CONFLICT
+        }
+        val updated = dao.updateSynced(
+            oathId = oathId,
+            counter = entity.counter,
+            issuer = entity.issuer,
+            accountName = entity.accountName
+        )
+        if (updated > 0) return SyncMergeOutcome.UPDATED
+        // Gone between the insert and the update: added again only if the phone did not delete it.
+        return insertedUnlessDeleted(entity) ?: SyncMergeOutcome.UPDATED
+    }
+
+    /**
+     * Add [entity] through [OathCredentialDao.insertIfAbsentUnlessDeleted]:
+     * [SyncMergeOutcome.ADDED] or [SyncMergeOutcome.DELETED], or null when a
+     * row already has its oath id and nothing was written.
+     */
+    private suspend fun insertedUnlessDeleted(entity: OathCredentialEntity): SyncMergeOutcome? =
+        when (dao.insertIfAbsentUnlessDeleted(entity)) {
+            OATH_KEPT_DELETED -> SyncMergeOutcome.DELETED
+            -1L -> null
+            else -> SyncMergeOutcome.ADDED
+        }
+
+    /**
+     * True if [stored] has the same secret, type, algorithm, digits and
+     * period as [incoming] (whose plain secret is [incomingSecret]). A
+     * stored secret that cannot be decrypted counts as different, so the
+     * merge never replaces it.
+     */
+    private fun sameKeyMaterial(
+        stored: OathCredentialEntity,
+        incoming: OathCredentialEntity,
+        incomingSecret: ByteArray
+    ): Boolean {
+        if (!stored.oathType.equals(incoming.oathType, ignoreCase = true) ||
+            !stored.algorithm.equals(incoming.algorithm, ignoreCase = true) ||
+            stored.digits != incoming.digits ||
+            stored.periodSeconds != incoming.periodSeconds
+        ) {
+            return false
+        }
+        val storedSecret = try {
+            secretManager.decryptSecret(stored.secretEncrypted)
+        } catch (e: Exception) {
+            return false
+        }
+        return try {
+            MessageDigest.isEqual(storedSecret, incomingSecret)
+        } finally {
+            storedSecret.fill(0)
+        }
+    }
+
     private suspend fun importParsed(uri: String, structuredLabel: Boolean): String {
+        val parsed = parseOathUri(uri, structuredLabel)
+        return addCredential(
+            issuer = parsed.issuer,
+            accountName = parsed.accountName,
+            secret = parsed.secret,
+            type = parsed.type,
+            algorithm = parsed.algorithm,
+            digits = parsed.digits,
+            periodSeconds = parsed.periodSeconds,
+            counter = parsed.counter
+        )
+    }
+
+    /** The decoded fields of an `otpauth://` URI, as [parseOathUri] reads them. */
+    private class ParsedOath(
+        val issuer: String?,
+        val accountName: String,
+        val secret: ByteArray,
+        val type: String,
+        val algorithm: String,
+        val digits: Int,
+        val periodSeconds: Int,
+        val counter: Long
+    )
+
+    private fun parseOathUri(uri: String, structuredLabel: Boolean): ParsedOath {
         val parsed = Uri.parse(uri)
 
         require(parsed.scheme == "otpauth") {
@@ -308,7 +479,7 @@ class OathRepository(
             0L
         }
 
-        return addCredential(
+        return ParsedOath(
             issuer = issuer,
             accountName = accountName,
             secret = secret,
@@ -325,7 +496,12 @@ class OathRepository(
      *
      * For TOTP credentials, computes the code based on the current system time.
      * For HOTP credentials, computes the code using the stored counter value
-     * and automatically increments the counter after generation.
+     * and advances the counter by compare-and-set
+     * ([OathCredentialDao.claimCounter]): when the counter moved since it
+     * was read (a sync raised it, or another code took it), that code is
+     * discarded and the row read again, so no code is ever returned for a
+     * counter that is not the one the store moved past, and a counter a
+     * sync raised is never rewound.
      *
      * Records the usage timestamp and increments the use count in the database.
      *
@@ -352,7 +528,8 @@ class OathRepository(
                 // A code is handed out only once its counter value is claimed
                 // (compare-and-set, one statement): two callers that read the
                 // same counter (a desktop generate and a phone tap) cannot
-                // both claim it, so the loser re-reads and takes the next
+                // both claim it, and a sync that raised the counter makes the
+                // claim fail, so the loser re-reads and takes the current
                 // value. The code is computed before the claim, so a decrypt
                 // or engine failure never burns a counter value. A retry
                 // happens only when the counter moved on; otherwise the claim
@@ -444,12 +621,15 @@ class OathRepository(
      * Delete an OATH credential by its unique identifier.
      *
      * Removes the credential and its encrypted secret from the database.
-     * This operation is irreversible.
+     * This operation is irreversible. The id is recorded and the row deleted
+     * in one transaction ([OathCredentialDao.deleteAndRecordDeletion]), so
+     * a sync merge running at the same time, or any later one, never adds
+     * the credential back, and no interruption leaves one without the other.
      *
      * @param oathId The unique identifier of the credential to delete.
      */
     suspend fun deleteCredential(oathId: String) {
-        dao.deleteByOathId(oathId)
+        dao.deleteAndRecordDeletion(oathId, System.currentTimeMillis())
     }
 
     /**

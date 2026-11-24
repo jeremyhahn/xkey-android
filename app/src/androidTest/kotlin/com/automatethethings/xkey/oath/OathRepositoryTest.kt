@@ -558,6 +558,55 @@ class OathRepositoryTest {
     }
 
     @Test
+    fun deleteCredential_leavesTheDeletionRecordAndNoRow() = runBlocking {
+        val removed = repository.addCredential("Remove", "user", rfcSeed)
+
+        repository.deleteCredential(removed)
+
+        assertNull(dao.getByOathId(removed))
+        assertTrue(dao.isDeleted(removed))
+    }
+
+    @Test
+    fun insertIfAbsentUnlessDeleted_refusesADeletedIdAndRemovesItsLeftoverRow() = runBlocking {
+        val id = repository.addCredential("Synced", "user", rfcSeed)
+        val row = dao.getByOathId(id)!!
+        // The state an interrupted, non-atomic merge could leave: the row beside its deletion record.
+        dao.recordDeletion(id, System.currentTimeMillis())
+
+        val result = dao.insertIfAbsentUnlessDeleted(row.copy(id = 0))
+
+        assertEquals(OATH_KEPT_DELETED, result)
+        assertNull(dao.getByOathId(id))
+        assertTrue(dao.isDeleted(id))
+    }
+
+    @Test
+    fun insertIfAbsentUnlessDeleted_addsAnIdWithNoDeletionRecordOnce() = runBlocking {
+        val id = repository.addCredential("Synced", "user", rfcSeed)
+        val row = dao.getByOathId(id)!!
+        dao.deleteByOathId(id)
+
+        val first = dao.insertIfAbsentUnlessDeleted(row.copy(id = 0))
+        val second = dao.insertIfAbsentUnlessDeleted(row.copy(id = 0))
+
+        assertTrue(first > 0)
+        assertEquals(-1L, second)
+        assertEquals(1, dao.count())
+    }
+
+    @Test
+    fun deleteAndRecordDeletion_deletesTheRowAndRecordsTheId() = runBlocking {
+        val id = repository.addCredential("Synced", "user", rfcSeed)
+
+        dao.deleteAndRecordDeletion(id, System.currentTimeMillis())
+
+        assertNull(dao.getByOathId(id))
+        assertTrue(dao.isDeleted(id))
+        assertEquals(0, dao.count())
+    }
+
+    @Test
     fun deleteCredential_isSilentForAnUnknownId() = runBlocking {
         repository.addCredential("Keep", "user", rfcSeed)
 
