@@ -47,6 +47,7 @@ import com.automatethethings.xkey.storage.XKeyDatabase
 import com.google.android.material.appbar.MaterialToolbar
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.floatingactionbutton.ExtendedFloatingActionButton
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import java.util.UUID
 
@@ -79,7 +80,7 @@ class PasswordManagementActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         SecureScreens.protect(window)
 
-        adapter = PasswordAdapter { showDetailDialog(it) }
+        adapter = PasswordAdapter { openEntry(it) }
 
         val toolbarContainer = buildPremiumToolbar()
 
@@ -209,10 +210,45 @@ class PasswordManagementActivity : AppCompatActivity() {
 
     private fun reload() {
         lifecycleScope.launch {
-            val items = repository.list().sortedBy { (it.title ?: it.name).lowercase() }
+            // The list never decrypts: a password is decrypted only when its
+            // entry is opened, so one unreadable entry cannot break the screen.
+            val items = repository.listWithoutSecrets().sortedBy { (it.title ?: it.name).lowercase() }
             adapter.submit(items)
             emptyView.visibility = if (items.isEmpty()) android.view.View.VISIBLE else android.view.View.GONE
         }
+    }
+
+    /**
+     * Decrypts the entry behind the list row [listed] and shows it, or shows
+     * that it cannot be decrypted. The cause is not logged or shown: it could
+     * carry key material details and the user can only delete the entry.
+     */
+    private fun openEntry(listed: PasswordRecord) {
+        lifecycleScope.launch {
+            val record = try {
+                repository.get(listed.passwordId)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                showUnreadableDialog(listed)
+                return@launch
+            }
+            if (record == null) {
+                reload()
+                return@launch
+            }
+            showDetailDialog(record)
+        }
+    }
+
+    private fun showUnreadableDialog(record: PasswordRecord) {
+        MaterialAlertDialogBuilder(this)
+            .setTitle(record.title?.takeIf { it.isNotBlank() } ?: record.name)
+            .setMessage(R.string.password_unreadable)
+            .setNeutralButton(R.string.password_delete) { _, _ -> confirmDelete(record) }
+            .setNegativeButton(R.string.password_close, null)
+            .create()
+            .let { SecureScreens.show(it) }
     }
 
     private fun labeledField(label: String, password: Boolean = false): Pair<LinearLayout, EditText> {
