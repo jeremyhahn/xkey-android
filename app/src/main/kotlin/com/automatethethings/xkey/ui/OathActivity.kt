@@ -14,9 +14,7 @@
  */
 package com.automatethethings.xkey.ui
 
-import android.content.ClipData
 import android.content.ComponentName
-import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
@@ -62,12 +60,11 @@ import com.google.android.material.floatingactionbutton.ExtendedFloatingActionBu
 import com.google.android.material.snackbar.Snackbar
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.launch
-import java.text.DateFormat
-import java.util.Date
 
 /**
  * Premium activity for managing OATH (TOTP/HOTP) authenticator credentials.
@@ -88,6 +85,7 @@ class OathActivity : AppCompatActivity() {
     // -------------------------------------------------------------------------
 
     private lateinit var repository: OathRepository
+    private lateinit var codeClipboard: OathCodeClipboard
     private lateinit var adapter: OathAdapter
 
     private lateinit var rootLayout: FrameLayout
@@ -137,9 +135,12 @@ class OathActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Codes stay out of screenshots, recordings and the recents thumbnail.
+        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
 
         val db = XKeyDatabase.getInstance(this)
         repository = OathRepository(db.oathCredentialDao(), OathSecretManager())
+        codeClipboard = OathCodeClipboard.create(this, repository)
         desktopActions = OathDesktopActions(
             desktop = { gattService?.connectedDesktop() },
             links = PrefsDesktopOathLinks(
@@ -356,7 +357,7 @@ class OathActivity : AppCompatActivity() {
 
     private fun buildKeyList() {
         adapter = OathAdapter(
-            onItemClick = { item -> copyCodeToClipboard(item) },
+            onItemClick = { item -> copyCodeToClipboard(item.credential.oathId) },
             onItemLongClick = { item ->
                 showContextMenu(item)
                 true
@@ -585,7 +586,12 @@ class OathActivity : AppCompatActivity() {
                 }
 
                 ticker.flatMapLatest {
-                    repository.observeAll()
+                    // A failure reading the table keeps the last list on
+                    // screen until the next tick, not a crash on every open.
+                    repository.observeAll().catch { e ->
+                        if (e is kotlinx.coroutines.CancellationException) throw e
+                        android.util.Log.w("OathActivity", "OATH list not refreshed: ${e.javaClass.simpleName}")
+                    }
                 }.collectLatest { credentials ->
                     updateUI(credentials)
                     updateSummaryCard(credentials)
@@ -656,16 +662,30 @@ class OathActivity : AppCompatActivity() {
     // Actions
     // -------------------------------------------------------------------------
 
-    private fun copyCodeToClipboard(item: OathCredentialWithCode) {
-        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        val clip = ClipData.newPlainText("OTP Code", item.code)
-        clipboard.setPrimaryClip(clip)
-
-        Snackbar.make(
-            rootLayout,
-            R.string.oath_code_copied,
-            Snackbar.LENGTH_SHORT
-        ).show()
+    /**
+     * Copies the code of [oathId] as it is now through [OathCodeClipboard]:
+     * a sensitive clip, and for HOTP the code at the stored counter, which
+     * then advances (the list moves on to the next counter's code). Callers
+     * pass only the id, never a code they showed earlier.
+     */
+    private fun copyCodeToClipboard(oathId: String) {
+        lifecycleScope.launch {
+            try {
+                codeClipboard.copy(oathId)
+                Snackbar.make(
+                    rootLayout,
+                    R.string.oath_code_copied,
+                    Snackbar.LENGTH_SHORT
+                ).show()
+            } catch (e: Exception) {
+                // The exception text can quote key material: one generic message.
+                Snackbar.make(
+                    rootLayout,
+                    R.string.oath_code_unavailable,
+                    Snackbar.LENGTH_SHORT
+                ).show()
+            }
+        }
     }
 
     override fun onDestroy() {
@@ -684,29 +704,24 @@ class OathActivity : AppCompatActivity() {
         // Bound to the desktop connected as the menu opens, not to whichever
         // is connected when an entry is picked.
         val desktopMenu = desktopActions.openMenu(item.credential)
-        val desktopEntries = desktopMenu.entries
-        val labels = mutableListOf(
-            getString(R.string.oath_context_view_details),
-            getString(R.string.oath_context_delete)
-        )
-        desktopEntries.forEach { entry ->
-            labels += when (entry) {
-                OathDesktopActions.Entry.COPY -> getString(R.string.oath_context_copy_to_desktop)
-                OathDesktopActions.Entry.DESKTOP_CODE -> getString(R.string.oath_context_desktop_code)
-            }
-        }
+        val menu = OathListMenu(desktopMenu.entries)
+        val labels = menu.labels.map { getString(it) }
+        // Copy keeps only the id: the code is generated when Copy is picked,
+        // not the one shown as the menu opened.
+        val oathId = item.credential.oathId
 
         MaterialAlertDialogBuilder(this)
             .setTitle(displayName)
             .setItems(labels.toTypedArray()) { _, which ->
-                when (which) {
-                    0 -> showCredentialDetails(item)
-                    1 -> showDeleteConfirmation(item)
-                    else -> when (desktopEntries.getOrNull(which - 2)) {
-                        OathDesktopActions.Entry.COPY -> copyToDesktop(desktopMenu)
-                        OathDesktopActions.Entry.DESKTOP_CODE -> showDesktopCode(desktopMenu)
-                        null -> Unit
-                    }
+                when (menu.actionAt(which)) {
+                    OathListMenu.Action.COPY -> copyCodeToClipboard(oathId)
+                    OathListMenu.Action.DELETE -> showDeleteConfirmation(item)
+                    OathListMenu.Action.DETAILS -> startActivity(
+                        OathCredentialDetailActivity.intent(this, item.credential.oathId)
+                    )
+                    OathListMenu.Action.COPY_TO_DESKTOP -> copyToDesktop(desktopMenu)
+                    OathListMenu.Action.DESKTOP_CODE -> showDesktopCode(desktopMenu)
+                    null -> Unit
                 }
             }
             .show()
@@ -785,76 +800,6 @@ class OathActivity : AppCompatActivity() {
         // The ticker's delay runs on uptime, which stops in deep sleep: show
         // the code's state on the sleep-inclusive deadline at once.
         desktopCodeRefresh?.invoke()
-    }
-
-    private fun showCredentialDetails(item: OathCredentialWithCode) {
-        val cred = item.credential
-        val dateFormat = DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT)
-
-        val container = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            val hPad = (24 * resources.displayMetrics.density).toInt()
-            val vPad = (16 * resources.displayMetrics.density).toInt()
-            setPadding(hPad, vPad, hPad, 0)
-        }
-
-        fun addRow(label: String, value: String) {
-            val row = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                val bottomPad = (12 * resources.displayMetrics.density).toInt()
-                setPadding(0, 0, 0, bottomPad)
-            }
-
-            row.addView(TextView(this).apply {
-                text = label
-                setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_LabelSmall)
-                setTextColor(ContextCompat.getColor(this@OathActivity, android.R.color.darker_gray))
-            })
-
-            row.addView(TextView(this).apply {
-                text = value
-                setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_BodyMedium)
-            })
-
-            container.addView(row)
-        }
-
-        cred.issuer?.let { addRow(getString(R.string.oath_detail_issuer), it) }
-        addRow(getString(R.string.oath_detail_account), cred.accountName)
-        addRow(getString(R.string.oath_detail_type), cred.oathType)
-        addRow(getString(R.string.oath_detail_algorithm), cred.algorithm)
-        addRow(getString(R.string.oath_detail_digits), cred.digits.toString())
-
-        if (cred.oathType == "TOTP") {
-            addRow(
-                getString(R.string.oath_detail_period),
-                getString(R.string.oath_detail_period_value, cred.periodSeconds)
-            )
-        } else {
-            addRow(getString(R.string.oath_detail_counter), cred.counter.toString())
-        }
-
-        addRow(getString(R.string.oath_detail_source), cred.source.replaceFirstChar { it.uppercase() })
-        addRow(getString(R.string.oath_detail_created), dateFormat.format(Date(cred.createdAt)))
-        addRow(
-            getString(R.string.oath_detail_last_used),
-            if (cred.lastUsedAt != null) dateFormat.format(Date(cred.lastUsedAt))
-            else getString(R.string.oath_detail_never_used)
-        )
-        addRow(
-            getString(R.string.oath_detail_use_count),
-            getString(R.string.oath_detail_times_used, cred.useCount)
-        )
-        addRow(
-            getString(R.string.oath_detail_security),
-            getString(R.string.oath_detail_security_value)
-        )
-
-        MaterialAlertDialogBuilder(this)
-            .setTitle(R.string.oath_detail_title)
-            .setView(container)
-            .setPositiveButton(android.R.string.ok, null)
-            .show()
     }
 
     private fun showDeleteConfirmation(item: OathCredentialWithCode) {

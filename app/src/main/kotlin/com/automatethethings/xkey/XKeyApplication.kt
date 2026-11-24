@@ -9,6 +9,7 @@ import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.settings.PairedDeviceGrantCleanup
 import com.automatethethings.xkey.settings.PairedDeviceRepository
 import com.automatethethings.xkey.storage.XKeyDatabase
+import com.automatethethings.xkey.ui.ClipboardFocusRetry
 import com.automatethethings.xkey.ui.PromptActivityTracker
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -29,6 +30,8 @@ class XKeyApplication : Application() {
         createNotificationChannels()
         initializeAuditLogger()
         registerGrantCleanup()
+        // Finish a copied secret's pending clipboard clear from any screen.
+        registerActivityLifecycleCallbacks(ClipboardFocusRetry)
     }
 
     /**

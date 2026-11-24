@@ -126,11 +126,11 @@ class OathImportIntegrityTest {
     fun importFromUri_doesNotTurnAMistypedSecretIntoTheLetterSpelling() {
         // Under the old fold these two produced byte-identical credentials, so a
         // typo was indistinguishable from the secret the service issued.
-        val spelled = runBlocking { repository.importFromUri("otpauth://totp/spelled?secret=OLBL3333") }
+        val spelled = runBlocking { repository.importFromUri("otpauth://totp/spelled?secret=OLBL3333OLBL3333") }
 
-        assertTrue(importFailure("otpauth://totp/typo?secret=01813333") is IllegalArgumentException)
+        assertTrue(importFailure("otpauth://totp/typo?secret=0181333301813333") is IllegalArgumentException)
         assertEquals("only the valid spelling may be stored", 1, runBlocking { dao.count() })
-        assertEquals("eight Base32 characters carry five whole bytes", 5, storedSecret(spelled).size)
+        assertEquals("sixteen Base32 characters carry ten whole bytes", 10, storedSecret(spelled).size)
     }
 
     @Test
