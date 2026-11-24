@@ -20,7 +20,9 @@ import android.os.Looper
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
+import android.widget.TextView
 import androidx.recyclerview.widget.RecyclerView
+import com.automatethethings.xkey.R
 import com.automatethethings.xkey.crypto.KeystoreAeadCipher
 import com.automatethethings.xkey.password.PasswordDao
 import com.automatethethings.xkey.password.PasswordEntity
@@ -31,7 +33,9 @@ import io.mockk.coEvery
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.unmockkAll
+import io.mockk.verify
 import org.junit.After
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -108,8 +112,44 @@ class PasswordManagementActivityTest {
         assertSecure(dialog.window!!.attributes.flags)
     }
 
+    @Test
+    fun `the list shows every entry and decrypts none of them`() {
+        stored(
+            entity("pw-bad", "Alpha", byteArrayOf(0x00, 0x01)),
+            entity("pw-good", "Beta", sealed(fixtureSecret(2)))
+        )
+        val activity = launch()
+
+        assertEquals(2, recycler(activity).adapter!!.itemCount)
+        verify(exactly = 0) { cipher.decrypt(any()) }
+    }
+
+    @Test
+    fun `an entry that cannot be decrypted opens an error and the others still open`() {
+        stored(
+            entity("pw-bad", "Alpha", byteArrayOf(0x00, 0x01)),
+            entity("pw-good", "Beta", sealed(fixtureSecret(2)))
+        )
+        val activity = launch()
+
+        clickRow(activity, 0)
+        assertEquals(
+            activity.getString(R.string.password_unreadable),
+            dialogMessage(ShadowDialog.getLatestDialog())
+        )
+
+        clickRow(activity, 1)
+        assertTrue(
+            "the good entry's detail shows its password",
+            dialogMessage(ShadowDialog.getLatestDialog()).contains(fixtureSecret(2))
+        )
+    }
+
     // -------------------------------------------------------------------------
     // Fixtures
+
+    private fun dialogMessage(dialog: Dialog): String =
+        dialog.findViewById<TextView>(android.R.id.message).text.toString()
     // -------------------------------------------------------------------------
 
     private fun assertSecure(flags: Int) {
