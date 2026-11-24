@@ -21,6 +21,9 @@ import android.content.Context
 import android.os.Looper
 import android.util.Log
 import androidx.biometric.BiometricManager
+import com.automatethethings.xkey.auth.BiometricActivityLauncher
+import com.automatethethings.xkey.crypto.BiometricRequiredException
+import com.automatethethings.xkey.crypto.CryptoObjectSigner
 import com.automatethethings.xkey.crypto.KeySecurityLevel
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.crypto.MlDsaParameterSet
@@ -57,6 +60,7 @@ import kotlinx.coroutines.test.setMain
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import org.junit.After
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -80,6 +84,8 @@ class LocalGenerateKeyMlDsaHandlerTest {
     private lateinit var handler: RequestHandler
     private lateinit var keystore: KeystoreManager
     private lateinit var keyDao: KeyDao
+    private lateinit var handlerContext: Context
+    private lateinit var pairedDevices: PairedDeviceRepository
     private val savedBackend = PqcHardware.backend
 
     /** The backing of every generateMlDsaKey call, in order. */
@@ -131,6 +137,7 @@ class LocalGenerateKeyMlDsaHandlerTest {
             ByteArray(MlDsaParameterSet.ML_DSA_65.signatureBytes) { 9 }
 
         val context = mockk<Context>(relaxed = true)
+        handlerContext = context
         every { context.filesDir } returns tmp.root
         every { context.applicationContext } returns context
         every { context.getSystemService(Context.KEYGUARD_SERVICE) } returns mockk<KeyguardManager>(relaxed = true)
@@ -138,7 +145,7 @@ class LocalGenerateKeyMlDsaHandlerTest {
             mockk<NotificationManager>(relaxed = true)
         mockkStatic(BiometricManager::class)
         every { BiometricManager.from(any()) } returns mockk(relaxed = true)
-        val pairedDevices = mockk<PairedDeviceRepository>()
+        pairedDevices = mockk<PairedDeviceRepository>()
         every { pairedDevices.lookupDevice(any()) } returns DeviceLookup.Paired(device())
 
         handler = RequestHandler(
@@ -347,6 +354,41 @@ class LocalGenerateKeyMlDsaHandlerTest {
 
         assertError(ErrorCodes.INVALID_ALGORITHM, response)
         coVerify(exactly = 0) { keystore.signApprovedMlDsa(any(), any(), any(), any()) }
+    }
+
+    @Test
+    fun `sign of a per-operation hardware key binds the Signature to the prompt, with no generic prompt`() = runTest {
+        val alias = KeystoreManager.generalKeyAlias("pq")
+        val launcher = mockk<BiometricActivityLauncher>(relaxed = true)
+        val boundSignature = ByteArray(MlDsaParameterSet.ML_DSA_65.signatureBytes) { 5 }
+        coEvery {
+            launcher.requestCryptoSignature(any(), any(), any(), any(), any(), alias, "ML-DSA-65", any())
+        } returns boundSignature
+        every { keystore.isPerOperationKey(alias) } returns true
+        coEvery { keystore.signApprovedMlDsa(alias, spki, any(), MlDsaParameterSet.ML_DSA_65, any(), any()) } coAnswers {
+            val signer = arg<CryptoObjectSigner?>(5) ?: throw BiometricRequiredException()
+            signer.sign(alias, "ML-DSA-65", thirdArg())
+        }
+        handler = RequestHandler(
+            context = handlerContext,
+            keystoreManager = keystore,
+            biometricLauncher = launcher,
+            sessionAuthManager = null,
+            pairedDeviceRepository = pairedDevices,
+            pinManager = mockk(relaxed = true)
+        )
+        handler.setConnectedDevicePublicKeyHex(PEER)
+        val data = Base64.getEncoder().encodeToString("to sign".toByteArray())
+
+        val response = call(MethodNames.LOCAL_SIGN, """{"keyId":"pq","data":"$data","userVerificationRequired":true}""")
+
+        val result = response.optJSONObject("result")
+        assertTrue("sign must succeed, got $response", result != null)
+        assertArrayEquals(boundSignature, Base64.getDecoder().decode(result!!.getString("signature")))
+        coVerify(exactly = 0) { launcher.requestAuthentication(any(), any(), any(), any(), any()) }
+        coVerify(exactly = 1) {
+            launcher.requestCryptoSignature("pq", "to sign".toByteArray(), any(), any(), any(), alias, "ML-DSA-65", any())
+        }
     }
 
     @Test
