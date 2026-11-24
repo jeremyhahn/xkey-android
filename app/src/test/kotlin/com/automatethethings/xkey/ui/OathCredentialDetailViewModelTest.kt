@@ -18,6 +18,7 @@ import com.automatethethings.xkey.oath.OathCredentialEntity
 import com.automatethethings.xkey.ui.OathCredentialDetailUiState.Gone
 import com.automatethethings.xkey.ui.OathCredentialDetailUiState.Shown
 import io.mockk.coEvery
+import io.mockk.coVerify
 import io.mockk.mockk
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
@@ -163,6 +164,44 @@ class OathCredentialDetailViewModelTest {
         val d = (vm.state.value as Shown).details
         assertEquals(1L, d.counter)
         assertEquals("287082", d.code)
+    }
+
+    @Test
+    fun `a secret that cannot be decrypted still shows the metadata without a code`() = runBlocking {
+        rows["totp"] = totp()
+        val vm = OathCredentialDetailViewModel(
+            oathId = "totp",
+            load = { rows[it] },
+            secretOf = { throw IllegalStateException("key invalidated") },
+            clock = { 59_000L }
+        )
+
+        assertUnavailable(vm, "totp", "TOTP")
+    }
+
+    @Test
+    fun `a stored value the engine refuses still shows the metadata without a code`() = runBlocking {
+        rows["bad"] = totp(oathId = "bad", digits = 99)
+        rows["md5"] = totp(oathId = "md5").copy(oathType = "HOTP", algorithm = "MD5", counter = 3)
+
+        assertUnavailable(viewModel("bad"), "bad", "TOTP")
+        assertUnavailable(viewModel("md5"), "md5", "HOTP")
+    }
+
+    private suspend fun assertUnavailable(vm: OathCredentialDetailViewModel, oathId: String, type: String) {
+        val refreshed = runCatching { vm.refresh() }
+        assertTrue("refresh threw: ${refreshed.exceptionOrNull()}", refreshed.isSuccess)
+        val d = (vm.state.value as Shown).details
+        assertEquals(oathId, d.oathId)
+        assertEquals("Example", d.issuer)
+        assertEquals("user@example.com", d.accountName)
+        assertEquals(type, d.type)
+        assertNull(d.code)
+        assertNull(d.secondsLeft)
+
+        val clipboard = mockk<OathCodeClipboard>()
+        assertNull(vm.copy(clipboard))
+        coVerify(exactly = 0) { clipboard.copy(any(), any()) }
     }
 
     @Test
