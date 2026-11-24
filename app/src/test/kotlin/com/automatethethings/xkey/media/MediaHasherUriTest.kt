@@ -216,8 +216,17 @@ class MediaHasherUriTest {
     }
 
     @Test
-    fun `hashCanonicalUri hashes anything but a JPEG whole`() {
+    fun `hashCanonicalUri of JPEG content is canonical whatever the type`() {
         val data = jpeg("camera=test")
+
+        for (type in listOf("video/mp4", "application/octet-stream", null)) {
+            assertEquals("type $type", MediaHasher.hashCanonical(data, "image/jpeg"), hashCanonicalUri(data, type))
+        }
+    }
+
+    @Test
+    fun `hashCanonicalUri hashes anything but a JPEG whole`() {
+        val data = jpeg("camera=test").copyOfRange(2, 60)
 
         for (type in listOf("video/mp4", "image/png", null)) {
             assertEquals("type $type", MediaHasher.hashBytes(data), hashCanonicalUri(data, type))
@@ -254,20 +263,36 @@ class MediaHasherUriTest {
     }
 
     // -------------------------------------------------------------------------
-    // isCanonicalisedJpeg
+    // isJpeg
     // -------------------------------------------------------------------------
 
     @Test
-    fun `isCanonicalisedJpeg accepts the JPEG types in any case and with parameters`() {
+    fun `isJpeg accepts the JPEG types in any case and with parameters`() {
         for (type in listOf("image/jpeg", "image/jpg", "IMAGE/JPEG", "image/jpeg; q=1")) {
-            assertTrue(type, MediaHasher.isCanonicalisedJpeg(type))
+            assertTrue(type, MediaHasher.isJpeg(type))
         }
     }
 
     @Test
-    fun `isCanonicalisedJpeg rejects every other type`() {
+    fun `isJpeg rejects every other type with no name or content`() {
         for (type in listOf(null, "", "image/png", "video/mp4", "application/jpeg")) {
-            assertFalse("type $type", MediaHasher.isCanonicalisedJpeg(type))
+            assertFalse("type $type", MediaHasher.isJpeg(type))
         }
+    }
+
+    @Test
+    fun `isJpeg accepts a jpg or jpeg name whatever the type`() {
+        for (name in listOf("a.jpg", "B.JPEG", "/x/c.Jpg")) {
+            assertTrue(name, MediaHasher.isJpeg("application/octet-stream", name))
+        }
+        assertFalse(MediaHasher.isJpeg(null, "a.png"))
+    }
+
+    @Test
+    fun `isJpeg accepts content that starts with the JPEG SOI whatever the type`() {
+        val head = jpeg("camera=test").copyOf(MediaHasher.JPEG_HEAD_SIZE)
+        assertTrue(MediaHasher.isJpeg("application/octet-stream", "capture.bin", head))
+        assertFalse(MediaHasher.isJpeg(null, null, byteArrayOf(0xFF.toByte(), 0xD8.toByte())))
+        assertFalse(MediaHasher.isJpeg(null, null, byteArrayOf(0x89.toByte(), 0x50, 0x4E)))
     }
 }

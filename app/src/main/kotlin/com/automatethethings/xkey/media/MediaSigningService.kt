@@ -83,8 +83,8 @@ internal object AutoSignHash {
 
     /**
      * [contentHash] over the content at [uri], typed by [mimeType] (the
-     * resolver's type unless given). Media other than JPEG is hashed whole
-     * by streaming ([MediaHasher.hashUri]):
+     * resolver's type unless given). Content [MediaHasher.isJpeg] says is not
+     * a JPEG, by the type or its first bytes, is hashed whole by streaming:
      * its signature goes to a sidecar, and for it the canonical hash is the
      * whole-file hash. A JPEG above [limit] bytes throws [TooLargeException].
      */
@@ -94,24 +94,29 @@ internal object AutoSignHash {
         limit: Int = MAX_CANONICAL_JPEG_BYTES,
         mimeType: String? = contentResolver.getType(uri)
     ): String {
-        if (!MediaHasher.isCanonicalisedJpeg(mimeType)) return MediaHasher.hashUri(contentResolver, uri)
-        val bytes = contentResolver.openInputStream(uri)?.use { readAtMost(it, limit) }
+        val input = contentResolver.openInputStream(uri)?.buffered()
             ?: throw IllegalArgumentException("Cannot open URI: $uri")
-        return contentHash(bytes, mimeType)
+        return input.use { stream ->
+            stream.mark(MediaHasher.JPEG_HEAD_SIZE)
+            val head = MediaHasher.readFully(stream, MediaHasher.JPEG_HEAD_SIZE)
+            stream.reset()
+            if (MediaHasher.isJpeg(mimeType, head = head)) {
+                contentHash(readAtMost(stream, limit), MediaHasher.JPEG_MIME_TYPE)
+            } else {
+                MediaHasher.hashStream(stream)
+            }
+        }
     }
 
     /**
      * The type to hash the file at [filePath] as, decided the way
      * [XmpMetadataHelper.writeSignature] decides where its signature goes: a
-     * `.jpg` or `.jpeg` file gets the signature embedded, so it is hashed
-     * canonically as a JPEG; any other file gets a sidecar, so it is hashed
-     * whole (null). Hashing by the resolver's type instead would give a file
-     * whose type and name disagree a hash its signature source never accepts.
+     * file [MediaHasher.isJpegFile] says is a JPEG gets the signature
+     * embedded, so it is hashed canonically as a JPEG; any other file gets a
+     * sidecar, so it is hashed whole (null).
      */
-    fun hashTypeForPath(filePath: String): String? {
-        val lower = filePath.lowercase()
-        return if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) "image/jpeg" else null
-    }
+    fun hashTypeForPath(filePath: String): String? =
+        if (MediaHasher.isJpegFile(filePath)) MediaHasher.JPEG_MIME_TYPE else null
 
     /** All of [input], or [TooLargeException] as soon as it passes [limit] bytes. */
     private fun readAtMost(input: java.io.InputStream, limit: Int): ByteArray {

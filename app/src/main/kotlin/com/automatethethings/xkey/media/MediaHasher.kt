@@ -76,13 +76,61 @@ object MediaHasher {
 
     /** The bytes [hashCanonical] covers. Exposed for tests and diagnostics. */
     fun canonicalContent(data: ByteArray, mimeType: String?): ByteArray {
-        return if (isCanonicalisedJpeg(mimeType)) jpegWithoutMetadata(data) else data
+        return if (isJpeg(mimeType, head = data)) jpegWithoutMetadata(data) else data
     }
 
-    /** Whether [hashCanonical] strips metadata for [mimeType]; otherwise it hashes the file whole. */
-    fun isCanonicalisedJpeg(mimeType: String?): Boolean {
+    /** The type a file [isJpeg] says is a JPEG is hashed and signed as. */
+    const val JPEG_MIME_TYPE = "image/jpeg"
+
+    /** How many leading bytes [isJpeg] needs to recognise a JPEG by content. */
+    const val JPEG_HEAD_SIZE = 3
+
+    /**
+     * The one JPEG classifier: every decision over a JPEG's hash or where its
+     * signature lives goes through it.
+     *
+     * A file is a JPEG when its type says image/jpeg (or image/jpg), its name
+     * ends `.jpg` or `.jpeg`, or its content starts with the JPEG SOI bytes
+     * `FF D8 FF`. A resolver often types a capture application/octet-stream
+     * or not at all, so the type alone misses JPEGs. Calling a non-JPEG a JPEG
+     * is safe: [canonicalContent] returns content without the SOI unchanged.
+     */
+    fun isJpeg(mimeType: String?, name: String? = null, head: ByteArray? = null): Boolean {
         val type = mimeType.orEmpty().lowercase()
-        return type.startsWith("image/jpeg") || type.startsWith("image/jpg")
+        if (type.startsWith(JPEG_MIME_TYPE) || type.startsWith("image/jpg")) return true
+        val lowerName = name.orEmpty().lowercase()
+        if (lowerName.endsWith(".jpg") || lowerName.endsWith(".jpeg")) return true
+        return head != null && head.size >= JPEG_HEAD_SIZE &&
+            byteAt(head, 0) == 0xFF && byteAt(head, 1) == 0xD8 && byteAt(head, 2) == 0xFF
+    }
+
+    /** [isJpeg] for the file at [path], by its name and its first bytes. */
+    fun isJpegFile(path: String): Boolean = isJpeg(null, path, readHead(path))
+
+    /** [isJpeg] for the content at [uri], by the resolver's type and its first bytes. */
+    fun isJpegUri(contentResolver: ContentResolver, uri: Uri): Boolean {
+        if (isJpeg(contentResolver.getType(uri))) return true
+        val head = runCatching {
+            contentResolver.openInputStream(uri)?.use { readFully(it, JPEG_HEAD_SIZE) }
+        }.getOrNull()
+        return isJpeg(null, head = head)
+    }
+
+    /** Up to the first [JPEG_HEAD_SIZE] bytes of the file at [path]; null if unreadable. */
+    private fun readHead(path: String): ByteArray? = runCatching {
+        java.io.File(path).inputStream().use { readFully(it, JPEG_HEAD_SIZE) }
+    }.getOrNull()
+
+    /** Up to [count] bytes from [input], fewer only at the end of the stream. */
+    fun readFully(input: InputStream, count: Int): ByteArray {
+        val out = ByteArray(count)
+        var n = 0
+        while (n < count) {
+            val r = input.read(out, n, count - n)
+            if (r == -1) break
+            n += r
+        }
+        return if (n == count) out else out.copyOf(n)
     }
 
     /** Where a signature was read from, which decides the hashes it may cover. */
