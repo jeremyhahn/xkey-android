@@ -312,11 +312,42 @@ class XKeyCredentialServiceTest {
     }
 
     /**
+     * A receiver that throws from onResult has still been answered: the
+     * service must not answer it a second time with onError.
+     */
+    @Test
+    fun `a create receiver that throws from onResult is not answered again with an error`() {
+        setSwitch(true)
+        val callback = Recorder<BeginCreateCredentialResponse, CreateCredentialException>(throwOnResult = true)
+
+        service.onBeginCreateCredentialRequest(mockk<BeginCreateCredentialRequest>(), CancellationSignal(), callback)
+
+        callback.await()
+        assertEquals(1, callback.results.size)
+        assertEquals("answered exactly once", 1, callback.calls)
+    }
+
+    @Test
+    fun `a get receiver that throws from onResult is not answered again with an error`() {
+        setSwitch(true)
+        val callback = Recorder<BeginGetCredentialResponse, GetCredentialException>(throwOnResult = true)
+
+        service.onBeginGetCredentialRequest(mockk<BeginGetCredentialRequest>(), CancellationSignal(), callback)
+
+        callback.await()
+        assertEquals(1, callback.results.size)
+        assertEquals("answered exactly once", 1, callback.calls)
+    }
+
+    /**
      * Records every callback. [await] waits for the first, then a moment
      * longer, so a second callback (which would break the receiver's
      * contract) is counted too.
      */
-    private class Recorder<R, E : Throwable> : OutcomeReceiver<R, E> {
+    private class Recorder<R, E : Throwable>(
+        /** Throw from [onResult] after recording it, as a receiver whose caller has gone may. */
+        private val throwOnResult: Boolean = false,
+    ) : OutcomeReceiver<R, E> {
         val results = java.util.Collections.synchronizedList(mutableListOf<R>())
         val errors = java.util.Collections.synchronizedList(mutableListOf<E>())
         private val first = CountDownLatch(1)
@@ -326,6 +357,7 @@ class XKeyCredentialServiceTest {
         override fun onResult(result: R) {
             results += result
             first.countDown()
+            if (throwOnResult) throw IllegalStateException("the caller has gone")
         }
 
         override fun onError(error: E) {
