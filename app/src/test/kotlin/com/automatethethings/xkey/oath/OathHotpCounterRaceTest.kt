@@ -107,6 +107,9 @@ class OathHotpCounterRaceTest {
         every { secretManager.decryptSecret(any()) } answers { firstArg<ByteArray>().copyOf() }
         mockkStatic(Uri::class)
         every { Uri.parse(any()) } answers { jvmUri(firstArg()) }
+        // A generated code is audited; with no audit database the logger only logs a warning.
+        mockkStatic(android.util.Log::class)
+        every { android.util.Log.w(any<String>(), any<String>()) } returns 0
         repository = OathRepository(dao, secretManager)
     }
 
@@ -277,6 +280,9 @@ class OathSyncDeletionRaceTest {
         every { secretManager.decryptSecret(any()) } answers { firstArg<ByteArray>().copyOf() }
         mockkStatic(Uri::class)
         every { Uri.parse(any()) } answers { jvmUri(firstArg()) }
+        // A generated code is audited; with no audit database the logger only logs a warning.
+        mockkStatic(android.util.Log::class)
+        every { android.util.Log.w(any<String>(), any<String>()) } returns 0
         repository = OathRepository(dao, secretManager)
     }
 
