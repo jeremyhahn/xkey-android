@@ -422,18 +422,12 @@ class PasswordRepository(
      *
      * A deleted entry gets a deletion record ([PasswordDeletionEntity]) at
      * the current time, so that a sync with a peer which still holds it does
-     * not add it back ([deletedAt]). The delete and its record are one
+     * not add it back ([PasswordDao.getDeletedAt]). The delete and its record are one
      * transaction ([PasswordDao.deleteAndRecordDeletion]), so a sync never
      * sees the entry gone and its record not yet written.
      */
     suspend fun delete(passwordId: String, tenantId: String? = null): Boolean =
         dao.deleteAndRecordDeletion(passwordId, tenantId, clock())
-
-    /**
-     * When the entry with [passwordId] was last deleted on this phone, or
-     * null if it never was or the record has been dropped ([pruneDeletions]).
-     */
-    suspend fun deletedAt(passwordId: String): Long? = dao.getDeletedAt(passwordId)
 
     /**
      * Drop the deletion records older than [DELETION_RETENTION_MS] at [now],

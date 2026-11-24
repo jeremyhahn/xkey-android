@@ -574,7 +574,7 @@ class PasswordSyncTest {
 
         assertTrue(deleting.await())
         assertFalse(dao.rows.containsKey("remote-1"))
-        assertNotNull(repository.deletedAt("remote-1"))
+        assertNotNull(dao.getDeletedAt("remote-1"))
         val again = sync.mergeWithDetail(incoming(id = "remote-1", at = iso(now - MINUTE)))
         assertEquals(1, again.keptDeleted)
         assertFalse(dao.rows.containsKey("remote-1"))
