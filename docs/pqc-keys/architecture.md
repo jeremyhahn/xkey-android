@@ -105,6 +105,11 @@ PIV slot keys use the slot's alias (`xkey_piv_<slot>`). SP 800-78 has no
 ML-DSA algorithm id, so peers name these keys only by wire name (see
 [../piv/architecture.md](../piv/architecture.md)).
 
+`PivKeyManager` instances built without a store (the GATT service and the
+slot detail screen) use `PqcSoftwareKeyStore.shared`. `XKeyApplication.onCreate`
+registers it at process start, next to the Keystore backend, so a slot detail
+screen restored alone after process death still finds the software store.
+
 ## Dialogs
 
 Key Management lists ML-DSA under Signing and TLS. While an ML-DSA entry is
@@ -125,8 +130,3 @@ not report.
   `org.bouncycastle.crypto.{generators,params,signers,util}`. The store uses
   those classes, so it needs no JCA provider and no R8 keep rule. If a later
   version moves them, the JCA fallback and its keep rules apply.
-- `PivKeyManager` instances built without a store (the GATT service and the
-  slot detail screen) use `PqcSoftwareKeyStore.shared`, which the app's first
-  `KeystoreManager` or PIV screen registers. A slot detail screen restored
-  alone after process death, before either one is built, finds no software
-  ML-DSA store.

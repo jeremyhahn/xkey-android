@@ -229,6 +229,22 @@ class PqcSoftwareKeyStore(
         @Volatile
         var shared: PqcSoftwareKeyStore? = null
             private set
+
+        /**
+         * The app's [shared] store, building it on [context]'s application
+         * context if none is registered yet. Cheap: the wrap key opens on
+         * first use. `XKeyApplication.onCreate` calls it, so callers built
+         * without a Context find the store from process start.
+         */
+        @Synchronized
+        fun registerShared(context: Context): PqcSoftwareKeyStore =
+            shared ?: PqcSoftwareKeyStore(context.applicationContext ?: context)
+
+        /** Forgets the [shared] store, as a fresh process has none. Tests only. */
+        @Synchronized
+        internal fun clearSharedForTest() {
+            shared = null
+        }
         private const val DIR = "pqc_keys"
         private const val MAX_FIELD = 64 * 1024
         private val MAGIC = byteArrayOf('X'.code.toByte(), 'P'.code.toByte(), 'Q'.code.toByte(), '1'.code.toByte())
