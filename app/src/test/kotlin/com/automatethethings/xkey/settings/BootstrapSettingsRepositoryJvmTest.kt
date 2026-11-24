@@ -365,6 +365,28 @@ class BootstrapSettingsRepositoryJvmTest {
     }
 
     @Test
+    fun `every pin and key writer refuses whitespace, non-ASCII digits and an inner space`() = runBlocking {
+        val arabicIndic = (0 until 64).map { '٠' + it % 10 }.joinToString("")
+        val fullwidth = (0 until 64).map { '０' + it % 10 }.joinToString("")
+        val innerSpace = "ab".repeat(16) + " " + "c".repeat(31)
+        for (bad in listOf("   ", arabicIndic, fullwidth, innerSpace)) {
+            assertFalse("pin '$bad' accepted", repository.updateSpkiSettings(enabled = true, pinSha256 = bad))
+            assertFalse("key '$bad' accepted", repository.updateNoiseSettings(enabled = true, serverStaticKey = bad))
+            assertFalse(
+                "updateSettings pin '$bad' accepted",
+                repository.updateSettings(BootstrapSettingsData(spkiEnabled = true, spkiPinSha256 = bad))
+            )
+            assertFalse(
+                "updateSettings key '$bad' accepted",
+                repository.updateSettings(BootstrapSettingsData(noiseEnabled = true, noiseServerStaticKey = bad))
+            )
+        }
+
+        assertEquals(BootstrapSettingsData(), reopened().getSettings())
+        assertEquals(emptyList<AuditLogEntity>(), inserted)
+    }
+
+    @Test
     fun `an empty pin and key clear them`() = runBlocking {
         repository.updateSpkiSettings(pinSha256 = PIN)
         repository.updateNoiseSettings(serverStaticKey = NOISE_KEY)
