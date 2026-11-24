@@ -2,7 +2,7 @@
   "formatVersion": 1,
   "database": {
     "version": 14,
-    "identityHash": "e16b28d3439d4a3a3982b9f61e3dff03",
+    "identityHash": "3b471be17fd6159b87f6cac1077041a7",
     "entities": [
       {
         "tableName": "credential_metadata",
@@ -1138,6 +1138,30 @@
         ]
       },
       {
+        "tableName": "password_deletions",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`password_id` TEXT NOT NULL, `deleted_at` INTEGER NOT NULL, PRIMARY KEY(`password_id`))",
+        "fields": [
+          {
+            "fieldPath": "passwordId",
+            "columnName": "password_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "deletedAt",
+            "columnName": "deleted_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "password_id"
+          ]
+        }
+      },
+      {
         "tableName": "oath_deletions",
         "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`oath_id` TEXT NOT NULL, `deleted_at` INTEGER NOT NULL, PRIMARY KEY(`oath_id`))",
         "fields": [
@@ -1164,7 +1188,7 @@
     ],
     "setupQueries": [
       "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
-      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'e16b28d3439d4a3a3982b9f61e3dff03')"
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '3b471be17fd6159b87f6cac1077041a7')"
     ]
   }
 }
