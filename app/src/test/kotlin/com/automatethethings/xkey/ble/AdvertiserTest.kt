@@ -258,11 +258,19 @@ class AdvertiserTest {
     // -----------------------------------------------------------------
 
     /**
-     * The callback the BLE stack owns. It is a private field because nothing in
-     * the app invokes it, which is exactly why it needs a test.
+     * The callback the BLE stack owns, for a start attempt opened without the
+     * framework builders `startAdvertising` needs. Each attempt has its own
+     * private callback, because nothing in the app invokes it, which is
+     * exactly why it needs a test.
      */
-    private fun Advertiser.callback(): AdvertiseCallback =
-        field("advertiseCallback").get(this) as AdvertiseCallback
+    private fun Advertiser.callback(): AdvertiseCallback {
+        val begin = try {
+            Advertiser::class.java.getDeclaredMethod("beginAttempt").apply { isAccessible = true }
+        } catch (e: NoSuchMethodException) {
+            throw AssertionError("Advertiser.beginAttempt is the seam this suite drives", e)
+        }
+        return begin.invoke(this) as AdvertiseCallback
+    }
 
     /** Installs the LE advertiser `startAdvertising` would have resolved. */
     private fun Advertiser.withLeAdvertiser(leAdvertiser: BluetoothLeAdvertiser): Advertiser =

@@ -49,6 +49,19 @@ class Advertiser(
     @Volatile
     private var pendingStart: PendingStart? = null
 
+    /**
+     * The start token: [startAdvertising] takes one, [stopAdvertising]
+     * advances it, so nothing the stack answers for a stopped start counts.
+     */
+    private val generation = LifecycleGeneration()
+
+    /**
+     * The current start attempt, whose callback the stack answers; null when
+     * no start is pending or active. A retry is a new attempt on the same token.
+     */
+    @Volatile
+    private var attempt: StartAttempt? = null
+
     private data class PendingStart(
         val settings: AdvertiseSettings,
         val advertiseData: AdvertiseData,
@@ -91,26 +104,61 @@ class Advertiser(
         val advertiseData = buildAdvertiseData()
         val scanResponse = buildScanResponseData(includeDeviceName = true)
 
-        pendingStart = PendingStart(settings, advertiseData)
-        return requestStart(settings, advertiseData, scanResponse)
+        val started = beginAttempt() ?: return false
+        var handed = false
+        ifCurrent(started) {
+            pendingStart = PendingStart(settings, advertiseData)
+            handed = requestStart(started, settings, advertiseData, scanResponse)
+        }
+        return handed
+    }
+
+    /** Opens a start attempt under a fresh start token; null once ended. */
+    private fun beginAttempt(): StartAttempt? {
+        val token = generation.begin() ?: return null
+        return nextAttempt(token)
     }
 
     /**
-     * Hands one start request to the stack; a throw is reported as an internal
-     * error and clears the pending start, so no retry follows it.
+     * Makes a new attempt, with its own callback, the current one for
+     * [token]; null when a stop has run since [token] was taken.
      */
+    private fun nextAttempt(token: Long): StartAttempt? {
+        val next = StartAttempt(token)
+        return if (generation.publish(token) { attempt = next }) next else null
+    }
+
+    /**
+     * The one check by which a stack callback or a retry changes state or
+     * calls the stack: [block] runs only while no stop ran since [from]'s
+     * token was taken and [from] is still the current attempt, under the
+     * token's lock so a stop waits for it. False when [from] is stale.
+     */
+    private fun ifCurrent(from: StartAttempt, block: () -> Unit): Boolean {
+        var ran = false
+        generation.publish(from.token) {
+            if (attempt === from) {
+                block()
+                ran = true
+            }
+        }
+        return ran
+    }
+
     @SuppressLint("MissingPermission")
     private fun requestStart(
+        callback: StartAttempt,
         settings: AdvertiseSettings,
         advertiseData: AdvertiseData,
         scanResponse: AdvertiseData
     ): Boolean {
         try {
-            advertiser?.startAdvertising(settings, advertiseData, scanResponse, advertiseCallback)
+            advertiser?.startAdvertising(settings, advertiseData, scanResponse, callback)
             return true
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start advertising", e)
             pendingStart = null
+            attempt = null
             _advertisingState.value = AdvertisingState.Error(
                 AdvertiseError.INTERNAL_ERROR,
                 "Failed to start advertising: ${e.message}"
@@ -119,37 +167,43 @@ class Advertiser(
         }
     }
 
-    /**
-     * Retries a start the stack refused as too large, once, with a scan
-     * response that carries only the TX power level: the device name is the
-     * only field whose length the app does not control.
-     *
-     * @return true if the retry was handed to the stack
-     */
-    private fun retryWithoutDeviceName(): Boolean {
-        val pending = pendingStart ?: return false
-        if (pending.nameDropped || advertiser == null) return false
-        pendingStart = pending.copy(nameDropped = true)
-        Log.w(TAG, "Advertise data too large; retrying without the device name")
-        return requestStart(
-            pending.settings,
-            pending.advertiseData,
-            buildScanResponseData(includeDeviceName = false)
-        )
+    private fun retryWithoutDeviceName(from: StartAttempt): Boolean {
+        var handed = false
+        ifCurrent(from) {
+            val pending = pendingStart ?: return@ifCurrent
+            if (pending.nameDropped || advertiser == null) return@ifCurrent
+            // The stack refuses one callback object started twice: the retry
+            // is a new attempt, on the same token.
+            val retry = nextAttempt(from.token) ?: return@ifCurrent
+            pendingStart = pending.copy(nameDropped = true)
+            Log.w(TAG, "Advertise data too large; retrying without the device name")
+            handed = requestStart(
+                retry,
+                pending.settings,
+                pending.advertiseData,
+                buildScanResponseData(includeDeviceName = false)
+            )
+        }
+        return handed
     }
 
-    /**
-     * Stops BLE advertising.
-     */
     @SuppressLint("MissingPermission")
     fun stopAdvertising() {
-        if (!isAdvertising.compareAndSet(true, false)) {
+        // First, so no answer to a start begun before this stop counts, and
+        // a callback already inside the token's lock finishes before it.
+        generation.advance()
+        val stopping = attempt
+        attempt = null
+        pendingStart = null
+        val wasAdvertising = isAdvertising.getAndSet(false)
+        if (stopping == null && !wasAdvertising) {
             Log.d(TAG, "Not currently advertising")
             return
         }
 
+        // A pending start is stopped too: the stack may already have it up.
         try {
-            advertiser?.stopAdvertising(advertiseCallback)
+            stopping?.let { advertiser?.stopAdvertising(it) }
             Log.i(TAG, "Advertising stopped")
         } catch (e: Exception) {
             Log.e(TAG, "Error stopping advertising", e)
@@ -203,17 +257,31 @@ class Advertiser(
     }
 
     /**
-     * Advertise callback implementation.
+     * One start attempt's callback, carrying its start token. Its answers
+     * change state, retry or publish only through [ifCurrent]; a stale
+     * success takes down its own advertisement, a stale failure does nothing.
      */
-    private val advertiseCallback = object : AdvertiseCallback() {
+    private inner class StartAttempt(val token: Long) : AdvertiseCallback() {
+        @SuppressLint("MissingPermission")
         override fun onStartSuccess(settingsInEffect: AdvertiseSettings) {
-            pendingStart = null
-            isAdvertising.set(true)
-            _advertisingState.value = AdvertisingState.Advertising(
-                connectable = settingsInEffect.isConnectable,
-                txPowerLevel = settingsInEffect.txPowerLevel,
-                mode = settingsInEffect.mode
-            )
+            val published = ifCurrent(this) {
+                pendingStart = null
+                isAdvertising.set(true)
+                _advertisingState.value = AdvertisingState.Advertising(
+                    connectable = settingsInEffect.isConnectable,
+                    txPowerLevel = settingsInEffect.txPowerLevel,
+                    mode = settingsInEffect.mode
+                )
+            }
+            if (!published) {
+                Log.w(TAG, "Advertising started for a stopped start; stopping it")
+                try {
+                    advertiser?.stopAdvertising(this)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error stopping a stale advertisement", e)
+                }
+                return
+            }
             Log.i(TAG, "Advertising started successfully: mode=${settingsInEffect.mode}, " +
                     "txPower=${settingsInEffect.txPowerLevel}, connectable=${settingsInEffect.isConnectable}, " +
                     "timeout=${settingsInEffect.timeout}")
@@ -221,16 +289,19 @@ class Advertiser(
         }
 
         override fun onStartFailure(errorCode: Int) {
-            isAdvertising.set(false)
-            if (errorCode == AdvertiseCallback.ADVERTISE_FAILED_DATA_TOO_LARGE &&
-                retryWithoutDeviceName()
-            ) {
-                return
+            ifCurrent(this) {
+                isAdvertising.set(false)
+                if (errorCode == AdvertiseCallback.ADVERTISE_FAILED_DATA_TOO_LARGE &&
+                    retryWithoutDeviceName(this)
+                ) {
+                    return@ifCurrent
+                }
+                pendingStart = null
+                attempt = null
+                val (error, message) = mapAdvertiseError(errorCode)
+                _advertisingState.value = AdvertisingState.Error(error, message)
+                Log.e(TAG, "Advertising failed: $message (code=$errorCode)")
             }
-            pendingStart = null
-            val (error, message) = mapAdvertiseError(errorCode)
-            _advertisingState.value = AdvertisingState.Error(error, message)
-            Log.e(TAG, "Advertising failed: $message (code=$errorCode)")
         }
     }
 
