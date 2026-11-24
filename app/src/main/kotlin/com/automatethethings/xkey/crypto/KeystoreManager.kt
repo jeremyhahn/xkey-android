@@ -858,7 +858,7 @@ class KeystoreManager(
     fun generalKeySecurityLevel(keyId: String): KeySecurityLevel? {
         val alias = buildGeneralAlias(keyId)
         if (keyStore.containsAlias(alias)) return aliasSecurityLevel(alias)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && hasEd25519Key(alias)) {
+        if (hasSoftwareEd25519Key(alias)) {
             return KeySecurityLevel.SOFTWARE
         }
         return null
@@ -1187,6 +1187,9 @@ class KeystoreManager(
         prefs.edit()
             .putString(alias, Base64.encodeToString(keyPair.private.encoded, Base64.NO_WRAP))
             .apply()
+        // A new key under the alias replaces any removal of an older one that
+        // did not commit: retrying that removal would delete the new key.
+        uncommittedSoftwareRemovals.remove(alias)
 
         return keyPair
     }
@@ -1210,13 +1213,67 @@ class KeystoreManager(
     }
 
     /**
-     * Check if an Ed25519 key exists in EncryptedSharedPreferences.
+     * The one read of whether a software Ed25519 key is stored under [alias].
+     *
+     * SharedPreferences drops a removed key from its in-memory map before it
+     * writes to disk, and keeps it dropped when the write fails, so after a
+     * removal that did not commit the cache says "absent" while the key is
+     * still on disk. Such an alias is in [uncommittedSoftwareRemovals] and
+     * reads as present here until a retry of its removal reaches disk
+     * ([removalStillUncommitted], [removeSoftwareEd25519Key]).
+     *
+     * @param strict throw [KeyDeletionException] when the store cannot be
+     *   opened or read; otherwise an unreadable store answers "no key", which
+     *   is safe for a lookup but never for a caller that drops a row on it.
      */
-    private fun hasEd25519Key(alias: String): Boolean {
+    private fun softwareEd25519KeyStored(alias: String, strict: Boolean): Boolean {
+        if (!softwareEd25519Supported()) return false
+        if (alias in uncommittedSoftwareRemovals) return true
         return try {
             ed25519Prefs().contains(alias)
         } catch (e: Exception) {
+            if (strict) throw KeyDeletionException("The software key store could not be read", e)
             false
+        }
+    }
+
+    /**
+     * Removes [alias] from the software Ed25519 store and commits. A removal
+     * that does not commit (or throws part-way) is recorded in
+     * [uncommittedSoftwareRemovals]; one that commits clears the record.
+     * Call it inside `withAliasGate(alias)`.
+     *
+     * @return true if the removal reached disk.
+     * @throws KeyDeletionException if the store cannot be opened, or the
+     *   removal throws.
+     */
+    private fun commitSoftwareRemovalLocked(alias: String): Boolean {
+        val prefs = try {
+            ed25519Prefs()
+        } catch (e: Exception) {
+            throw KeyDeletionException("The software key store could not be read to delete $alias", e)
+        }
+        val committed = try {
+            prefs.edit().remove(alias).commit()
+        } catch (e: Exception) {
+            uncommittedSoftwareRemovals.add(alias)
+            throw KeyDeletionException("Deleting software key $alias failed", e)
+        }
+        if (committed) uncommittedSoftwareRemovals.remove(alias) else uncommittedSoftwareRemovals.add(alias)
+        return committed
+    }
+
+    /**
+     * Retries the removal of [alias] if an earlier one did not commit.
+     *
+     * @return true while that removal still has not reached disk (the key is
+     *   present), false if none is pending or the retry committed.
+     * @throws KeyDeletionException if the store cannot be opened.
+     */
+    private fun removalStillUncommitted(alias: String): Boolean {
+        if (alias !in uncommittedSoftwareRemovals) return false
+        return withAliasGate(alias) {
+            alias in uncommittedSoftwareRemovals && !commitSoftwareRemovalLocked(alias)
         }
     }
 
@@ -1238,21 +1295,17 @@ class KeystoreManager(
      * inside `withAliasGate(alias)`.
      *
      * @return true if a key was stored and its removal committed, false if
-     *   none is stored (or the device keeps no software Ed25519 keys).
+     *   none is stored (or the device keeps no software Ed25519 keys). An
+     *   earlier removal that did not commit counts as stored: it is retried.
      * @throws KeyDeletionException if the store cannot be opened or read, so
      *   a key may be in it, or the removal does not commit: the key is still
      *   on disk, and that is never "no key".
      */
     private fun removeSoftwareEd25519Key(alias: String): Boolean {
-        if (!softwareEd25519Supported()) return false
-        val stored = try {
-            val prefs = ed25519Prefs()
-            if (!prefs.contains(alias)) return false
-            prefs.edit().remove(alias).commit()
-        } catch (e: Exception) {
-            throw KeyDeletionException("The software key store could not be read to delete $alias", e)
+        if (!softwareEd25519KeyStored(alias, strict = true)) return false
+        if (!commitSoftwareRemovalLocked(alias)) {
+            throw KeyDeletionException("Deleting software key $alias did not reach disk")
         }
-        if (!stored) throw KeyDeletionException("Deleting software key $alias did not reach disk")
         return true
     }
 
@@ -1935,7 +1988,7 @@ class KeystoreManager(
 
     /** True if an Ed25519 software key is stored under [alias] (API 33+ only). */
     internal fun hasSoftwareEd25519Key(alias: String): Boolean =
-        softwareEd25519Supported() && hasEd25519Key(alias)
+        softwareEd25519KeyStored(alias, strict = false)
 
     /**
      * True only when no key material for [keyId] is stored anywhere
@@ -1948,20 +2001,18 @@ class KeystoreManager(
      *   be read, so presence is unknown: the caller must keep the row.
      */
     fun keyMaterialAbsent(keyId: String): Boolean {
+        val softwareAliases = listOfNotNull(
+            KEY_ALIAS_PREFIX_GENERAL + keyId,
+            keyId.takeUnless { it.startsWith(PIV_KEYSTORE_ALIAS_PREFIX) }
+        )
+        // A removal that did not commit left the key on disk though the
+        // store's cache no longer lists it: retry it, and until it reaches
+        // disk the key is present.
+        if (softwareAliases.any { removalStillUncommitted(it) }) return false
         if (resolveKeystoreAlias(keyId) != null) return false
-        if (!softwareEd25519Supported()) return true
         // Ask the software store again, failing loudly where
         // resolveKeystoreAlias answered "no key" for an unreadable store.
-        if (softwareEd25519KeyStoredOrThrow(KEY_ALIAS_PREFIX_GENERAL + keyId)) return false
-        if (!keyId.startsWith(PIV_KEYSTORE_ALIAS_PREFIX) && softwareEd25519KeyStoredOrThrow(keyId)) return false
-        return true
-    }
-
-    /** [hasEd25519Key], but an unreadable store throws [KeyDeletionException]. */
-    private fun softwareEd25519KeyStoredOrThrow(alias: String): Boolean = try {
-        ed25519Prefs().contains(alias)
-    } catch (e: Exception) {
-        throw KeyDeletionException("The software key store could not be read", e)
+        return softwareAliases.none { softwareEd25519KeyStored(it, strict = true) }
     }
 
     /**
@@ -2378,6 +2429,16 @@ class KeystoreManager(
          * waits on its gate, so churned aliases leave nothing behind.
          */
         private val aliasGates = java.util.concurrent.ConcurrentHashMap<String, AliasGate>()
+
+        /**
+         * Software Ed25519 aliases whose removal did not reach disk. The
+         * SharedPreferences cache that already dropped them lives exactly as
+         * long as this process, so a process-scoped record covers exactly the
+         * window in which that cache can lie; after a restart the store is
+         * read from disk again, where the key still is.
+         */
+        private val uncommittedSoftwareRemovals: MutableSet<String> =
+            java.util.concurrent.ConcurrentHashMap.newKeySet()
 
         /**
          * Runs [block] holding the process-wide gate for Keystore [alias].
