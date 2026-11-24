@@ -1,9 +1,9 @@
 # FIDO2 phone backend architecture
 
-> **Status: REFERENCE** · Last verified: 2026-11-17
-> As-built description of how a paired desktop (`xkey fido2 --backend phone`) discovers and uses passkeys held on the phone, and of the phone's CTAP2 BLE authenticator.
+> Status: reference. Last checked against main on 2026-11-23 (names spot-checked).
+> This page describes how a paired desktop (`xkey fido2 --backend phone`) discovers and uses passkeys held on the phone, and of the phone's CTAP2 BLE authenticator.
 
-## Summary
+## Overview
 
 The desktop authenticator speaks CTAP2 to the browser; the phone does not parse
 CTAP2 frames. For the phone backend it serves two JSON-RPC methods over the
