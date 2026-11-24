@@ -5,7 +5,7 @@
 	tools-check tools-check-trivy tools-check-actionlint tools-check-gradle \
 	deps-check deps-check-test docker-build docker-build-toolchain docker-build-it \
 	docker-run toolchain-image it-image toolchain-image-id it-image-id device-check coverage it-jvm-test \
-	reaper-test revert-red-main-test code-review-test build-image-test image-tag-test fetch-test apt-retry-test gradle-retry-test ci-verify-signatures-test release-check
+	reaper-test revert-red-main-test code-review-test runner-select-test build-image-test image-tag-test fetch-test apt-retry-test gradle-retry-test ci-verify-signatures-test release-check
 
 .DEFAULT_GOAL := help
 
@@ -38,9 +38,24 @@ TOOLS_BIN ?= $(HOME)/.local/bin
 
 DEVCONTAINER := build/docker/devcontainer
 IMAGE_TAG := $(DEVCONTAINER)/image-tag.sh
-# Image tags (image-tag.sh): trusted tags <hash>, pr tags pr-<hash>; tags protect nothing, IMAGE_FRESH is the guard.
+# The images' names (image-tag.sh): trusted, the default
+# for a developer's own make and CI's push or dispatch on main, tags
+# <hash>; pr, which ci.yml passes for every other run, tags pr-<hash>, and may
+# take the trusted image of the same content (`docker tag`). The namespace is
+# a name only and protects nothing: a pull request's run
+# executes its own Makefile against the daemon main's runs use, so it can
+# write any tag, a trusted one included. IMAGE_FRESH is the guard.
 IMAGE_NAMESPACE ?= trusted
-# IMAGE_FRESH=true builds every image fresh (--no-cache --pull) and writes its ID to IMAGE_ID_DIR/<kind>.iid for the stages to use.
+# Fresh trusted builds, until trusted runs get a daemon or registry pull requests cannot
+# write. IMAGE_FRESH=true, which ci.yml sets on a trusted run, never reuses a
+# tag: it builds every image from this checkout's fingerprinted inputs, with
+# no build cache (--no-cache: a pull request's builds write the same cache)
+# and its base images pulled (--pull) by the digests they are pinned to
+# (BASE_IMAGE in scripts/tool-pins.sh, the Dockerfile's syntax line), and the
+# build writes the image's ID to IMAGE_ID_DIR/<kind>.iid. `make -s
+# toolchain-image-id` and `it-image-id` print the ID a run's stages use, so a
+# tag written during the run cannot swap the image under them. A developer's
+# make leaves IMAGE_FRESH false and reuses tags as before.
 IMAGE_FRESH ?= false
 IMAGE_ID_DIR ?= build/image-ids
 # Compose interpolates the whole file, so every call sets both image tags,
@@ -66,7 +81,12 @@ build: ## Build debug APK
 	@echo ""
 	@echo "APK: $(DEBUG_APK)"
 
-# Signs a release build with a throwaway keystore; RELEASE_CHECK_OMIT checks the release guard refuses a missing variable.
+# A throwaway keystore in build/release-check/ (deleted on exit, never
+# committed) signs the release; the check fails unless apksigner reports that
+# one certificate. RELEASE_CHECK_OMIT=XKEY_KEY_ALIAS (any of the four) builds
+# without that variable, so the target fails: the script exits 1 when the
+# release guard refuses the build with its own message (make reports Error 1),
+# 2 with GUARD BROKEN when it does not (Error 2).
 release-check: ## Build a release APK signed with a throwaway key and verify its signer with apksigner
 	GRADLE="$(GRADLE)" ./scripts/release-check.sh
 
@@ -95,8 +115,11 @@ coverage: ## Unit tests plus the JaCoCo report (no threshold is enforced)
 
 lint: android-lint ## Android lint on the debug variant (the repository's own gates run as lint-gates)
 
-# The repository's own gates, run by CI's lint-gates job without -k.
-lint-gates: actionlint closing-links-test revert-red-main-test reaper-test build-image-test image-tag-test fetch-test apt-retry-test gradle-retry-test deps-check-test code-review-test ci-verify-signatures-test ## actionlint over .github/workflows + the signature check's fixtures + the revert workflow's closing-link and resume fixtures + the review workflow's fixtures + the reaper's fixtures + the concurrent image build fixtures + the image tag's index sums + deps-check's fixtures (offline) + the image download helper's fixtures + the image builds' apt retries + the toolchain image's Gradle download retry
+# The repository's own gates (scripts, workflows, their tests) are not part
+# of lint: CI's lint-gates job runs `make lint-gates` in parallel with the
+# image job's `make lint`, so nothing runs twice there. It runs without -k,
+# so the first failing gate ends the run.
+lint-gates: actionlint closing-links-test revert-red-main-test runner-select-test reaper-test build-image-test image-tag-test fetch-test apt-retry-test gradle-retry-test deps-check-test code-review-test ci-verify-signatures-test ## actionlint over .github/workflows + the signature check's fixtures + the revert workflow's closing-link and resume fixtures + the review workflow's fixtures + the reaper's fixtures + the concurrent image build fixtures + the image tag's index sums + deps-check's fixtures (offline) + the image download helper's fixtures + the image builds' apt retries + the toolchain image's Gradle download retry
 
 android-lint: ## Android lint on the debug variant (abortOnError, see app/build.gradle.kts)
 	$(GRADLE) lintDebug
@@ -119,6 +142,9 @@ revert-red-main-test: ## Test that revert-red-main.yml resumes a partial run, ag
 
 code-review-test: ## Test code-review.yml's twin filter, owner-resume freshness and reconcile, verdict marker, paginated history reads and the review lock's budget-based waits, read out of the workflow and run against stubbed forge reads, clock and flock (bash + jq, offline)
 	./scripts/code-review-test.sh
+
+runner-select-test: ## Test ci.yml's runner selection step against a stubbed Actions API, and that preflight and the review scope job reach self-hosted runners only on the events they accept (bash + jq, offline)
+	./scripts/runner-select-test.sh
 
 ci-verify-signatures-test: ## Test scripts/ci-verify-signatures.sh (signatures.yml's check) against offline git fixtures: fork head, head moved after the event, missing base or head object, registry only on the head; no file from the head ever runs (bash + git + ssh-keygen, offline)
 	./scripts/tests/ci-verify-signatures-test.sh
@@ -143,7 +169,10 @@ gradle-retry-test: ## Test that the toolchain image's warm stage runs its Gradle
 
 security: tools-check-trivy trivy-fs ## Security suite: trivy fs (vuln + secret, CRITICAL/HIGH blocking)
 
-# Version pinned in scripts/tool-pins.sh; generated output is skipped and the tracked build/docker/ scanned separately.
+# Version and SHA-256 pinned in scripts/tool-pins.sh; install with `make install-tools`.
+# Build output and the Gradle cache are skipped: they are generated, not source.
+# build/ is generated except the tracked build/docker/ (the devcontainer image),
+# and --skip-dirs cannot skip a directory but one child, so that is a second scan.
 TRIVY_FS := $(TRIVY) fs --scanners vuln,secret --severity CRITICAL,HIGH --exit-code 1 \
 	--format table --no-progress --ignorefile .trivyignore
 trivy-fs: ## Trivy filesystem scan for dependency CVEs and leaked secrets
@@ -164,7 +193,8 @@ tools-check-actionlint:
 	@actionlint -version 2>/dev/null | grep -qx "$(ACTIONLINT_VERSION)" \
 		|| { echo "actionlint $(ACTIONLINT_VERSION) not found (scripts/tool-pins.sh)"; exit 1; }
 
-# The wrapper, the image and $(GRADLE) must name the same Gradle.
+# The wrapper and the image must name the same Gradle, and the Gradle the gates
+# run ($(GRADLE): the wrapper on a host, the image's gradle inside it) must be it.
 tools-check-gradle:
 	@grep -q "gradle-$(GRADLE_VERSION)-bin.zip" gradle/wrapper/gradle-wrapper.properties \
 		|| { echo "gradle-wrapper.properties is not on GRADLE_VERSION=$(GRADLE_VERSION) (scripts/tool-pins.sh)"; exit 1; }
@@ -182,7 +212,23 @@ deps-check-test: ## Test deps-check's release-age rule against fixtures (offline
 
 docker-build: docker-build-toolchain docker-build-it ## Build the toolchain and integration images (skips a tag the daemon holds)
 
-# reuse_or_build <kind>,<target>: build fresh under IMAGE_FRESH, else reuse or re-tag an image of the same content, else build via scripts/build-image.sh.
+# reuse_or_build <image-tag.sh kind>,<Dockerfile target>: with IMAGE_FRESH=true,
+# build $$tag fresh (above) and write its ID to IMAGE_ID_DIR/<kind>.iid. Else
+# keep $$tag when the daemon holds it; in the pr namespace, else take the
+# trusted image of the same content under $$tag; else build it. Taking an image
+# re-tags it, which moves its .Metadata.LastTagTime: the last-used mark
+# scripts/reap-stale-ci-stacks.sh ages an image by. Also the fresh build, and
+# the ci.image.repository label on every build, by which the reaper finds this
+# repo's images a later build has untagged. Every build goes through scripts/build-image.sh, which builds under a
+# name of its own and only then points $$tag at the ID the build wrote, so
+# concurrent cold builds of one tag all succeed; with IMAGE_FRESH=true it
+# keeps that name, which the stages' ID needs.
+# The integration build alone takes APK_INDEX_SUM, the Alpine package index
+# checksum its tag hashes (image-tag.sh). The base is Debian, so CI's sum is
+# `none` and the Dockerfile declares no ARG for it. Its Debian counterpart,
+# APT_INDEX_SUM (scripts/apt-index-sum.sh), goes to
+# the integration build alone too, whose stage declares it and runs
+# `apt-get upgrade`, so a new sum rebuilds with the fixed packages.
 DOCKER_BUILD_IMAGE = env $(DOCKER_BUILD) --label "ci.image.repository=$${tag%%:*}" --target $(2) \
 	$(if $(filter integration,$(2)),--build-arg "APK_INDEX_SUM=$${APK_INDEX_SUM:-}" --build-arg "APT_INDEX_SUM=$${APT_INDEX_SUM:-}")
 reuse_or_build = if [ "$(IMAGE_FRESH)" = true ]; then \
@@ -236,7 +282,13 @@ it-image-id: ## Print the integration image's ID (IMAGE_FRESH=true: the one its 
 # the runners lack, so CI proves the hardened integration image with the JVM
 # suite, offline. IT_PROJECT names the compose project CI tears down.
 IT_PROJECT ?= xkey-android-it
-# An image-ID IT_IMAGE runs as is; the suite runs on a writable /tmp copy of the image's /src.
+# An IT_IMAGE that is an image ID (`make -s
+# it-image-id`, as CI passes) is run as it is, with no build and no tag lookup.
+# The suite runs on a copy of the image's /src in the
+# /tmp tmpfs. The service's root is read-only, and Gradle 9 refuses a project
+# directory it cannot write ("Configuring project ':app' without an existing
+# directory is not allowed"); kapt also writes Room's schemas into app/schemas.
+# The copy is exactly the image's source, and nothing the image holds is written.
 it-jvm-test: $(if $(filter sha256:%,$(IT_IMAGE)),,docker-build-it) ## Run the JVM unit suite in the hardened integration image (no device)
 	$(COMPOSE) -p $(IT_PROJECT) run --rm integration \
 		sh -c 'cp -R /src /tmp/src && cd /tmp/src && exec make test'
