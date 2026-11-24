@@ -44,6 +44,7 @@ import java.net.Socket
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import kotlin.coroutines.EmptyCoroutineContext
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -113,6 +114,8 @@ class StreamPairingConfirmTest {
         }
         family = mockk(relaxed = true)
         every { family.handles(any()) } answers { firstArg<String>().startsWith("test.") }
+        // A relaxed mock would otherwise return a mocked CoroutineContext in place of the interface default.
+        every { family.routingContext() } returns EmptyCoroutineContext
         listener = ServerSocket(0, 4, InetAddress.getLoopbackAddress())
     }
 
