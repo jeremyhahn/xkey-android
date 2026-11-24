@@ -1,13 +1,14 @@
 # FIDO2 built-in UV architecture
 
-> **Status: REFERENCE** · Last verified: 2026-11-12
-> As-built description of `local.verifyUser`: the biometric-gated, verifiable "verify user" RPC a paired desktop calls before it issues a CTAP 2.1 `pinUvAuthToken` through UV.
+> Status: reference. Last checked against main on 2026-11-23.
+> This page describes `local.verifyUser`: the biometric-gated, verifiable "verify user" RPC a paired desktop calls before it issues a CTAP 2.1 `pinUvAuthToken` through UV.
 
-## Summary
+## Overview
 
 A paired desktop sends `local.verifyUser` with a fresh 32-byte nonce. The phone
 always raises a Class 3 biometric prompt and, once the user passes it, signs a
-transcript with its **User Verification Key** (UVK): an AndroidKeyStore EC key
+transcript with its user verification key (UVK, alias
+`xkey_user_verification_key`): an AndroidKeyStore EC key
 (StrongBox when available, TEE otherwise) that Keystore unlocks only for one
 signature behind a strong biometric. The answer carries the UVK's attestation
 chain and the signature, so the desktop can check both the key's authorization
@@ -19,7 +20,7 @@ The signed transcript is:
 "xkey-attest-transcript-v1" || 0x0b || "verify-user" || nonce || channelBinding || SHA-256(UVK SPKI)
 ```
 
-The UVK is separate from the Device Attestation Key (DAK): the DAK never
+The UVK is separate from the device attestation key (DAK): the DAK never
 prompts, and the UVK never signs an attest or reattest transcript.
 
 ## Components
@@ -36,7 +37,8 @@ When no `UserVerificationPrompt` is injected, `promptWithUserVerificationKey`
 uses the activity launcher (`requestCryptoSignature` with
 `KeystoreUserVerificationKey.ALIAS`) when one is set, otherwise the in-activity
 biometric helper with a `BiometricPrompt.CryptoObject` wrapping the UVK
-`Signature`. See [user-verification](../user-verification/architecture.md) for
+`Signature`. Both paths take a turn in the one prompt queue, and the injected
+prompt runs inside `PromptOwnership.process.turn`. See [user-verification](../user-verification/architecture.md) for
 how the service raises the prompt from the background.
 
 ## Wire methods served
@@ -68,13 +70,13 @@ sequenceDiagram
     H->>AT: channelBinding(session static keys, prologue)
     H->>UVK: chain() (mints key on first use)
     H->>AT: build(PURPOSE_VERIFY_USER, nonce, binding, SHA-256(UVK SPKI))
-    H->>H: showBiometricNotificationIfLocked
+    H->>H: OwnNotifications (wake notification on the queue turn)
     H->>UVK: initSignature()
-    H->>BP: prompt (verify_user_prompt_title / subtitle)
+    H->>BP: prompt "Verify it's you" (verify_user_prompt_title / subtitle)
     User->>BP: Class 3 biometric
     BP-->>H: unlocked Signature
     H->>H: sign transcript
-    H->>H: cancelBiometricNotification
+    H->>H: OwnNotifications.close()
     H-->>T: LocalVerifyUserResult {certificateChain, signature, "ES256"}
     T-->>Desk: response
     Note over Desk: Verifies chain + signature,<br/>then issues pinUvAuthToken via UV
