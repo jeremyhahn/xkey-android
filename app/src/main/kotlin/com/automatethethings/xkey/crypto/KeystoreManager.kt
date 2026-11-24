@@ -219,9 +219,8 @@ class KeystoreManager(
 
             withAliasGate(alias) { keyPairGenerator.generateKeyPair() }
         } catch (e: Exception) {
-            // StrongBox fallback: some devices claim StrongBox but cannot
-            // make the key there. Nothing has been generated yet.
-            if (strongBoxSpec && !requireStrongBox) {
+            // StrongBox fallback: only when StrongBox is unavailable, and nothing has been generated yet.
+            if (strongBoxSpec && !requireStrongBox && StrongBoxFallback.isStrongBoxUnavailable(e)) {
                 return generateKeyWithoutStrongBox(alias, requireBiometric)
                     .also { markStrongBoxSpec(alias, false) }
             }
@@ -350,9 +349,8 @@ class KeystoreManager(
 
             withAliasGate(alias) { keyPairGenerator.generateKeyPair() }
         } catch (e: Exception) {
-            // StrongBox fallback: some devices claim StrongBox but cannot
-            // make the key there. Nothing has been generated yet.
-            if (strongBoxSpec && !requireStrongBox) {
+            // StrongBox fallback: only when StrongBox is unavailable, and nothing has been generated yet.
+            if (strongBoxSpec && !requireStrongBox && StrongBoxFallback.isStrongBoxUnavailable(e)) {
                 return generateKeyWithAuthDurationWithoutStrongBox(alias, authDurationSeconds)
                     .also { markStrongBoxSpec(alias, false) }
             }
