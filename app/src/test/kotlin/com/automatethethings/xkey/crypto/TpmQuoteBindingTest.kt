@@ -154,4 +154,106 @@ class TpmQuoteBindingTest {
             refused { TpmAttest.parse(quoted.copyOf(n)) }
         }
     }
+
+    // ---------------------------------------------------------------
+    // Binding the reported PCR values to the signed digest
+    // ---------------------------------------------------------------
+
+    private val requested = (0..7).toSet()
+
+    private fun pcrValues(size: Int, indices: Set<Int> = requested): Map<Int, ByteArray> =
+        indices.associateWith { i -> ByteArray(size) { (i * 31 + it).toByte() } }
+
+    private class BoundQuote(val iak: TpmPublicArea, val quoted: ByteArray, val signature: ByteArray)
+
+    /** A P-256 IAK quote over [selected] in [bank], digesting [signedValues]. */
+    private fun boundQuote(
+        signedValues: Map<Int, ByteArray>,
+        bank: Int = TpmAlg.SHA256,
+        selected: Set<Int> = signedValues.keys
+    ): BoundQuote {
+        val keys = TpmTestStructures.generateEcKeyPair()
+        val iak = TpmPublicArea.parse(
+            TpmTestStructures.eccPublicArea(
+                keys.public as java.security.interfaces.ECPublicKey, TpmTestStructures.IAK_ATTRIBUTES
+            )
+        )
+        val quoted = TpmTestStructures.quoteAttest(
+            qualifiedSigner = iak.name(),
+            extraData = nonce,
+            bank = bank,
+            pcrIndices = selected,
+            pcrDigest = TpmTestStructures.pcrDigest(iak.schemeHashAlg, signedValues)
+        )
+        return BoundQuote(iak, quoted, ecdsa(keys, quoted))
+    }
+
+    @Test
+    fun `a quote whose pcrDigest matches the reported values verifies`() {
+        val values = pcrValues(32)
+        val q = boundQuote(values)
+        TpmQuoteVerifier.verify(q.iak, q.quoted, q.signature, nonce, "sha256", values)
+    }
+
+    @Test
+    fun `a P-384 quote bound in the sha384 bank verifies`() {
+        val keys = TpmTestStructures.generateEcKeyPair("secp384r1")
+        val iak = TpmTestStructures.p384Iak(keys)
+        val values = pcrValues(48)
+        val quoted = TpmTestStructures.quoteAttest(
+            qualifiedSigner = iak.name(),
+            extraData = nonce,
+            bank = TpmAlg.SHA384,
+            pcrIndices = requested,
+            pcrDigest = TpmTestStructures.pcrDigest(TpmAlg.SHA384, values)
+        )
+        val signature = ecdsa(keys, quoted, "SHA384withECDSA")
+        TpmQuoteVerifier.verify(iak, quoted, signature, nonce, "sha384", values)
+    }
+
+    @Test
+    fun `refuses reported PCR values that differ from the signed digest`() {
+        val values = pcrValues(32)
+        val q = boundQuote(values)
+        val reported = values.toMutableMap().apply { put(4, ByteArray(32) { 0x5A }) }
+
+        val e = refused {
+            TpmQuoteVerifier.verify(q.iak, q.quoted, q.signature, nonce, "sha256", reported)
+        }
+        assertTrue(e.message!!.contains("digest"))
+    }
+
+    @Test
+    fun `refuses a quote whose selection names a different bank than requested`() {
+        val values = pcrValues(32)
+        val q = boundQuote(values, bank = TpmAlg.SHA1)
+
+        val e = refused {
+            TpmQuoteVerifier.verify(q.iak, q.quoted, q.signature, nonce, "sha256", values)
+        }
+        assertTrue(e.message!!.contains("bank"))
+    }
+
+    @Test
+    fun `refuses a quote whose selection misses a requested index`() {
+        // The signed digest covers PCRs 0-6 only; PCR 7 is reported beside
+        // the quote but nothing signed vouches for it.
+        val values = pcrValues(32)
+        val q = boundQuote(values.filterKeys { it != 7 })
+
+        val e = refused {
+            TpmQuoteVerifier.verify(q.iak, q.quoted, q.signature, nonce, "sha256", values)
+        }
+        assertTrue(e.message!!.contains("PCRs"))
+    }
+
+    @Test
+    fun `refuses a quote selecting PCRs that were not reported`() {
+        val values = pcrValues(32)
+        val q = boundQuote(values, selected = requested + 8)
+
+        refused {
+            TpmQuoteVerifier.verify(q.iak, q.quoted, q.signature, nonce, "sha256", values)
+        }
+    }
 }

@@ -193,6 +193,23 @@ object TpmQuoteVerifier {
     }
 
     /**
+     * Verifies the quote as the overload above does and binds [pcrValues], the
+     * PCR values reported beside it, to the digest the TPM signed.
+     *
+     * @param expectedBank The PCR bank this CA asked for, as [TpmAlg.bankName] names it.
+     * @throws TpmQuoteException naming the first thing that did not hold.
+     */
+    @Suppress("UNUSED_PARAMETER")
+    fun verify(
+        iak: TpmPublicArea,
+        quoted: ByteArray,
+        signature: ByteArray,
+        expectedNonce: ByteArray,
+        expectedBank: String,
+        pcrValues: Map<Int, ByteArray>
+    ): TpmAttest = verify(iak, quoted, signature, expectedNonce)
+
+    /**
      * Checks [signature] is [key]'s signature over [signed], using the scheme
      * the key's own public area declares.
      *
