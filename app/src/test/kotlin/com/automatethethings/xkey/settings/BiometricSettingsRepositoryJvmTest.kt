@@ -300,6 +300,16 @@ class BiometricSettingsRepositoryJvmTest {
         assertChange(inserted[0], "userVerificationPolicy", "REQUIRED", "DISABLED")
     }
 
+    @Test
+    fun `writing the stored policy records nothing`() = runBlocking {
+        repository.updateUserVerificationPolicy(UserVerificationPolicy.REQUIRED)
+        repository.updateAuthMode(BiometricAuthMode.PER_OPERATION)
+        repository.updateAttestationBiometricPolicy(AttestationBiometricPolicy.ALWAYS)
+        repository.setBiometricEnabled(true)
+
+        assertEquals(emptyList<AuditLogEntity>(), inserted)
+    }
+
     /**
      * Found: [BiometricSettingsRepository.updateTimeWindow],
      * [BiometricSettingsRepository.updateSettings] and
