@@ -42,6 +42,7 @@ import com.automatethethings.xkey.crypto.KeyNotFoundException
 import com.automatethethings.xkey.crypto.KeyInfoUnavailableException
 import com.automatethethings.xkey.crypto.KeySecurityLevel
 import com.automatethethings.xkey.crypto.KeystoreManager
+import com.automatethethings.xkey.crypto.MlDsaParameterSet
 import com.automatethethings.xkey.crypto.KeystoreUserVerificationKey
 import com.automatethethings.xkey.crypto.SigningException
 import com.automatethethings.xkey.crypto.StrongBoxUnavailableException
@@ -1377,6 +1378,8 @@ class RequestHandler(
 
         val genParams = LocalGenerateKeyParams.fromJson(params)
         val algorithmName = CoseAlgorithms.getAlgorithmName(genParams.algorithm)
+        // An ML-DSA request the phone cannot meet is refused before any prompt.
+        CoseAlgorithms.mlDsaSet(genParams.algorithm)?.let { mlDsaBacking(genParams, it) }
 
         // An ID in an existing key's raw alias form names that key.
         val keyId = canonicalKeyId(genParams.keyId)
@@ -1482,6 +1485,9 @@ class RequestHandler(
         // Software-backed (exportable) keys take a separate path: the raw
         // material lives in SoftwareKeyStore (app-encrypted) so it can be
         // exported/shared, instead of the non-exportable hardware Keystore.
+        CoseAlgorithms.mlDsaSet(genParams.algorithm)?.let { set ->
+            return createMlDsaKey(request, genParams, set, authDurationSeconds)
+        }
         if (genParams.exportable) {
             return generateSoftwareKey(request, genParams, algorithmName, authDurationSeconds)
         }
@@ -1628,6 +1634,105 @@ class RequestHandler(
             )
         }
 
+        return Response.success(request.id, result.toJson())
+    }
+
+    /**
+     * Where an ML-DSA key of [set] for [genParams] goes: the requested
+     * backing, else hardware when the device makes [set] there, else software.
+     *
+     * @throws ProtocolException INVALID_PARAMS for an exportable key,
+     *   INVALID_ALGORITHM for a FIDO2 key, FEATURE_UNAVAILABLE for hardware
+     *   the device does not have.
+     */
+    private fun mlDsaBacking(
+        genParams: LocalGenerateKeyParams,
+        set: com.automatethethings.xkey.crypto.MlDsaParameterSet
+    ): com.automatethethings.xkey.crypto.PqcBacking {
+        if (genParams.exportable) {
+            throw ProtocolException("${set.wireName} keys are not exportable", errorCode = ErrorCodes.INVALID_PARAMS)
+        }
+        if (genParams.keyType == KeyTypes.FIDO2) {
+            throw ProtocolException("${set.wireName} is not a FIDO2 algorithm", errorCode = ErrorCodes.INVALID_ALGORITHM)
+        }
+        val inHardware = set in com.automatethethings.xkey.crypto.PqcHardware.supported()
+        return when (genParams.keyBacking) {
+            null -> if (inHardware) {
+                com.automatethethings.xkey.crypto.PqcBacking.HARDWARE
+            } else {
+                com.automatethethings.xkey.crypto.PqcBacking.SOFTWARE
+            }
+            com.automatethethings.xkey.crypto.PqcBacking.HARDWARE -> if (inHardware) {
+                com.automatethethings.xkey.crypto.PqcBacking.HARDWARE
+            } else {
+                throw ProtocolException(
+                    "This device does not make ${set.wireName} keys in hardware",
+                    errorCode = ErrorCodes.FEATURE_UNAVAILABLE
+                )
+            }
+            com.automatethethings.xkey.crypto.PqcBacking.SOFTWARE -> com.automatethethings.xkey.crypto.PqcBacking.SOFTWARE
+        }
+    }
+
+    /** Creates an approved ML-DSA `local.generateKey` key; the caller holds its id's lock. */
+    private suspend fun createMlDsaKey(
+        request: Request,
+        genParams: LocalGenerateKeyParams,
+        set: com.automatethethings.xkey.crypto.MlDsaParameterSet,
+        authDurationSeconds: Int
+    ): Response {
+        val backing = mlDsaBacking(genParams, set)
+        val publicKeyDer = try {
+            withContext(Dispatchers.IO) {
+                keystoreManager.generateMlDsaKey(
+                    keyId = genParams.keyId,
+                    set = set,
+                    backing = backing,
+                    authDurationSeconds = authDurationSeconds,
+                    preferStrongBox = genParams.preferStrongBox
+                )
+            }
+        } catch (e: com.automatethethings.xkey.crypto.UnsupportedAlgorithmException) {
+            throw ProtocolException(
+                "This device does not make ${set.wireName} keys in hardware",
+                errorCode = ErrorCodes.FEATURE_UNAVAILABLE
+            )
+        }
+        val keySizeBits = set.publicKeyBytes * 8
+        val level = generatedKeyLevel(
+            genParams.keyId,
+            read = { keystoreManager.generalKeySecurityLevel(genParams.keyId) },
+            discard = { keystoreManager.deleteGeneralKey(genParams.keyId) }
+        )
+        keyDao.insert(
+            KeyEntity(
+                keyId = genParams.keyId,
+                keyType = genParams.keyType,
+                algorithm = set.wireName,
+                label = genParams.label,
+                publicKeyDer = publicKeyDer,
+                keySizeBits = keySizeBits,
+                strongBoxBacked = level == KeySecurityLevel.STRONGBOX,
+                biometricRequired = genParams.requireUserVerification,
+                authDurationSeconds = authDurationSeconds,
+                shareable = genParams.shareable,
+                sharingPolicy = if (genParams.shareable) {
+                    SharingPolicyType.ALL_PEERS
+                } else {
+                    SharingPolicyType.PRIVATE
+                },
+                source = "remote_ble"
+            )
+        )
+        val result = LocalGenerateKeyResult.withLevel(
+            keyId = genParams.keyId,
+            publicKey = Base64.getEncoder().encodeToString(publicKeyDer),
+            publicKeyCose = null,
+            algorithm = set.wireName,
+            keySizeBits = keySizeBits,
+            level = level
+        )
+        Log.i(TAG, "Generated key: ${genParams.keyId}, algo=${set.wireName}, backing=${backing.wire}")
         return Response.success(request.id, result.toJson())
     }
 
@@ -1830,6 +1935,41 @@ class RequestHandler(
                         "Missing 'algorithm' and key has no recorded algorithm",
                         errorCode = ErrorCodes.INVALID_PARAMS
                     )
+            }
+            // An ML-DSA key signs only under its own parameter set.
+            val rowSet = signingKey?.row?.algorithm?.let { MlDsaParameterSet.fromWireName(it) }
+            val requestedSet = MlDsaParameterSet.fromWireName(signAlgorithm)
+            if (rowSet != null || requestedSet != null) {
+                if (signingKey != null && rowSet != requestedSet) {
+                    throw ProtocolException(
+                        "Key ${signParams.keyId} is ${signingKey.row.algorithm}; it cannot sign $signAlgorithm",
+                        errorCode = ErrorCodes.INVALID_ALGORITHM
+                    )
+                }
+                val set = requestedSet!!
+                val startTime = System.currentTimeMillis()
+                val signature = try {
+                    if (signingKey != null) {
+                        signingKey.signMlDsa(data, set)
+                    } else {
+                        val approvedDer = unlistedDer ?: throw ProtocolException(
+                            "Key not found: ${signParams.keyId}",
+                            errorCode = ErrorCodes.KEY_NOT_FOUND
+                        )
+                        keystoreManager.signApprovedMlDsa(signingAlias, approvedDer, data, set)
+                    }
+                } catch (e: com.automatethethings.xkey.crypto.ApprovedKeyChangedException) {
+                    throw ProtocolException(
+                        "Key ${signParams.keyId} changed while its approval waited",
+                        errorCode = ErrorCodes.OPERATION_DENIED
+                    )
+                } catch (e: com.automatethethings.xkey.crypto.UnsupportedAlgorithmException) {
+                    throw ProtocolException(
+                        "Key ${signParams.keyId} cannot sign ${set.wireName}",
+                        errorCode = ErrorCodes.INVALID_ALGORITHM
+                    )
+                }
+                return@useApprovedKeyOrAlias Triple(set.wireName, signature, System.currentTimeMillis() - startTime)
             }
             val jcaAlgorithm = KeystoreManager.jcaSignatureAlgorithm(signAlgorithm)
             val startTime = System.currentTimeMillis()
@@ -2234,6 +2374,17 @@ class RequestHandler(
         val keyEntity = keyDao.getByKeyId(pubKeyParams.keyId)
             ?: throw ProtocolException("Key not found: ${pubKeyParams.keyId}", errorCode = ErrorCodes.KEY_NOT_FOUND)
 
+        // An ML-DSA key has a SubjectPublicKeyInfo (DER, PEM) and no SSH or
+        // COSE key encoding this phone writes.
+        if (MlDsaParameterSet.fromWireName(keyEntity.algorithm) != null &&
+            pubKeyParams.format in setOf(ExportFormats.SSH, ExportFormats.COSE)
+        ) {
+            throw ProtocolException(
+                "${keyEntity.algorithm} keys export as ${ExportFormats.DER} or ${ExportFormats.PEM} only",
+                errorCode = ErrorCodes.UNSUPPORTED_FORMAT
+            )
+        }
+
         val publicKey: String = when (pubKeyParams.format) {
             ExportFormats.DER -> {
                 val der = keystoreManager.getPublicKeyDER(pubKeyParams.keyId)
@@ -2382,6 +2533,10 @@ class RequestHandler(
                         softwareKeys.delete(canonicalId)
                         true
                     }
+                    // A software ML-DSA key lives under its general alias,
+                    // outside the Keystore; deleteGeneralKey removes and audits it.
+                    keystoreManager.pqcSoftwareKeyExists(canonicalId) ->
+                        keystoreManager.deleteGeneralKey(canonicalId)
                     // A canonical ID names its general key `xkey_key_k` first, as
                     // this method always did; another alias only when it has none.
                     else -> com.automatethethings.xkey.storage.KeyStoreSyncManager.keystoreAliasesOf(canonicalId)
@@ -2661,7 +2816,8 @@ class RequestHandler(
             maxKeys = 256, // Android Keystore practical limit
             version = PROTOCOL_VERSION,
             deviceName = Build.MODEL,
-            currentKeyCount = keyDao.getAll().size
+            currentKeyCount = keyDao.getAll().size,
+            hardwareAlgorithms = KeystoreCapabilities.hardwareAlgorithms()
         )
         return Response.success(request.id, result.toJson())
     }
@@ -5142,6 +5298,27 @@ private class ApprovedKey(
         )
         return try {
             keystore.signApproved(snapshot.alias, approvedDer, data, jcaAlgorithm)
+        } catch (e: com.automatethethings.xkey.crypto.ApprovedKeyChangedException) {
+            throw ProtocolException(
+                "Key ${row.keyId} is not the key that was approved",
+                errorCode = ErrorCodes.OPERATION_DENIED
+            )
+        }
+    }
+
+    /**
+     * Signs [data] (pure ML-DSA) with the [set] key under [alias], while it
+     * is the approved key.
+     *
+     * @throws ProtocolException as [sign] does.
+     */
+    suspend fun signMlDsa(data: ByteArray, set: MlDsaParameterSet): ByteArray {
+        val approvedDer = snapshot.publicKeyDer ?: throw ProtocolException(
+            "Key ${row.keyId} had no public key when it was approved",
+            errorCode = ErrorCodes.KEY_NOT_FOUND
+        )
+        return try {
+            keystore.signApprovedMlDsa(snapshot.alias, approvedDer, data, set)
         } catch (e: com.automatethethings.xkey.crypto.ApprovedKeyChangedException) {
             throw ProtocolException(
                 "Key ${row.keyId} is not the key that was approved",

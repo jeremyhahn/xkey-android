@@ -114,7 +114,9 @@ class DecryptResult(val plaintext: ByteArray, val algorithm: String)
 class KeystoreManager(
     private val context: Context,
     /** The device API level; a JVM test stands in a device here. */
-    @VisibleForTesting private val sdkInt: Int = Build.VERSION.SDK_INT
+    @VisibleForTesting private val sdkInt: Int = Build.VERSION.SDK_INT,
+    /** Software ML-DSA keys; hardware ones live in [keyStore] through [PqcHardware.backend]. */
+    private val pqcStore: PqcSoftwareKeyStore = PqcSoftwareKeyStore(context)
 ) {
 
     private val keyStore: KeyStore = KeyStore.getInstance(KEYSTORE_PROVIDER).apply {
@@ -843,6 +845,7 @@ class KeystoreManager(
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && hasEd25519Key(alias)) {
             return KeySecurityLevel.SOFTWARE
         }
+        if (pqcStore.contains(alias)) return KeySecurityLevel.SOFTWARE
         return null
     }
 
@@ -1371,7 +1374,7 @@ class KeystoreManager(
      * @return DER-encoded public key bytes, or null if [alias] holds no key.
      */
     fun publicKeyDERAt(alias: String): ByteArray? =
-        keyStore.getCertificate(alias)?.publicKey?.encoded
+        keyStore.getCertificate(alias)?.publicKey?.encoded ?: pqcStore.publicKeyDer(alias)
 
     /**
      * The Keystore alias the key of key row [keyId] (of [keyType]) lives under.
@@ -1432,6 +1435,97 @@ class KeystoreManager(
             throw SigningException("Signing with $jcaAlgorithm failed", e)
         }
     }
+
+    /**
+     * [signApproved] for an ML-DSA key: signs [data] (pure ML-DSA) with the
+     * [set] key under [alias], only while that key is the approved one. A
+     * software key signs through [PqcSoftwareKeyStore]; a Keystore key through
+     * [PqcHardware.backend]'s JCA algorithm.
+     *
+     * @throws KeyNotFoundException if [alias] holds no key.
+     * @throws ApprovedKeyChangedException if the key under [alias] is not the approved one.
+     * @throws UnsupportedAlgorithmException if the key is not a [set] key, or
+     *   no hardware backend can sign with it.
+     * @throws BiometricRequiredException if the key requires user authentication.
+     * @throws SigningException if signing fails.
+     */
+    suspend fun signApprovedMlDsa(
+        alias: String,
+        approvedPublicKeyDer: ByteArray,
+        data: ByteArray,
+        set: MlDsaParameterSet
+    ): ByteArray = withAliasGate(alias) {
+        val current = publicKeyDERAt(alias) ?: throw KeyNotFoundException(alias)
+        if (!current.contentEquals(approvedPublicKeyDer)) throw ApprovedKeyChangedException(alias)
+        if (mlDsaSetOf(current) != set) {
+            throw UnsupportedAlgorithmException(set.wireName)
+        }
+        if (!keyStore.containsAlias(alias)) {
+            try {
+                return@withAliasGate pqcStore.sign(alias, data)
+            } catch (e: PqcKeyRecordException) {
+                throw SigningException("Signing with ${set.wireName} failed", e)
+            }
+        }
+        val backend = PqcHardware.backend
+            ?: throw UnsupportedAlgorithmException(set.wireName)
+        val privateKey = keyStore.getKey(alias, null) as? PrivateKey
+            ?: throw KeyNotFoundException(alias)
+        try {
+            val signature = Signature.getInstance(backend.jcaSignatureAlgorithm(set))
+            signature.initSign(privateKey)
+            signature.update(data)
+            signature.sign()
+        } catch (e: Exception) {
+            if (requiresUserAuthentication(e)) throw BiometricRequiredException()
+            throw SigningException("Signing with ${set.wireName} failed", e)
+        }
+    }
+
+    /**
+     * Makes an ML-DSA [set] key for [keyId] under its general alias, held as
+     * [backing] says, replacing any key under that alias, and audits it.
+     *
+     * @return the SubjectPublicKeyInfo DER.
+     * @throws UnsupportedAlgorithmException for [PqcBacking.HARDWARE] when
+     *   the device does not make [set] in hardware.
+     */
+    fun generateMlDsaKey(
+        keyId: String,
+        set: MlDsaParameterSet,
+        backing: PqcBacking,
+        authDurationSeconds: Int = 5,
+        preferStrongBox: Boolean = true
+    ): ByteArray {
+        val alias = buildGeneralAlias(keyId)
+        val spki = withAliasGate(alias) {
+            if (keyStore.containsAlias(alias)) keyStore.deleteEntry(alias)
+            pqcStore.delete(alias)
+            when (backing) {
+                PqcBacking.SOFTWARE -> pqcStore.generate(alias, set)
+                PqcBacking.HARDWARE -> {
+                    val backend = PqcHardware.backend?.takeIf { set in it.supportedParameterSets() }
+                        ?: throw UnsupportedAlgorithmException(set.wireName)
+                    backend.generate(alias, set, authDurationSeconds, preferStrongBox)
+                }
+            }
+        }
+        AuditLogger.logKeyCreated(
+            keyId = keyId,
+            keyLabel = keyId,
+            keyType = "general",
+            algorithm = set.wireName,
+            strongBox = runCatching { generalKeySecurityLevel(keyId) }.getOrNull() == KeySecurityLevel.STRONGBOX
+        )
+        return spki
+    }
+
+    /** The ML-DSA set an SPKI's algorithm OID names, or null for any other key. */
+    private fun mlDsaSetOf(spki: ByteArray): MlDsaParameterSet? = runCatching {
+        MlDsaParameterSet.fromOid(
+            org.bouncycastle.asn1.x509.SubjectPublicKeyInfo.getInstance(spki).algorithm.algorithm.id
+        )
+    }.getOrNull()
 
     // -------------------------------------------------------------------------
     // RSA Decryption
@@ -1685,7 +1779,8 @@ class KeystoreManager(
      * @return DER-encoded public key bytes, or null if the key does not exist.
      */
     fun getPublicKeyDER(keyId: String): ByteArray? {
-        val alias = resolveKeystoreAlias(keyId) ?: return null
+        val alias = resolveKeystoreAlias(keyId)
+            ?: return pqcStore.publicKeyDer(buildGeneralAlias(keyId))
         val cert = keyStore.getCertificate(alias) ?: return null
         return cert.publicKey.encoded
     }
@@ -1929,8 +2024,11 @@ class KeystoreManager(
      */
     fun generalKeyExists(keyId: String): Boolean {
         val alias = buildGeneralAlias(keyId)
-        return keyStore.containsAlias(alias)
+        return keyStore.containsAlias(alias) || pqcStore.contains(alias)
     }
+
+    /** Whether [keyId] is a software ML-DSA key ([PqcSoftwareKeyStore]). */
+    fun pqcSoftwareKeyExists(keyId: String): Boolean = pqcStore.contains(buildGeneralAlias(keyId))
 
     /**
      * Delete a general-purpose key from the keystore.
@@ -1940,10 +2038,16 @@ class KeystoreManager(
      */
     fun deleteGeneralKey(keyId: String): Boolean {
         val alias = buildGeneralAlias(keyId)
-        if (!keyStore.containsAlias(alias)) {
+        val deleted = withAliasGate(alias) {
+            // A software ML-DSA record and a Keystore entry never share an
+            // alias; either one is the key, and both go.
+            val inKeystore = keyStore.containsAlias(alias)
+            if (inKeystore) keyStore.deleteEntry(alias)
+            pqcStore.delete(alias) || inKeystore
+        }
+        if (!deleted) {
             return false
         }
-        withAliasGate(alias) { keyStore.deleteEntry(alias) }
 
         // Log key deletion
         AuditLogger.logKeyDeleted(
