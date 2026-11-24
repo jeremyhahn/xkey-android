@@ -39,6 +39,7 @@ import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -134,6 +135,23 @@ class PolicyDeniedAuditTest {
         assertEquals(PEER, denial.deviceId)
         assertEquals(MethodNames.LOCAL_SIGN_FIDO2_ASSERTION, denial.operation)
         assertFalse("the row must not carry the client data", denial.reason.contains(CLIENT_DATA_B64))
+    }
+
+    /**
+     * A served connection that authenticated no peer is refused, and writes
+     * no row: every row names the caller's peer, and an anonymous caller must
+     * not be able to fill the log and push real entries out.
+     */
+    @Test
+    fun `a refusal on a served connection with no peer writes no POLICY_DENIED row`() = runTest {
+        val response = withContext(
+            RequestHandler.servedConnection(SessionBindingProvider { null }, null, "test:connection")
+        ) {
+            sign(PRIVATE_ID)
+        }
+
+        assertEquals(ErrorCodes.OPERATION_DENIED, response.error?.code)
+        assertEquals(emptyList<Denial>(), denials)
     }
 
     @Test
