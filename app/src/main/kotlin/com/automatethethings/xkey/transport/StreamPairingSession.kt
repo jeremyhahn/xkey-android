@@ -537,7 +537,11 @@ class StreamPairingSession(
         // (#93). The desktop byte-compares it and mixes it into the prologue.
         val fingerprint = paired?.deviceFingerprint
 
-        if (paired != null && fingerprint != null && fingerprint.length == FINGERPRINT_SIZE * 2) {
+        // A stored value that is not 32 bytes of hex is no fingerprint:
+        // hexToBytes would turn its non-hex characters into garbage bytes.
+        if (paired != null && fingerprint != null && fingerprint.length == FINGERPRINT_SIZE * 2 &&
+            fingerprint.all { Character.digit(it, 16) >= 0 }
+        ) {
             val fingerprintBytes = fingerprint.hexToBytes()
             val ack = ByteArray(1 + FINGERPRINT_SIZE)
             ack[0] = IDENTITY_ACK_KNOWN
