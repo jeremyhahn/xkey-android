@@ -62,6 +62,12 @@ class OathHotpConcurrentCopyTest {
             return 1
         }
 
+        override suspend fun claimAndRecordUsage(oathId: String, expected: Long, hotp: Boolean, timestamp: Long): Boolean {
+            if (hotp && claimCounter(oathId, expected) == 0) return false
+            recordUsage(oathId, timestamp)
+            return true
+        }
+
         override suspend fun recordUsage(oathId: String, timestamp: Long) = Unit
     }
 

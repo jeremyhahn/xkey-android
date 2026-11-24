@@ -70,8 +70,8 @@ class OathRepositoryAuditTest {
         coEvery { dao.getByOathId(any()) } returns null
         coEvery { dao.getByOathId(HOTP_ID) } returns stored(HOTP_ID, "HOTP")
         coEvery { dao.getByOathId(TOTP_ID) } returns stored(TOTP_ID, "TOTP")
-        // A relaxed mock returns 0, which reads as a lost counter race.
-        coEvery { dao.claimCounter(any(), any()) } returns 1
+        // A relaxed mock returns false, which reads as a lost counter race.
+        coEvery { dao.claimAndRecordUsage(any(), any(), any(), any()) } returns true
         // Likewise a delete count of 0 reads as a delete that removed nothing.
         coEvery { dao.deleteAndRecordDeletion(any(), any()) } returns 1
 
@@ -159,7 +159,7 @@ class OathRepositoryAuditTest {
     fun `an HOTP code generation writes one generated row`() = runTest {
         repository.generateCode(HOTP_ID)
 
-        coVerify(exactly = 1) { dao.claimCounter(HOTP_ID, 5L) }
+        coVerify(exactly = 1) { dao.claimAndRecordUsage(HOTP_ID, 5L, true, any()) }
         verify(exactly = 1) { AuditLogger.logOathCodeGenerated(HOTP_ID, ISSUER, ACCOUNT, any(), any()) }
         verify(exactly = 1) { AuditLogger.logOathCodeGenerated(any(), any(), any(), any(), any()) }
     }
@@ -228,18 +228,49 @@ class OathRepositoryAuditTest {
     @Test
     fun `an HOTP generation cancelled after its counter commit is still audited`() = runTest {
         lateinit var job: Job
-        coEvery { dao.claimCounter(HOTP_ID, 5L) } coAnswers {
+        coEvery { dao.claimAndRecordUsage(HOTP_ID, 5L, true, any()) } coAnswers {
             cancelAfterCommit { job }
-            1
+            true
         }
 
         job = launch { repository.generateCode(HOTP_ID) }
         advanceUntilIdle()
 
-        coVerify(exactly = 1) { dao.claimCounter(HOTP_ID, 5L) }
+        coVerify(exactly = 1) { dao.claimAndRecordUsage(HOTP_ID, 5L, true, any()) }
         verify(exactly = 1) { AuditLogger.logOathCodeGenerated(HOTP_ID, ISSUER, ACCOUNT, any(), any()) }
         verify(exactly = 1) { AuditLogger.logOathCodeGenerated(any(), any(), any(), any(), any()) }
     }
+
+    // -----------------------------------------------------------------------
+    // One choke point for the claim and the usage
+    // -----------------------------------------------------------------------
+
+    @Test
+    fun `no main source outside the DAO claims an OATH counter or records an OATH usage directly`() {
+        val root = listOf(java.io.File("src/main/kotlin"), java.io.File("app/src/main/kotlin")).first { it.isDirectory }
+        val offenders = root.walkTopDown()
+            .filter { it.isFile && it.name.endsWith(".kt") && it.name != "OathCredentialDao.kt" }
+            .flatMap { file -> directOathWrites.findAll(file.readText()).map { "${file.name}: ${it.value}" } }
+            .toList()
+        assertTrue("direct OATH claim or usage writes: $offenders", offenders.isEmpty())
+    }
+
+    @Test
+    fun `the scan catches each bypass form`() {
+        listOf(
+            "dao.claimCounter(id, 5L)",
+            "dao.recordUsage(id, now)",
+            "db.oathCredentialDao().recordUsage(id)",
+            "oathDao.claimCounter(id, 1)",
+            "oathCredentialDao.recordUsage(id)"
+        ).forEach { assertTrue(it, directOathWrites.containsMatchIn(it)) }
+        listOf("keyDao.recordUsage(id)", "pivSlotDao.recordUsage(slot)", "dao.claimAndRecordUsage(id, 5L, true, now)")
+            .forEach { assertTrue(it, !directOathWrites.containsMatchIn(it)) }
+    }
+
+    /** A claimCounter call on any receiver, or recordUsage on an OATH DAO receiver. */
+    private val directOathWrites =
+        Regex("""\.claimCounter\(|(\bdao|oath\w*Dao(\(\))?)\.recordUsage\(""", RegexOption.IGNORE_CASE)
 
     private fun stored(id: String, type: String) = OathCredentialEntity(
         oathId = id,

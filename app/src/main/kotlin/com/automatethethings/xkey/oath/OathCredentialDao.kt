@@ -218,6 +218,23 @@ interface OathCredentialDao {
     }
 
     /**
+     * Claim the HOTP counter value [expected] ([claimCounter], only when
+     * [hotp]) and record the usage at [timestamp] ([recordUsage]), in one
+     * transaction: a usage write that fails rolls the claim back, so the
+     * counter never advances without its usage and audit row. The one
+     * caller of [claimCounter] and [recordUsage] for code generation.
+     *
+     * @return true if the counter value was claimed (always for TOTP) and
+     *         the usage recorded; false if the counter moved on.
+     */
+    @Transaction
+    suspend fun claimAndRecordUsage(oathId: String, expected: Long, hotp: Boolean, timestamp: Long): Boolean {
+        if (hotp && claimCounter(oathId, expected) == 0) return false
+        recordUsage(oathId, timestamp)
+        return true
+    }
+
+    /**
      * If [oathId] has a deletion record, delete any row still stored under
      * it, in one transaction with the check: a row an earlier, interrupted
      * merge left beside its record never stays usable. Synced ids are never

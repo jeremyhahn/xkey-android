@@ -247,7 +247,12 @@ class OathRepositoryHardeningTest {
         )
         val stuck = OathRepository(
             object : OathCredentialDao by dao {
-                override suspend fun claimCounter(oathId: String, expected: Long): Int = 0
+                override suspend fun claimAndRecordUsage(
+                    oathId: String,
+                    expected: Long,
+                    hotp: Boolean,
+                    timestamp: Long
+                ): Boolean = false
             },
             secretManager
         )

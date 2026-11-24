@@ -96,6 +96,12 @@ class OathHotpCounterRaceTest {
             row = current.copy(counter = expected.inc())
             return 1
         }
+
+        override suspend fun claimAndRecordUsage(oathId: String, expected: Long, hotp: Boolean, timestamp: Long): Boolean {
+            if (hotp && claimCounter(oathId, expected) == 0) return false
+            recordUsage(oathId, timestamp)
+            return true
+        }
     }
 
     private lateinit var dao: FakeOathDao

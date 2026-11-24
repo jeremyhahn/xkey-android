@@ -607,9 +607,7 @@ class OathRepository(
             val tried = credential.counter
             val won = auditedWrite(
                 write = {
-                    val claimed = credential.oathType != "HOTP" || dao.claimCounter(oathId, tried) > 0
-                    if (claimed) dao.recordUsage(oathId, System.currentTimeMillis())
-                    claimed
+                    dao.claimAndRecordUsage(oathId, tried, credential.oathType == "HOTP", System.currentTimeMillis())
                 },
                 audit = { claimed ->
                     if (claimed) {
