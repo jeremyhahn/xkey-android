@@ -366,7 +366,7 @@ class OathActivity : AppCompatActivity() {
 
     private fun buildKeyList() {
         adapter = OathAdapter(
-            onItemClick = { item -> copyCodeToClipboard(item) },
+            onItemClick = { item -> copyCodeToClipboard(item.credential.oathId) },
             onItemLongClick = { item ->
                 showContextMenu(item)
                 true
@@ -672,21 +672,27 @@ class OathActivity : AppCompatActivity() {
     // -------------------------------------------------------------------------
 
     /**
-     * Copies the row's code through [OathCodeClipboard]: a sensitive clip,
-     * and for HOTP the code at the stored counter, which then advances (the
-     * list moves on to the next counter's code).
+     * Copies the code of [oathId] as it is now through [OathCodeClipboard]:
+     * a sensitive clip, and for HOTP the code at the stored counter, which
+     * then advances (the list moves on to the next counter's code). Callers
+     * pass only the id, never a code they showed earlier.
      */
-    private fun copyCodeToClipboard(item: OathCredentialWithCode) {
+    private fun copyCodeToClipboard(oathId: String) {
         lifecycleScope.launch {
             try {
-                codeClipboard.copy(item.credential, item.code)
+                codeClipboard.copy(oathId)
                 Snackbar.make(
                     rootLayout,
                     R.string.oath_code_copied,
                     Snackbar.LENGTH_SHORT
                 ).show()
             } catch (e: Exception) {
-                showError(e)
+                // The exception text can quote key material: one generic message.
+                Snackbar.make(
+                    rootLayout,
+                    R.string.oath_code_unavailable,
+                    Snackbar.LENGTH_SHORT
+                ).show()
             }
         }
     }
@@ -709,12 +715,15 @@ class OathActivity : AppCompatActivity() {
         val desktopMenu = desktopActions.openMenu(item.credential)
         val menu = OathListMenu(desktopMenu.entries)
         val labels = menu.labels.map { getString(it) }
+        // Copy keeps only the id: the code is generated when Copy is picked,
+        // not the one shown as the menu opened.
+        val oathId = item.credential.oathId
 
         MaterialAlertDialogBuilder(this)
             .setTitle(displayName)
             .setItems(labels.toTypedArray()) { _, which ->
                 when (menu.actionAt(which)) {
-                    OathListMenu.Action.COPY -> copyCodeToClipboard(item)
+                    OathListMenu.Action.COPY -> copyCodeToClipboard(oathId)
                     OathListMenu.Action.DELETE -> showDeleteConfirmation(item)
                     OathListMenu.Action.DETAILS -> startActivity(
                         OathCredentialDetailActivity.intent(this, item.credential.oathId)

@@ -36,7 +36,7 @@ the desktop for that copy's code, through `remote.oathAdd` and
 | `OathCredentialEntity`, `OathCredentialDao` | `app/src/main/kotlin/com/automatethethings/xkey/oath/OathCredentialEntity.kt`, `OathCredentialDao.kt` | Row: `oathId`, `oathType`, `algorithm`, `digits`, `periodSeconds`, `counter`, `issuer`, `accountName`, `secretEncrypted`, `source`; DAO `getAll`, `getByOathId`, `getByIssuer`, `getBySource`, `count`, `observeCount`, `updateCounter`, `recordUsage`, `deleteByOathId` |
 | `parseOathLabel`, `parseStructuredOathLabel` | `app/src/main/kotlin/com/automatethethings/xkey/oath/OathLabel.kt` | Split an `otpauth://` label into issuer and account |
 | `OathActivity`, `OathAdapter` (`OathRowLayout`), `AddOathDialog`, `QrScannerActivity` | `app/src/main/kotlin/com/automatethethings/xkey/ui/` | On-phone screens: the list with live codes, manual entry, QR import |
-| `OathCodeClipboard` | `app/src/main/kotlin/com/automatethethings/xkey/ui/OathCodeClipboard.kt` | The one copy path: sensitive clip, HOTP through `generateCode` |
+| `OathCodeClipboard` | `app/src/main/kotlin/com/automatethethings/xkey/ui/OathCodeClipboard.kt` | The one copy path: `copy(oathId)` takes the code from `generateCode` when it runs; sensitive clip |
 | `OathListMenu` | `app/src/main/kotlin/com/automatethethings/xkey/ui/OathListMenu.kt` | Long-press menu entries and index-to-action mapping |
 | `OathCredentialDetailActivity`, `OathCredentialDetailViewModel` | `app/src/main/kotlin/com/automatethethings/xkey/ui/` | Details screen; state without the secret, injectable clock |
 | `OathDesktopActions`, `PrefsDesktopOathLinks` | `app/src/main/kotlin/com/automatethethings/xkey/ui/OathActivity.kt` | The long-press menu's desktop entries; remembers, per desktop, the id the desktop gave each copied credential (SharedPreferences `oath_desktop_links`, ids only) |
@@ -136,10 +136,17 @@ right-to-left layouts.
 
 **Tap and copy.** A tap on a row, the long-press Copy and the details screen's
 Copy all go through `OathCodeClipboard`. The clip is marked sensitive
-(`ClipDescription.EXTRA_IS_SENSITIVE`, API 33+). A TOTP copy copies the code on
-screen and changes nothing. An HOTP copy calls `OathRepository.generateCode`,
-which copies the code at the stored counter, advances the counter and records
-the use, so every HOTP copy is a fresh code. `SensitiveClipboard` takes the
+(`ClipDescription.EXTRA_IS_SENSITIVE`, API 33+). Every copy passes only the
+credential id and takes the code from `OathRepository.generateCode` when it
+runs, never a code captured on screen, so a menu or details screen left open
+across a TOTP period copies the current code. A TOTP copy changes nothing but
+the use record; an HOTP copy copies the code at the stored counter and advances
+the counter once, so every HOTP copy is a fresh code. When no code can be
+computed the copy fails before any counter claim, nothing is copied and the
+screen shows one generic "code unavailable" message. The code shown in the
+list and on the details screen comes from `OathCurrentCode`, which never
+advances a counter and returns "unavailable" instead of throwing; the details
+screen then still shows the metadata, with Copy off. `SensitiveClipboard` takes the
 code off the clipboard 45 seconds later, but only once it can read the
 clipboard and finds the token it tagged the clip with: a clip set by anyone
 else stays. Android 10 and later hide the clipboard from an app without window
@@ -179,7 +186,7 @@ secrets (see its handler documentation).
 
 ## Tests
 
-- Unit (`app/src/test`): `OathEngineTest`, `OathEngineRfcVectorTest` (RFC 4226 / RFC 6238 vectors, the basis for codes matching the desktop's), `OathCredentialEntityTest`, `OathLabelTest`, `OathManualEntryUriTest`, `OathRepositoryImportPathTest`, `OathAddHandlerTest`, `PinOathHandlerErrorsTest`, `RemoteOathClientTest`, `OathAdapterTest`, `OathAdapterLayoutTest` (320dp row at font scale 1 and 2), `OathCodeClipboardTest`, `OathListMenuTest`, `OathCredentialDetailViewModelTest`, `OathDesktopActionsTest`.
+- Unit (`app/src/test`): `OathEngineTest`, `OathEngineRfcVectorTest` (RFC 4226 / RFC 6238 vectors, the basis for codes matching the desktop's), `OathCredentialEntityTest`, `OathLabelTest`, `OathManualEntryUriTest`, `OathRepositoryImportPathTest`, `OathAddHandlerTest`, `PinOathHandlerErrorsTest`, `RemoteOathClientTest`, `OathAdapterTest`, `OathAdapterLayoutTest` (320dp row at font scale 1 and 2), `OathCodeClipboardTest`, `SensitiveClipboardTest`, `OathChokePointsTest`, `OathListMenuTest`, `OathCredentialDetailViewModelTest`, `OathDesktopActionsTest`.
 - Instrumented (`app/src/androidTest`): `OathRepositoryTest`, `OathSecretManagerTest`, `OathImportIntegrityTest`, `OathActivityUiTest`, `OathCredentialDetailActivityTest`, `OathFlowTest`, `OathManualEntryFlowTest`, `AddOathDialogFlowTest`.
 
 ## Related features

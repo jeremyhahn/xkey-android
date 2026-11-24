@@ -115,8 +115,10 @@ class OathCredentialDetailViewModel(
     suspend fun copy(clipboard: OathCodeClipboard): String? {
         val credential = current ?: return null
         val shown = (_state.value as? OathCredentialDetailUiState.Shown)?.details ?: return null
-        val code = shown.code ?: return null
-        val copied = clipboard.copy(credential, code)
+        // Off while no code can be computed; when one can, the clipboard
+        // generates it afresh rather than copying the last tick's code.
+        if (shown.code == null) return null
+        val copied = clipboard.copy(credential.oathId)
         refresh()
         return copied
     }

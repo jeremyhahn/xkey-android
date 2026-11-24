@@ -154,7 +154,7 @@ class OathCredentialDetailViewModelTest {
         val vm = viewModel("hotp")
         vm.refresh()
         val clipboard = mockk<OathCodeClipboard>()
-        coEvery { clipboard.copy(any(), "755224") } answers {
+        coEvery { clipboard.copy("hotp") } answers {
             rows["hotp"] = rows.getValue("hotp").copy(counter = 1)
             "755224"
         }
@@ -201,7 +201,7 @@ class OathCredentialDetailViewModelTest {
 
         val clipboard = mockk<OathCodeClipboard>()
         assertNull(vm.copy(clipboard))
-        coVerify(exactly = 0) { clipboard.copy(any(), any()) }
+        coVerify(exactly = 0) { clipboard.copy(any()) }
     }
 
     @Test
