@@ -29,14 +29,18 @@ import io.mockk.mockk
 import io.mockk.mockkObject
 import io.mockk.mockkStatic
 import io.mockk.unmockkAll
+import io.mockk.verify
+import java.io.File
 import java.security.KeyStore
 import java.util.Collections
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
@@ -195,7 +199,47 @@ class KeystoreManagerPqcLifecycleTest {
         assertThrows(KeyNotFoundException::class.java) { signApproved("doomed", spki) }
     }
 
+    @Test
+    fun `no internal wrap key is resolved or deleted and a software key still signs`() {
+        val spki = generate("kept", -1)
+        every { keyStore.containsAlias(any()) } answers { firstArg<String>() in INTERNAL_ALIASES }
+
+        for (alias in INTERNAL_ALIASES) {
+            assertNull(alias, manager.resolveKeystoreAlias(alias))
+            assertFalse(alias, manager.deleteByAlias(alias))
+            assertFalse(alias, manager.deleteKey(alias))
+        }
+
+        verify(exactly = 0) { keyStore.deleteEntry(any()) }
+        assertEquals(SET.signatureBytes, signApproved("kept", spki).size)
+    }
+
+    @Test
+    fun `every alias a KeystoreAeadCipher is built with in the app is internal`() {
+        val call = Regex("""KeystoreAeadCipher\((\w+)\)""")
+        val seen = mutableSetOf<String>()
+        File("src/main/kotlin").walk().filter { it.extension == "kt" }.forEach { file ->
+            val text = file.readText()
+            for (match in call.findAll(text)) {
+                val name = match.groupValues[1]
+                val declaration = Regex("""val $name\s*=\s*KeystoreAeadCipher\.(\w+)""").find(text)
+                    ?: fail("${file.name}: $name is not taken from KeystoreAeadCipher's internal aliases")
+                val alias = KeystoreAeadCipher::class.java.getField(declaration!!.groupValues[1]).get(null) as String
+                assertTrue("${file.name}: $alias", KeystoreAeadCipher.isInternalAlias(alias))
+                seen += alias
+            }
+        }
+        assertEquals(4, seen.size)
+        for (set in MlDsaParameterSet.entries) {
+            assertTrue(KeystoreAeadCipher.isInternalAlias(KeystorePqcBackend.probeAlias(set)))
+        }
+    }
+
     private companion object {
+        val INTERNAL_ALIASES = listOf(
+            "xkey_pqc_wrap", "xkey_software_key_store", "xkey_password_encryption_key",
+            "xkey_seal_store_key", "xkey_oath_secret_encryption_key", "xkey_pqc_probe_ml_dsa_44"
+        )
         val SET = MlDsaParameterSet.ML_DSA_44
         val DATA = "message".toByteArray()
     }
