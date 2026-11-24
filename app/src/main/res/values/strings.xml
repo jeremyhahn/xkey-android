@@ -97,7 +97,7 @@
     <string name="settings_auth_mode_time_window">Time window</string>
     <string name="settings_auth_mode_time_window_description">Require biometric once per time window</string>
     <string name="settings_auth_mode_per_session">Per session</string>
-    <string name="settings_auth_mode_per_session_description">Require biometric once until app goes to background</string>
+    <string name="settings_auth_mode_per_session_description">Ask for biometric once per desktop connection</string>
     <string name="settings_time_window_title">Time Window Duration</string>
     <string name="settings_time_window_description">Authentication remains valid for this duration</string>
     <string name="settings_security_info">For maximum security, use per-operation mode. Time window and per-session modes provide convenience but reduce security by allowing multiple operations with a single authentication.</string>

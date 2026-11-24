@@ -18,6 +18,7 @@ import android.app.Activity
 import android.view.View
 import android.view.ViewGroup
 import android.widget.TextView
+import androidx.biometric.BiometricManager
 import androidx.core.widget.NestedScrollView
 import androidx.lifecycle.Lifecycle
 import androidx.test.core.app.ActivityScenario
@@ -33,6 +34,7 @@ import org.hamcrest.Matcher
 import org.hamcrest.Matchers.allOf
 import org.hamcrest.TypeSafeMatcher
 import org.junit.Assert.assertTrue
+import org.junit.Assume.assumeFalse
 
 /**
  * Shared helpers for the programmatic-UI instrumented tests in this package.
@@ -49,8 +51,19 @@ import org.junit.Assert.assertTrue
  *   that have no ids and frequently repeat the same text.
  */
 
-/** Default budget for the polling helpers. */
-private const val AWAIT_TIMEOUT_MS = 5_000L
+/**
+ * Default budget for the polling helpers. A real phone doing Keystore work or
+ * settling a dialog transition is slower than an emulator; a passing wait
+ * returns as soon as its condition holds, so only a failure pays the full budget.
+ */
+private const val AWAIT_TIMEOUT_MS = 10_000L
+
+/**
+ * Budget for a prompt raised from another component -- a system biometric
+ * prompt, a pairing dialog, a prompt activity -- to reach the screen. Covers a
+ * cold activity start on a real device.
+ */
+const val PROMPT_TIMEOUT_MS = 20_000L
 
 /** Poll interval for the polling helpers. */
 private const val AWAIT_POLL_MS = 50L
@@ -318,4 +331,24 @@ fun <T : View> switchForLabel(root: View, label: String, switchType: Class<T>): 
 /** Blocks until the instrumentation main loop is idle. */
 fun waitForIdle() {
     InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+}
+
+/**
+ * Skips the calling test on a device with an enrolled strong biometric.
+ *
+ * The prompt tests cover the path where the system prompt fails at once
+ * because nothing is enrolled -- the emulator's situation. On a phone with a
+ * fingerprint or face enrolled the same prompt shows and waits for its owner,
+ * so the test would time out on a person rather than on the app.
+ */
+fun assumeNoEnrolledStrongBiometric() {
+    val context = InstrumentationRegistry.getInstrumentation().targetContext
+    val enrolled = BiometricManager.from(context)
+        .canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_STRONG) ==
+        BiometricManager.BIOMETRIC_SUCCESS
+    assumeFalse(
+        "this device has an enrolled strong biometric: the prompt would wait for its owner " +
+            "instead of failing at once",
+        enrolled
+    )
 }

@@ -21,7 +21,6 @@ import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothManager
 import android.content.Context
 import android.os.ParcelFileDescriptor
-import androidx.fragment.app.FragmentActivity
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.rule.GrantPermissionRule
@@ -32,7 +31,7 @@ import com.automatethethings.xkey.usb.UsbAccessoryServer
 import com.automatethethings.xkey.usb.UsbAccessoryState
 import java.io.FileInputStream
 import java.io.FileOutputStream
-import java.lang.ref.WeakReference
+import com.automatethethings.xkey.ui.PromptActivityTracker
 import java.security.SecureRandom
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.Dispatchers
@@ -516,20 +515,13 @@ class XKeyGattServiceTest {
     }
 
     /**
-     * Detaching the activity must not leave a stale reference behind — the
-     * service holds it only to raise the pairing dialog, and a reference to a
-     * destroyed activity would leak it and raise the dialog on nothing.
+     * The service holds no activity of its own: the pairing dialog is hosted
+     * by the app-wide record of the screen in front, so no screen's
+     * onPause/onDestroy can take another screen's place away (#320).
      */
     @Test
-    fun detachingTheActivityClearsTheReference() {
-        val field = XKeyGattService::class.java.getDeclaredField("activityRef")
-            .apply { isAccessible = true }
-        field.set(probe.service, WeakReference<FragmentActivity>(null))
-        assertNotNull(field.get(probe.service))
-
-        probe.service.setActivity(null)
-
-        assertNull(field.get(probe.service))
+    fun thePairingPromptHostIsTheAppWideTracker() {
+        assertSame(PromptActivityTracker, probe.service.promptHost)
     }
 
     /**
