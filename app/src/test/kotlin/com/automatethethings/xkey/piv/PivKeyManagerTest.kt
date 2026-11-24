@@ -53,7 +53,9 @@ import java.math.BigInteger
 import java.security.KeyPair
 import java.security.KeyPairGenerator
 import java.security.KeyStore
+import java.security.Provider
 import java.security.ProviderException
+import java.security.Security
 import java.security.Signature
 import java.security.cert.Certificate
 import java.security.cert.CertificateFactory
@@ -64,6 +66,9 @@ import javax.crypto.KeyAgreement
 
 /** Every algorithm a device offers without the curve 25519 hardware probe. */
 private val NON_CURVE_25519 = PivAlgorithm.entries.filterNot { it.isCurve25519 }
+
+/** Class name prefixes of the providers the JDK installs. */
+private val JDK_PROVIDER_PACKAGES = listOf("sun.", "com.sun.", "jdk.", "org.jcp.xml.")
 
 /**
  * Unit tests for [PivKeyManager] paths that run without the Android Keystore.
@@ -92,8 +97,17 @@ class PivKeyManagerTest {
     private var generatorCalls = 0
     private val generatedAliases = mutableListOf<String>()
 
+    /** Providers an earlier test in this JVM installed, with their 1-based positions. */
+    private val foreignProviders = mutableListOf<Pair<Int, Provider>>()
+
     @Before
     fun setUp() {
+        // Earlier tests in the same JVM can leave Conscrypt or Bouncy Castle first, which refuse the JDK test keys.
+        Security.getProviders().forEachIndexed { index, provider ->
+            val jdk = JDK_PROVIDER_PACKAGES.any { provider.javaClass.name.startsWith(it) }
+            if (!jdk) foreignProviders += (index + 1) to provider
+        }
+        foreignProviders.forEach { (_, provider) -> Security.removeProvider(provider.name) }
         mockkStatic(Log::class)
         every { Log.i(any(), any<String>()) } returns 0
         every { Log.w(any(), any<String>()) } returns 0
@@ -115,6 +129,7 @@ class PivKeyManagerTest {
         // The Keystore probe's answers are kept for the process.
         PivKeyManager.forgetHardwareProbes()
         unmockkAll()
+        foreignProviders.forEach { (position, provider) -> Security.insertProviderAt(provider, position) }
     }
 
     @Test
