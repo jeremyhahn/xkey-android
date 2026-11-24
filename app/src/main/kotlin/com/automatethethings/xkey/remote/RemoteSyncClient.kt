@@ -115,13 +115,20 @@ class RemoteSyncClient(
         )
     }
 
-    /** Pushes the phone's certificates and merges the laptop's. Returns (pushed, pulled). */
-    suspend fun syncTrustStore(): Pair<Int, Int> {
-        val mine = engine.gatherCertificates()
-        val resp = sendRequest(MethodNames.REMOTE_SYNC_TRUST_STORE, JSONObject().put("certificates", mine))
-        val merged = engine.mergeCertificates(resp.result?.optJSONArray("local") ?: JSONArray())
-        return acceptedByPeer(resp) to merged.added
-    }
+    /**
+     * Pushes the phone's certificates and merges the laptop's. Returns
+     * (pushed, pulled). Records one outbound audit entry, failed or not.
+     */
+    suspend fun syncTrustStore(): Pair<Int, Int> = audited(
+        AuditLogger::logTrustStoreSyncPerformed,
+        send = {
+            sendRequest(MethodNames.REMOTE_SYNC_TRUST_STORE, JSONObject().put("certificates", engine.gatherCertificates()))
+        },
+        merge = { local ->
+            val counts = engine.mergeCertificates(local)
+            SyncEngine.ItemCounts(added = counts.added, updated = 0, skipped = counts.skipped)
+        }
+    )
 
     /**
      * Pushes the phone's OATH credentials and merges the laptop's. Returns

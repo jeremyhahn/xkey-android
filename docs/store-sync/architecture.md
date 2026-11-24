@@ -166,28 +166,40 @@ the counts and the `remote` array.
 
 ## Audit
 
-Every OATH and password sync, in either direction, records one audit entry,
+Every trust-store, OATH and password sync, in either direction, records one audit entry,
 success or failure (see [audit-log](../audit-log/architecture.md#sync-events)):
 
 | Leg | Recorded by | Operation type | Device |
 |-----|-------------|----------------|--------|
+| `local.syncTrustStore` | `handleSyncTrustStore` | `TRUST_STORE_SYNC_PERFORMED`, `direction` `inbound` | as for `local.syncOATH` below |
 | `local.syncOATH` | `handleSyncOATH` | `OATH_SYNC_PERFORMED`, `direction` `inbound` | the peer of the connection the request arrived on (none when it authenticated no peer; the served peer only for a request that names no connection) and its paired name |
 | `local.syncPasswords` | `handleSyncPasswords` | `PASSWORD_SYNC_PERFORMED`, `direction` `inbound` | as above |
+| `remote.syncTrustStore` | `RemoteSyncClient.syncTrustStore` | `TRUST_STORE_SYNC_PERFORMED`, `direction` `outbound` | as for `remote.syncOATH` below |
 | `remote.syncOATH` | `RemoteSyncClient.syncOath` | `OATH_SYNC_PERFORMED`, `direction` `outbound` | the client's `peerDeviceId` / `peerDeviceName` (null when the caller passes none; `XKeyGattService.syncNow` passes none yet) |
 | `remote.syncPasswords` | `RemoteSyncClient.syncPasswords` | `PASSWORD_SYNC_PERFORMED`, `direction` `outbound` | as above |
 
 A locked vault is recorded as a failed password entry, inbound and outbound
 (`syncAll()` still syncs the other stores). Entries hold counts only, never a
-secret, password, site or user name. Trust-store syncs record no entry yet.
+secret, password, site or user name. A trust-store entry holds
+`certificateCount`, `added` and `skipped`, never a certificate body.
+
+A certificate merged through sync is stored with source `sync`: it shows in
+the trust store and syncs back out, but never anchors
+`verifyIDevIDChain` (endorsement-key / IDevID checks). Adding the same
+certificate on the phone re-stores it as `manual`, which makes it an anchor.
+Each certificate merges on its own: a self-signed, unparsable or rejected one
+is skipped and counted. A failed trust-store leg in `syncAll()` is recorded
+and the OATH and password legs still run.
 
 ## Tests
 
 | Test class | Covers |
 |------------|--------|
-| `RemoteSyncClientTest` (`app/src/test/.../remote/`) | Outbound legs and push counts; `remote.syncStatus` params, result parsing and malformed replies; distinct ids for a status request beside a store leg; one outbound audit entry per OATH and password leg |
+| `RemoteSyncClientTest` (`app/src/test/.../remote/`) | Outbound legs and push counts; `remote.syncStatus` params, result parsing and malformed replies; distinct ids for a status request beside a store leg; one outbound audit entry per trust-store, OATH and password leg; a failed trust-store leg does not stop the others |
 | `SyncAuditTest` (`app/src/test/.../protocol/`) | One inbound audit entry per `local.syncOATH` / `local.syncPasswords`, failures and a locked vault included; no password data in the entry |
+| `TrustStoreSyncHandlerTest` (`app/src/test/.../protocol/`) | `local.syncTrustStore` against a real store: synced CAs never anchor, per-certificate merge, one inbound audit entry |
 | `RemoteClientInteropTest` (`app/src/test/.../remote/`) | Outbound client wire interop |
-| `SyncEngineStatusTest`, `SyncEngineTrustStoreTest`, `PasswordSyncTest` (`app/src/test/.../sync/`) | Status checksums, certificate merge, password gather and merge |
+| `SyncEngineStatusTest`, `SyncEngineTrustStoreTest`, `SyncedTrustAnchorTest`, `PasswordSyncTest` (`app/src/test/.../sync/`) | Status checksums, certificate merge, synced certificates never anchoring, password gather and merge |
 | `SyncCodecTest` (`app/src/test/.../crypto/`) | Codec helpers |
 | `SyncStatusTextTest` (`app/src/test/.../ui/`) | The desktop status line and its failure handling |
 | `SyncEngineTest` (`app/src/androidTest/.../sync/`) | Engine on a device database |
