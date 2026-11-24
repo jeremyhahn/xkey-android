@@ -87,6 +87,8 @@ class OathDesktopAuditTest {
         coEvery { dao.insert(any()) } answers { inserted += firstArg<OathCredentialEntity>(); 1L }
         coEvery { dao.getByOathId(any()) } returns null
         coEvery { dao.getByOathId(STORED_ID) } returns stored()
+        // A relaxed mock returns 0, which reads as a lost counter race.
+        coEvery { dao.advanceCounter(any(), any(), any()) } returns 1
         val database = mockk<XKeyDatabase>(relaxed = true)
         every { database.oathCredentialDao() } returns dao
         mockkObject(XKeyDatabase.Companion)

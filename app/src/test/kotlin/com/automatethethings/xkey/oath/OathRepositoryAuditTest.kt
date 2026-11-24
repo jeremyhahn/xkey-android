@@ -66,6 +66,8 @@ class OathRepositoryAuditTest {
         coEvery { dao.getByOathId(any()) } returns null
         coEvery { dao.getByOathId(HOTP_ID) } returns stored(HOTP_ID, "HOTP")
         coEvery { dao.getByOathId(TOTP_ID) } returns stored(TOTP_ID, "TOTP")
+        // A relaxed mock returns 0, which reads as a lost counter race.
+        coEvery { dao.advanceCounter(any(), any(), any()) } returns 1
 
         val secretManager = mockk<OathSecretManager>()
         every { secretManager.encryptSecret(any()) } answers { firstArg() }
@@ -127,7 +129,7 @@ class OathRepositoryAuditTest {
     fun `an HOTP code generation writes one generated row`() = runTest {
         repository.generateCode(HOTP_ID)
 
-        coVerify(exactly = 1) { dao.updateCounter(HOTP_ID, 6L) }
+        coVerify(exactly = 1) { dao.advanceCounter(HOTP_ID, 5L, 6L) }
         verify(exactly = 1) { AuditLogger.logOathCodeGenerated(HOTP_ID, ISSUER, ACCOUNT) }
         verify(exactly = 1) { AuditLogger.logOathCodeGenerated(any(), any(), any()) }
     }

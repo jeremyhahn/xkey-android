@@ -56,6 +56,12 @@ class OathHotpConcurrentCopyTest {
             if (row.oathId == oathId) row = row.copy(counter = counter)
         }
 
+        override suspend fun advanceCounter(oathId: String, expected: Long, next: Long): Int {
+            if (row.oathId != oathId || row.counter != expected) return 0
+            row = row.copy(counter = next)
+            return 1
+        }
+
         override suspend fun recordUsage(oathId: String, timestamp: Long) = Unit
     }
 

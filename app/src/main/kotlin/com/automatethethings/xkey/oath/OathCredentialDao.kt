@@ -118,6 +118,22 @@ interface OathCredentialDao {
     @Query("UPDATE oath_credentials SET counter = :counter WHERE oath_id = :oathId")
     suspend fun updateCounter(oathId: String, counter: Long)
 
+    /**
+     * Advance the HOTP counter from [expected] to [next], only if the stored
+     * counter is still [expected] (compare-and-set).
+     *
+     * Two generations that read the same counter cannot both advance it: the
+     * second one updates no row and must read the counter again.
+     *
+     * @param oathId The unique OATH identifier of the HOTP credential.
+     * @param expected The counter value the caller generated its code from.
+     * @param next The new counter value.
+     * @return The number of rows updated: 1 when the counter advanced, 0 when
+     *         it had already moved on (or no such credential exists).
+     */
+    @Query("UPDATE oath_credentials SET counter = :next WHERE oath_id = :oathId AND counter = :expected")
+    suspend fun advanceCounter(oathId: String, expected: Long, next: Long): Int
+
     // -------------------------------------------------------------------------
     // Delete Operations
     // -------------------------------------------------------------------------

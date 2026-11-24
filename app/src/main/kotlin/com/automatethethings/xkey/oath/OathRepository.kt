@@ -304,50 +304,68 @@ class OathRepository(
      * Generate the current OTP code for a credential.
      *
      * For TOTP credentials, computes the code based on the current system time.
-     * For HOTP credentials, computes the code using the stored counter value
-     * and automatically increments the counter after generation.
+     * For HOTP credentials, computes the code from the stored counter and
+     * advances the counter with a compare-and-set ([OathCredentialDao.advanceCounter]).
+     * When another generation advanced it first, the credential is read again
+     * and the code is generated from the new counter, so two overlapping
+     * generations never return the same HOTP code.
      *
-     * Records the usage timestamp and increments the use count in the database.
+     * Records the usage timestamp and increments the use count in the database,
+     * once, for the code that is returned.
      *
      * @param oathId The unique identifier of the OATH credential.
      * @return The generated OTP code string, zero-padded to the configured digit length.
      * @throws NoSuchElementException if no credential exists with the given [oathId].
+     * @throws IllegalStateException if the HOTP counter could not be advanced
+     *         within [MAX_COUNTER_ATTEMPTS] attempts.
      */
     suspend fun generateCode(oathId: String): String {
-        val credential = dao.getByOathId(oathId)
-            ?: throw NoSuchElementException("No OATH credential found with oathId: $oathId")
+        var attempt = 0
+        while (true) {
+            val credential = dao.getByOathId(oathId)
+                ?: throw NoSuchElementException("No OATH credential found with oathId: $oathId")
 
-        val secret = secretManager.decryptSecret(credential.secretEncrypted)
+            val secret = secretManager.decryptSecret(credential.secretEncrypted)
 
-        val code = when (credential.oathType) {
-            "TOTP" -> OathEngine.generateTotpCode(
-                secret = secret,
-                algorithm = credential.algorithm,
-                digits = credential.digits,
-                periodSeconds = credential.periodSeconds
-            )
-            "HOTP" -> {
-                val hotpCode = OathEngine.generateHotpCode(
+            val code = when (credential.oathType) {
+                "TOTP" -> OathEngine.generateTotpCode(
                     secret = secret,
-                    counter = credential.counter,
                     algorithm = credential.algorithm,
-                    digits = credential.digits
+                    digits = credential.digits,
+                    periodSeconds = credential.periodSeconds
                 )
-                // Increment the HOTP counter after successful generation
-                dao.updateCounter(oathId, credential.counter + 1)
-                hotpCode
+                "HOTP" -> {
+                    val hotpCode = OathEngine.generateHotpCode(
+                        secret = secret,
+                        counter = credential.counter,
+                        algorithm = credential.algorithm,
+                        digits = credential.digits
+                    )
+                    // Claim this counter value; another generation may have taken it.
+                    val advanced = dao.advanceCounter(oathId, credential.counter, credential.counter + 1)
+                    if (advanced != 1) {
+                        attempt++
+                        if (attempt >= MAX_COUNTER_ATTEMPTS) {
+                            throw IllegalStateException(
+                                "HOTP counter for $oathId could not be advanced after $MAX_COUNTER_ATTEMPTS attempts"
+                            )
+                        }
+                        continue
+                    }
+                    hotpCode
+                }
+                else -> throw IllegalStateException(
+                    "Unknown OATH type: ${credential.oathType}"
+                )
             }
-            else -> throw IllegalStateException(
-                "Unknown OATH type: ${credential.oathType}"
-            )
+
+            dao.recordUsage(oathId, System.currentTimeMillis())
+            // A generation the user or desktop asked for (an HOTP copy advances
+            // the counter); list refreshes go through observeAll and are not audited.
+            AuditLogger.logOathCodeGenerated(oathId, credential.issuer, credential.accountName)
+
+            return code
         }
-
-        dao.recordUsage(oathId, System.currentTimeMillis())
-        // A generation the user or desktop asked for (an HOTP copy advances
-        // the counter); list refreshes go through observeAll and are not audited.
-        AuditLogger.logOathCodeGenerated(oathId, credential.issuer, credential.accountName)
-
-        return code
     }
 
     /**
@@ -440,6 +458,12 @@ class OathRepository(
     // -------------------------------------------------------------------------
 
     companion object {
+
+        /**
+         * How many times [generateCode] reads an HOTP credential again after
+         * another generation advanced its counter first.
+         */
+        const val MAX_COUNTER_ATTEMPTS = 8
 
         /**
          * RFC 4648 Base32 alphabet (A-Z, 2-7).
