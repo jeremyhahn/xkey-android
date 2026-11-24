@@ -18,6 +18,7 @@ import org.signal.argon2.Argon2
 import org.signal.argon2.MemoryCost
 import org.signal.argon2.Type
 import org.signal.argon2.Version
+import java.security.MessageDigest
 import java.security.SecureRandom
 
 /**
@@ -98,8 +99,9 @@ object PinHasher {
      * Verify a PIN against a previously computed hash.
      *
      * Computes the Argon2id hash of the provided PIN with the given salt
-     * and compares it to the expected hash using constant-time comparison
-     * via [ByteArray.contentEquals].
+     * and compares it to the expected hash in constant time with
+     * [MessageDigest.isEqual], so the comparison leaks no timing about how
+     * many leading bytes match.
      *
      * @param pin The plaintext PIN to verify.
      * @param salt The salt that was used when the hash was originally computed.
@@ -109,7 +111,7 @@ object PinHasher {
      */
     fun verifyPin(pin: String, salt: ByteArray, expectedHash: ByteArray): Boolean {
         val hash = hashPin(pin, salt)
-        return hash.contentEquals(expectedHash)
+        return MessageDigest.isEqual(hash, expectedHash)
     }
 
     /**
