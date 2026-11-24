@@ -1322,7 +1322,6 @@
     <string name="password_field_password">Password</string>
     <string name="password_field_url">URL</string>
     <string name="password_field_notes">Notes</string>
-    <string name="password_required">Name and password are required</string>
     <string name="password_name_required">Enter a name</string>
     <string name="password_password_required">Enter a password</string>
     <string name="password_too_large">This entry is too large to save. Shorten its notes or other fields.</string>
