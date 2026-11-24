@@ -203,7 +203,8 @@ class OathRepository(
      * @throws IllegalArgumentException if the URI scheme is not `otpauth`,
      *         the type is not `totp` or `hotp`, the `secret` parameter is missing,
      *         not Base32 or under 80 bits, the algorithm is not SHA1, SHA256 or
-     *         SHA512, digits is not 6 to 8, or the period is not 1 to 300 seconds.
+     *         SHA512, digits is not 6 to 8, or a TOTP period is not a positive
+     *         number of seconds (an HOTP period is ignored).
      *         The message never carries the secret.
      */
     suspend fun importFromUri(uri: String): String = importParsed(uri, structuredLabel = false)
@@ -289,8 +290,10 @@ class OathRepository(
             "Unsupported algorithm: expected SHA1, SHA256 or SHA512"
         }
         require(digits in SUPPORTED_DIGITS) { "Unsupported digits: $digits, expected 6 to 8" }
-        require(periodSeconds in SUPPORTED_PERIOD_SECONDS) {
-            "Unsupported period: $periodSeconds seconds, expected 1 to 300"
+        // HOTP ignores the period; TOTP needs a positive one, as
+        // OathEngine.generateTotpCode requires.
+        require(type != "TOTP" || periodSeconds > 0) {
+            "Unsupported period: $periodSeconds seconds, expected a positive number of seconds"
         }
 
         // The HOTP counter is part of the credential, not an update applied
@@ -470,9 +473,6 @@ class OathRepository(
 
         /** The code lengths [OathEngine] computes. */
         private val SUPPORTED_DIGITS = 6..8
-
-        /** The TOTP time steps accepted, in seconds. */
-        private val SUPPORTED_PERIOD_SECONDS = 1..300
 
         /**
          * Decode a Base32-encoded string to raw bytes.
