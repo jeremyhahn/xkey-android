@@ -14,15 +14,11 @@
  */
 package com.automatethethings.xkey.ui
 
-import android.content.ClipData
-import android.content.ClipDescription
 import android.content.ClipboardManager
 import android.content.Context
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
-import android.os.Build
 import android.os.Bundle
-import android.os.PersistableBundle
 import android.text.InputType
 import android.view.Gravity
 import android.view.ViewGroup
@@ -384,14 +380,7 @@ class PasswordManagementActivity : AppCompatActivity() {
 
     private fun copyPassword(password: String) {
         val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        val clip = ClipData.newPlainText("password", password).apply {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                description.extras = PersistableBundle().apply {
-                    putBoolean(ClipDescription.EXTRA_IS_SENSITIVE, true)
-                }
-            }
-        }
-        clipboard.setPrimaryClip(clip)
+        SensitiveClipboard.copy(clipboard, "password", password)
         Toast.makeText(this, R.string.password_copied, Toast.LENGTH_SHORT).show()
     }
 }

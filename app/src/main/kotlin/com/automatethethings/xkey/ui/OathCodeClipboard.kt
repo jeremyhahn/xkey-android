@@ -18,8 +18,6 @@ import android.content.ClipData
 import android.content.ClipDescription
 import android.content.ClipboardManager
 import android.content.Context
-import android.os.Build
-import android.os.PersistableBundle
 import com.automatethethings.xkey.oath.OathCredentialEntity
 import com.automatethethings.xkey.oath.OathRepository
 
@@ -28,7 +26,9 @@ import com.automatethethings.xkey.oath.OathRepository
  * the long-press Copy and the details screen's Copy all come here.
  *
  * - The clip is marked sensitive ([ClipDescription.EXTRA_IS_SENSITIVE], API
- *   33+), so the system clipboard preview does not show the code.
+ *   33+), so the system clipboard preview does not show the code, and it is
+ *   cleared after [SensitiveClipboard.CLEAR_AFTER_MS] unless something else
+ *   has been copied since ([SensitiveClipboard]).
  * - TOTP copies the code on screen and leaves the credential untouched.
  * - HOTP copies the code at the stored counter and advances the counter
  *   ([OathRepository.generateCode] also records the use), so the next copy
@@ -51,7 +51,7 @@ class OathCodeClipboard(
      */
     suspend fun copy(credential: OathCredentialEntity, shownCode: String): String {
         val code = if (credential.oathType == HOTP) nextHotpCode(credential.oathId) else shownCode
-        clipboard.setPrimaryClip(sensitiveClip(code))
+        SensitiveClipboard.copy(clipboard, CLIP_LABEL, code)
         return code
     }
 
@@ -69,13 +69,6 @@ class OathCodeClipboard(
             )
 
         /** A plain-text clip of [code] marked sensitive where the platform supports it. */
-        fun sensitiveClip(code: String): ClipData =
-            ClipData.newPlainText(CLIP_LABEL, code).apply {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    description.extras = PersistableBundle().apply {
-                        putBoolean(ClipDescription.EXTRA_IS_SENSITIVE, true)
-                    }
-                }
-            }
+        fun sensitiveClip(code: String): ClipData = SensitiveClipboard.clip(CLIP_LABEL, code)
     }
 }
