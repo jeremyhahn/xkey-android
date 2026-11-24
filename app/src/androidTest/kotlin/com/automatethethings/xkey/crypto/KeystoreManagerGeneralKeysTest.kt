@@ -358,6 +358,7 @@ class KeystoreManagerGeneralKeysTest {
         }
     }
 
+    @Test
     fun rejectsASymmetricKeySizeAesDoesNotDefine() {
         val keyId = newKeyId("aes512")
 
