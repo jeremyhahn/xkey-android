@@ -134,7 +134,8 @@ const val PIV_KEYSTORE_ALIAS_PREFIX = "xkey_piv_"
  *   alias, replacing any key there; the Android Keystore unless a test
  *   substitutes it.
  * @param pqcStore Where software ML-DSA slot keys live, under the slot's
- *   alias. Null refuses software ML-DSA slot keys.
+ *   alias. Null means the app's [PqcSoftwareKeyStore.shared] store; with
+ *   neither, software ML-DSA slot keys are refused.
  */
 class PivKeyManager(
     private val pivSlotDao: PivSlotDao,
@@ -145,6 +146,10 @@ class PivKeyManager(
     // Opened on first use, so constructing a manager does not need the
     // AndroidKeyStore provider (JVM unit tests substitute it).
     private val keyStore: KeyStore by lazy { KeyStore.getInstance("AndroidKeyStore").apply { load(null) } }
+
+    // Read at each use: the shared store appears once the app has built one.
+    private val mlDsaStore: PqcSoftwareKeyStore?
+        get() = pqcStore ?: PqcSoftwareKeyStore.shared
 
     companion object {
         private const val TAG = "PivKeyManager"
@@ -198,7 +203,7 @@ class PivKeyManager(
             // to describe the new key, or the slot must be emptied.
             val publicKeyDer = when (val set = algorithm.mlDsaSet) {
                 null -> {
-                    pqcStore?.delete(alias)
+                    mlDsaStore?.delete(alias)
                     generateKeyPair(alias, algorithm).public.encoded
                 }
                 else -> generateMlDsa(alias, set, backing)
@@ -259,7 +264,7 @@ class PivKeyManager(
     private suspend fun discardUnrecordedKey(slot: PivSlot) {
         runCatching { keyStore.deleteEntry(slot.keystoreAlias) }
             .onFailure { Log.w(TAG, "Could not remove unrecorded key from PIV slot ${slot.hexId}: ${it.message}") }
-        runCatching { pqcStore?.delete(slot.keystoreAlias) }
+        runCatching { mlDsaStore?.delete(slot.keystoreAlias) }
             .onFailure { Log.w(TAG, "Could not remove unrecorded ML-DSA key from PIV slot ${slot.hexId}") }
         runCatching { pivSlotDao.deleteBySlotId(slot.hexId) }
             .onFailure { Log.w(TAG, "Could not clear PIV slot ${slot.hexId} row: ${it.message}") }
@@ -272,7 +277,7 @@ class PivKeyManager(
      */
     private fun liveSlotPublicKey(slot: PivSlot): ByteArray? {
         val alias = slot.keystoreAlias
-        if (!keyStore.containsAlias(alias)) return pqcStore?.publicKeyDer(alias)
+        if (!keyStore.containsAlias(alias)) return mlDsaStore?.publicKeyDer(alias)
         return keyStore.getCertificate(alias)?.publicKey?.encoded
     }
 
@@ -285,7 +290,7 @@ class PivKeyManager(
     private fun requireMlDsaBacking(set: MlDsaParameterSet, backing: PqcBacking) {
         val available = when (backing) {
             PqcBacking.HARDWARE -> set in PqcHardware.supported()
-            PqcBacking.SOFTWARE -> pqcStore != null
+            PqcBacking.SOFTWARE -> mlDsaStore != null
         }
         if (!available) throw UnsupportedAlgorithmException(set.wireName)
     }
@@ -296,9 +301,9 @@ class PivKeyManager(
      */
     private fun generateMlDsa(alias: String, set: MlDsaParameterSet, backing: PqcBacking): ByteArray {
         if (keyStore.containsAlias(alias)) keyStore.deleteEntry(alias)
-        pqcStore?.delete(alias)
+        mlDsaStore?.delete(alias)
         return when (backing) {
-            PqcBacking.SOFTWARE -> (pqcStore ?: throw UnsupportedAlgorithmException(set.wireName))
+            PqcBacking.SOFTWARE -> (mlDsaStore ?: throw UnsupportedAlgorithmException(set.wireName))
                 .generate(alias, set)
             PqcBacking.HARDWARE -> {
                 val backend = PqcHardware.backend?.takeIf { set in it.supportedParameterSets() }
@@ -447,7 +452,7 @@ class PivKeyManager(
         if (set != null && !keyStore.containsAlias(alias)) {
             // A software ML-DSA slot key: the store checks the record is this
             // alias's and this set's before it signs.
-            val store = pqcStore
+            val store = mlDsaStore
             if (store == null || store.parameterSet(alias) != set) {
                 throw IllegalStateException("No ${set.wireName} key in PIV slot ${slot.hexId} (${slot.label})")
             }
@@ -548,7 +553,7 @@ class PivKeyManager(
                 keyStore.deleteEntry(alias)
             }
             // A software ML-DSA slot key lives in the store, not the Keystore.
-            pqcStore?.delete(alias)
+            mlDsaStore?.delete(alias)
 
             // Remove metadata from Room
             pivSlotDao.deleteBySlotId(slot.hexId)

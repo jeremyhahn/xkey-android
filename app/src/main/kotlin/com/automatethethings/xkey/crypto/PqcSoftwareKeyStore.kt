@@ -59,6 +59,12 @@ class PqcSoftwareKeyStore(
     private val cipher: KeystoreAeadCipher by lazy { cipher ?: KeystoreAeadCipher(WRAP_KEY_ALIAS) }
     private val random = SecureRandom()
 
+    init {
+        // Every app store reads the same directory with the same wrap key, so
+        // any one can serve callers built without a Context (PivKeyManager).
+        if (cipher == null) shared = this
+    }
+
     /** The file a key under [alias] lives in. */
     internal fun fileFor(alias: String): File =
         File(File(context.filesDir, DIR), SyncCodec.sha256Hex(alias.toByteArray(Charsets.UTF_8)) + ".key")
@@ -215,6 +221,14 @@ class PqcSoftwareKeyStore(
     companion object {
         /** The Keystore AES-GCM key that seals every software ML-DSA private key. */
         const val WRAP_KEY_ALIAS = "xkey_pqc_wrap"
+
+        /**
+         * The app's store, once any [PqcSoftwareKeyStore] has been built with
+         * the Keystore wrap key ([KeystoreManager] builds one); null before.
+         */
+        @Volatile
+        var shared: PqcSoftwareKeyStore? = null
+            private set
         private const val DIR = "pqc_keys"
         private const val MAX_FIELD = 64 * 1024
         private val MAGIC = byteArrayOf('X'.code.toByte(), 'P'.code.toByte(), 'Q'.code.toByte(), '1'.code.toByte())
