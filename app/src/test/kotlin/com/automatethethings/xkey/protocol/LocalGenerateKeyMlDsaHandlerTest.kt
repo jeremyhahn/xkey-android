@@ -223,32 +223,43 @@ class LocalGenerateKeyMlDsaHandlerTest {
     }
 
     @Test
-    fun `every ML-DSA generation of a request runs inside the cancellation-safe unit that stores its row`() {
-        val generateCall = Regex("""keystoreManager\.generateMlDsaKey\(""")
-        val callers = java.io.File("src/main/kotlin/com/automatethethings/xkey/protocol").walk()
+    fun `every ML-DSA generation in the app runs inside the cancellation-safe unit that stores its row`() {
+        val root = java.io.File("src/main/kotlin/com/automatethethings/xkey")
+        val generateCall = Regex("""(?<!fun )\bgenerateMlDsaKey\(""")
+        val callers = root.walk()
             .filter { it.extension == "kt" && generateCall.containsMatchIn(it.readText()) }
-            .map { it.name }.toList()
-        assertEquals(listOf("Handler.kt"), callers)
+            .map { it.relativeTo(root).path }.toList()
+        assertEquals("generateMlDsaKey has one caller, the commit unit", listOf("crypto/MlDsaKeyCommit.kt"), callers)
 
-        val source = java.io.File("src/main/kotlin/com/automatethethings/xkey/protocol/Handler.kt").readText()
-        val material = source.indexOf("private suspend fun generateMlDsaMaterial(")
-        assertTrue("generateMlDsaMaterial is gone", material >= 0)
-        val materialEnd = source.indexOf("\n    /**", material)
-        val calls = generateCall.findAll(source).map { it.range.first }.toList()
+        val unitSource = java.io.File(root, "crypto/MlDsaKeyCommit.kt").readText()
+        val calls = generateCall.findAll(unitSource).map { it.range.first }.toList()
         assertEquals("one generateMlDsaKey call", 1, calls.size)
-        assertTrue("generateMlDsaKey runs outside generateMlDsaMaterial", calls[0] in material..materialEnd)
+        val nonCancellable = unitSource.indexOf("withContext(NonCancellable)")
+        assertTrue("the generation is outside the NonCancellable unit", nonCancellable in 0 until calls[0])
+        assertTrue("the row commit is not in the same unit", unitSource.indexOf("commit(", calls[0]) > calls[0])
+        assertTrue("uncommitted material is not removed", unitSource.indexOf("deleteGeneralKey(", calls[0]) > calls[0])
 
-        val uses = Regex("""(?<!fun )generateMlDsaMaterial\(""").findAll(source).map { it.range.first }.toList()
-        assertEquals("one generateMlDsaMaterial call", 1, uses.size)
-        val use = uses[0]
-        val unit = source.lastIndexOf("persistAudited(write = {", use)
-        val owner = source.lastIndexOf("private suspend fun createMlDsaKey(", use)
+        val unitCall = Regex("""\.generateMlDsaKeyAndCommit\(""")
+        val users = root.walk()
+            .filter { it.extension == "kt" && unitCall.containsMatchIn(it.readText()) }
+            .map { it.relativeTo(root).path }.sorted().toList()
+        assertEquals(listOf("protocol/Handler.kt", "ui/KeyManagementActivity.kt"), users)
+        for (path in users) {
+            val source = java.io.File(root, path).readText()
+            val uses = unitCall.findAll(source).map { it.range.first }.toList()
+            assertEquals("$path: one generateMlDsaKeyAndCommit call", 1, uses.size)
+            val insert = source.indexOf("keyDao.insert(", uses[0])
+            val nextFunction = source.indexOf("\n/**", uses[0]).let { if (it < 0) source.length else it }
+                .coerceAtMost(source.indexOf("\n    /**", uses[0]).let { if (it < 0) source.length else it })
+            assertTrue("$path: the row is not stored in the unit", insert in uses[0]..nextFunction)
+        }
+
+        val handler = java.io.File(root, "protocol/Handler.kt").readText()
+        val use = unitCall.find(handler)!!.range.first
+        val unit = handler.lastIndexOf("persistAudited(write = {", use)
+        val owner = handler.lastIndexOf("private suspend fun createMlDsaKey(", use)
         assertTrue("the call is not in createMlDsaKey", owner >= 0)
-        assertTrue("the call is outside the NonCancellable unit", unit > owner)
-        assertFalse("the unit closes before the call", source.substring(unit, use).contains("\n        }\n"))
-        val insert = source.indexOf("keyDao.insert(", use)
-        val nextFunction = source.indexOf("\n    /**", use)
-        assertTrue("the row is not stored in the same unit", insert in use..nextFunction)
+        assertTrue("the call is outside persistAudited", unit > owner)
     }
 
     @Test

@@ -55,6 +55,7 @@ import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
 import com.automatethethings.xkey.R
 import com.automatethethings.xkey.crypto.KeystoreManager
+import com.automatethethings.xkey.crypto.MlDsaParameterSet
 import com.automatethethings.xkey.crypto.PqcBacking
 import com.automatethethings.xkey.crypto.PqcHardware
 import com.automatethethings.xkey.crypto.SoftwareKeyStore
@@ -62,6 +63,7 @@ import com.automatethethings.xkey.crypto.publicKeySizeBits
 import com.automatethethings.xkey.storage.deleteKeyRow
 import com.automatethethings.xkey.storage.KeyStoreSyncManager
 import com.automatethethings.xkey.storage.XKeyDatabase
+import com.automatethethings.xkey.storage.dao.KeyDao
 import com.automatethethings.xkey.storage.entity.KeyEntity
 import com.automatethethings.xkey.storage.entity.SharingPolicyType
 import com.google.android.material.card.MaterialCardView
@@ -1159,19 +1161,33 @@ class KeyManagementActivity : AppCompatActivity() {
                 var publicKeyDer: ByteArray? = null
                 var keySizeBits = 0
 
+                fun entity(der: ByteArray?, bits: Int) = KeyEntity(
+                    keyId = keyId,
+                    keyType = keyType,
+                    algorithm = algorithm,
+                    label = label,
+                    publicKeyDer = der,
+                    keySizeBits = bits,
+                    biometricRequired = biometric,
+                    source = "local",
+                    createdAt = System.currentTimeMillis()
+                )
+
                 val mlDsaSet = KeyCreationAlgorithms.mlDsaSet(algorithm)
+                if (mlDsaSet != null) {
+                    // The ML-DSA path stores its own row with the key it makes.
+                    createMlDsaKeyRow(
+                        keystoreManager,
+                        keyDao,
+                        keyId,
+                        mlDsaSet,
+                        backing ?: PqcBacking.SOFTWARE,
+                        authDuration
+                    ) { der -> entity(der, mlDsaSet.publicKeyBytes * 8) }
+                    Snackbar.make(rootLayout, getString(R.string.key_create_success), Snackbar.LENGTH_SHORT).show()
+                    return@launch
+                }
                 when {
-                    mlDsaSet != null -> {
-                        publicKeyDer = withContext(Dispatchers.IO) {
-                            keystoreManager.generateMlDsaKey(
-                                keyId,
-                                mlDsaSet,
-                                backing ?: PqcBacking.SOFTWARE,
-                                authDuration
-                            )
-                        }
-                        keySizeBits = mlDsaSet.publicKeyBytes * 8
-                    }
                     keyType in setOf("signing", "tls", "ssh") -> {
                         publicKeyDer = keystoreManager.generateKeyForAlgorithm(keyId, algorithm, authDuration)
                         keySizeBits = publicKeySizeBits(publicKeyDer)
@@ -1199,18 +1215,7 @@ class KeyManagementActivity : AppCompatActivity() {
                     }
                 }
 
-                val entity = KeyEntity(
-                    keyId = keyId,
-                    keyType = keyType,
-                    algorithm = algorithm,
-                    label = label,
-                    publicKeyDer = publicKeyDer,
-                    keySizeBits = keySizeBits,
-                    biometricRequired = biometric,
-                    source = "local",
-                    createdAt = System.currentTimeMillis()
-                )
-                keyDao.insert(entity)
+                keyDao.insert(entity(publicKeyDer, keySizeBits))
                 Snackbar.make(rootLayout, getString(R.string.key_create_success), Snackbar.LENGTH_SHORT).show()
             } catch (e: Exception) {
                 android.util.Log.e("KeyManagement", "Key creation failed", e)
@@ -1773,4 +1778,26 @@ class KeyManagementActivity : AppCompatActivity() {
             return oldItem == newItem
         }
     }
+}
+
+/**
+ * Makes the ML-DSA [set] key [keyId] for the key screen and stores the row
+ * [row] builds from its public key.
+ *
+ * @return the SubjectPublicKeyInfo DER.
+ */
+internal suspend fun createMlDsaKeyRow(
+    keystoreManager: KeystoreManager,
+    keyDao: KeyDao,
+    keyId: String,
+    set: MlDsaParameterSet,
+    backing: PqcBacking,
+    authDurationSeconds: Int,
+    row: (ByteArray) -> KeyEntity
+): ByteArray {
+    val publicKeyDer = withContext(Dispatchers.IO) {
+        keystoreManager.generateMlDsaKey(keyId, set, backing, authDurationSeconds)
+    }
+    keyDao.insert(row(publicKeyDer))
+    return publicKeyDer
 }
