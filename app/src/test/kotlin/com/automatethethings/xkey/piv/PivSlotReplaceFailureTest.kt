@@ -138,6 +138,49 @@ class PivSlotReplaceFailureTest {
     }
 
     @Test
+    fun `an old software ML-DSA record that cannot be removed keeps its row and certificate when replaced by ES256`() = runTest {
+        val (store, softwareRow) = undeletableSoftwareSlot()
+
+        val error = runCatching {
+            PivKeyManager(pivSlotDao, pqcStore = store).generateKey(slot, PivAlgorithm.ES256, PqcBacking.HARDWARE)
+        }.exceptionOrNull()
+
+        assertTrue("$error", error is IOException)
+        assertTrue("the old key still signs", store.contains(alias))
+        assertEquals(softwareRow, row)
+    }
+
+    @Test
+    fun `an old software ML-DSA record that cannot be removed keeps its row and certificate when replaced by hardware ML-DSA`() = runTest {
+        val (store, softwareRow) = undeletableSoftwareSlot()
+        PqcHardware.backend = object : PqcHardwareBackend {
+            override fun supportedParameterSets() = MlDsaParameterSet.entries.toSet()
+            override fun generate(alias: String, set: MlDsaParameterSet, authDurationSeconds: Int, preferStrongBox: Boolean) =
+                throw AssertionError("the old key was not removed")
+            override fun jcaSignatureAlgorithm(set: MlDsaParameterSet) = "ML-DSA"
+        }
+
+        val error = runCatching {
+            PivKeyManager(pivSlotDao, pqcStore = store).generateKey(slot, PivAlgorithm.ML_DSA_65, PqcBacking.HARDWARE)
+        }.exceptionOrNull()
+
+        assertTrue("$error", error is IOException)
+        assertTrue("the old key still signs", store.contains(alias))
+        assertEquals(softwareRow, row)
+    }
+
+    /** The slot holding a software ML-DSA key, with its row, whose record cannot be removed. */
+    private fun undeletableSoftwareSlot(): Pair<PqcSoftwareKeyStore, PivSlotEntity> {
+        keystore.live = null
+        val store = softwareStore()
+        val oldSpki = store.generate(alias, MlDsaParameterSet.ML_DSA_44)
+        val softwareRow = oldRow.copy(algorithm = PivAlgorithm.ML_DSA_44.name, publicKeyDer = oldSpki)
+        row = softwareRow
+        store.removeFile = { false }
+        return store to softwareRow
+    }
+
+    @Test
     fun `every slot key generate runs inside replaceSlotKey, whose failure path empties the slot`() {
         val root = listOf(File("src/main/kotlin"), File("app/src/main/kotlin")).first { it.isDirectory }
         val text = File(root, "com/automatethethings/xkey/piv/PivKeyManager.kt").readText()
