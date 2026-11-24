@@ -332,6 +332,10 @@ class OathRepository(
      * @param oathId The unique identifier of the OATH credential.
      * @return The generated OTP code string, zero-padded to the configured digit length.
      * @throws NoSuchElementException if no credential exists with the given [oathId].
+     * @throws OathCounterExhaustedException if the HOTP counter is at
+     *         [HOTP_COUNTER_MAX]: no further code exists for it.
+     * @throws IllegalStateException if an HOTP claim fails while the stored
+     *         counter has not moved past the value tried.
      */
     suspend fun generateCode(oathId: String): String {
         var credential = dao.getByOathId(oathId)
@@ -350,21 +354,33 @@ class OathRepository(
                 // same counter (a desktop generate and a phone tap) cannot
                 // both claim it, so the loser re-reads and takes the next
                 // value. The code is computed before the claim, so a decrypt
-                // or engine failure never burns a counter value.
+                // or engine failure never burns a counter value. A retry
+                // happens only when the counter moved on; otherwise the claim
+                // could fail forever on the same value.
+                if (credential.counter == HOTP_COUNTER_MAX) {
+                    throw OathCounterExhaustedException(oathId)
+                }
                 var hotpCode: String
-                do {
+                while (true) {
+                    val tried = credential.counter
                     hotpCode = OathEngine.generateHotpCode(
                         secret = secretManager.decryptSecret(credential.secretEncrypted),
-                        counter = credential.counter,
+                        counter = tried,
                         algorithm = credential.algorithm,
                         digits = credential.digits
                     )
-                    val claimed = dao.claimCounter(oathId, credential.counter) > 0
-                    if (!claimed) {
-                        credential = dao.getByOathId(oathId)
-                            ?: throw NoSuchElementException("No OATH credential found with oathId: $oathId")
+                    if (dao.claimCounter(oathId, tried) > 0) break
+                    credential = dao.getByOathId(oathId)
+                        ?: throw NoSuchElementException("No OATH credential found with oathId: $oathId")
+                    if (credential.counter == HOTP_COUNTER_MAX) {
+                        throw OathCounterExhaustedException(oathId)
                     }
-                } while (!claimed)
+                    if (credential.counter <= tried) {
+                        throw IllegalStateException(
+                            "HOTP counter claim failed without progress for OATH credential $oathId"
+                        )
+                    }
+                }
                 hotpCode
             }
             else -> throw IllegalStateException(
@@ -461,6 +477,12 @@ class OathRepository(
         const val NO_CODE = "------"
 
         /**
+         * The last HOTP counter value: no code is computed at it, and
+         * [OathCredentialDao.claimCounter] never advances past it.
+         */
+        const val HOTP_COUNTER_MAX = Long.MAX_VALUE
+
+        /**
          * RFC 4648 Base32 alphabet (A-Z, 2-7).
          */
         private const val BASE32_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
@@ -551,3 +573,11 @@ class OathRepository(
         private val CONFUSABLE_DIGITS = mapOf('0' to 'O', '1' to 'L', '8' to 'B')
     }
 }
+
+/**
+ * The HOTP counter of [oathId] is at [OathRepository.HOTP_COUNTER_MAX]: the
+ * credential is kept, but no further code can be generated for it. The text
+ * names only the id, never a secret or a code.
+ */
+class OathCounterExhaustedException(oathId: String) :
+    IllegalStateException("HOTP counter exhausted for OATH credential $oathId")

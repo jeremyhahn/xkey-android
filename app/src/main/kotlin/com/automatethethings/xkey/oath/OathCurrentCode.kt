@@ -28,7 +28,8 @@ sealed interface OathCurrentCode {
 
     /**
      * No code can be computed: the secret cannot be decrypted, the engine
-     * refuses a stored value, or the type is unknown. No cause is kept: an
+     * refuses a stored value, the type is unknown, or the HOTP counter is
+     * exhausted ([OathRepository.HOTP_COUNTER_MAX]). No cause is kept: an
      * exception text can quote key material.
      */
     data object Unavailable : OathCurrentCode
@@ -66,7 +67,9 @@ sealed interface OathCurrentCode {
                         secret.fill(0)
                     }
                 }
-                HOTP -> {
+                HOTP -> if (credential.counter == OathRepository.HOTP_COUNTER_MAX) {
+                    Unavailable
+                } else {
                     val secret = secretOf(credential)
                     try {
                         Available(

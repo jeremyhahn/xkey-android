@@ -122,12 +122,14 @@ interface OathCredentialDao {
     /**
      * Claim the HOTP counter value [expected]: advance the stored counter
      * by one only while it still is [expected]. One SQL statement, so two
-     * callers that read the same value cannot both claim it.
+     * callers that read the same value cannot both claim it. A counter at
+     * Long.MAX_VALUE is never advanced: SQLite would store the sum as a REAL.
      *
      * @return 1 if the value was claimed, 0 if the counter moved on (or the
-     *         row is gone) since it was read.
+     *         row is gone) since it was read, or the counter is exhausted
+     *         (Long.MAX_VALUE).
      */
-    @Query("UPDATE oath_credentials SET counter = counter + 1 WHERE oath_id = :oathId AND counter = :expected")
+    @Query("UPDATE oath_credentials SET counter = counter + 1 WHERE oath_id = :oathId AND counter = :expected AND counter < 9223372036854775807")
     suspend fun claimCounter(oathId: String, expected: Long): Int
 
     // -------------------------------------------------------------------------
