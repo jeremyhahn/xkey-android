@@ -1936,6 +1936,7 @@ class RequestHandler(
 
         // Software-backed keys are operated on outside the Keystore.
         com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(symParams.keyId)?.let { sw ->
+            requireSoftwareKeyType(sw, otherType = "HMAC", operation = "AES-GCM")
             val ct = com.automatethethings.xkey.crypto.SoftwareKeyOps.aesGcmEncrypt(sw.material, plaintext, aad)
             keyDao.recordUsage(symParams.keyId)
             return Response.success(
@@ -1988,6 +1989,7 @@ class RequestHandler(
 
         // Software-backed keys are operated on outside the Keystore.
         com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(symParams.keyId)?.let { sw ->
+            requireSoftwareKeyType(sw, otherType = "HMAC", operation = "AES-GCM")
             // A tag mismatch or a short input answers as the Keystore path does.
             val pt = try {
                 com.automatethethings.xkey.crypto.SoftwareKeyOps.aesGcmDecrypt(sw.material, ciphertext, aad)
@@ -2124,6 +2126,7 @@ class RequestHandler(
 
         // Software-backed keys are operated on outside the Keystore.
         com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(hmacParams.keyId)?.let { sw ->
+            requireSoftwareKeyType(sw, otherType = "AES", operation = "HMAC")
             val swStart = System.currentTimeMillis()
             val swMac = com.automatethethings.xkey.crypto.SoftwareKeyOps.hmac(
                 sw.material, hmacData, sw.algorithm
@@ -2223,6 +2226,26 @@ class RequestHandler(
     private suspend fun auditCaller(): AuditCaller {
         val peer = attestingPeerPublicKeyHex()
         return AuditCaller(peer, auditPeerName(peer))
+    }
+
+    /**
+     * Refuses software key [sw] for [operation] when its stored algorithm
+     * names the other symmetric key type ([otherType], "AES" or "HMAC"): an
+     * AES key's material is no MAC key and an HMAC key's no AES key. The
+     * code is the one a Keystore key of the wrong type answers
+     * (KeystoreManager finds no key of the class the operation needs).
+     */
+    private fun requireSoftwareKeyType(
+        sw: com.automatethethings.xkey.crypto.SoftwareKey,
+        otherType: String,
+        operation: String
+    ) {
+        if (sw.algorithm.startsWith(otherType, ignoreCase = true)) {
+            throw ProtocolException(
+                "Key ${sw.keyId} cannot be used for $operation",
+                errorCode = ErrorCodes.KEY_NOT_FOUND
+            )
+        }
     }
 
     /**
