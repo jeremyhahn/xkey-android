@@ -78,6 +78,7 @@ class TcpHsmServerConfirmDeadlineTest {
     private lateinit var mainThread: ExecutorService
     private val prompts = AtomicInteger()
     @Volatile private var approve = false
+    @Volatile private var promptDelayMs = 0L
     private var port = 0
 
     @Before
@@ -105,6 +106,7 @@ class TcpHsmServerConfirmDeadlineTest {
         val callback = object : PairingConfirmationCallback {
             override suspend fun onPairingConfirmationRequired(deviceName: String, publicKeyFingerprint: String): Boolean {
                 prompts.incrementAndGet()
+                delay(promptDelayMs)
                 return approve
             }
         }
@@ -190,6 +192,55 @@ class TcpHsmServerConfirmDeadlineTest {
         assertTrue(!repo.isDeviceKnown(desktop.publicKeyHex))
         server.closeAndAwaitListening(desktop)
     }
+
+    /** A desktop that confirmed with pairing.confirm and then idles past the deadline stays connected. */
+    @Test
+    fun aConfirmedConnectionThatIdlesPastTheDeadlineStaysOpen() = runBlocking {
+        approve = true
+        val desktop = DesktopPeer(Socket(InetAddress.getLoopbackAddress(), port))
+        desktop.handshake()
+        val confirmed = desktop.request("pairing.confirm", params = confirmParams(desktop.publicKeyHex))
+        assertTrue(confirmed.getJSONObject("result").getBoolean("confirmed"))
+
+        delay(DEADLINE_MS * 3)
+
+        assertTrue(server.state.value is TcpHsmState.Connected)
+        assertTrue(desktop.request("system.ping", id = 2).getJSONObject("result").getBoolean("ok"))
+        server.closeAndAwaitListening(desktop)
+    }
+
+    /** An already paired desktop has no confirm deadline: it may idle after the handshake. */
+    @Test
+    fun aPairedDesktopThatIdlesPastTheDeadlineStaysOpen() = runBlocking {
+        val desktop = DesktopPeer(Socket(InetAddress.getLoopbackAddress(), port))
+        repo.addDevice(desktop.publicKeyHex, "desktop")
+        desktop.handshake()
+        withTimeout(TIMEOUT_MS) { server.state.first { it is TcpHsmState.Connected } }
+
+        delay(DEADLINE_MS * 3)
+
+        assertTrue(server.state.value is TcpHsmState.Connected)
+        assertTrue(desktop.request("system.ping").getJSONObject("result").getBoolean("ok"))
+        assertEquals(0, prompts.get())
+        server.closeAndAwaitListening(desktop)
+    }
+
+    /** A pairing.confirm sent in time is not cut while the user answers its prompt past the deadline. */
+    @Test
+    fun aPromptStillBeingAnsweredAtTheDeadlineIsNotCut() = runBlocking {
+        approve = true
+        promptDelayMs = DEADLINE_MS * 3
+        val desktop = DesktopPeer(Socket(InetAddress.getLoopbackAddress(), port))
+        desktop.handshake()
+
+        val confirmed = desktop.request("pairing.confirm", params = confirmParams(desktop.publicKeyHex))
+
+        assertTrue(confirmed.getJSONObject("result").getBoolean("confirmed"))
+        assertTrue(desktop.request("system.ping", id = 2).getJSONObject("result").getBoolean("ok"))
+        server.closeAndAwaitListening(desktop)
+    }
+
+    private fun confirmParams(key: String) = JSONObject().put("publicKeyHex", key).put("deviceName", "desktop")
 
     private fun confirmText(id: Long, key: String) =
         """{"jsonrpc":"2.0","id":$id,"method":"pairing.confirm",""" +
