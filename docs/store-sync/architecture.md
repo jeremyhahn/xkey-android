@@ -80,6 +80,23 @@ vault is locked.
   update times (read without decrypting a password) and trust-store
   fingerprints. It is not behind the password vault's lock.
 
+### Password deletes, peer clocks and policy
+
+- **Deletes:** deleting a password on the phone writes a record to
+  `password_deletions` (schema 14). A synced copy of a deleted id is added back
+  only if its `updated_at` is later than the delete; an older or equal copy is
+  skipped. Records older than 180 days are dropped at the start of each merge.
+- **Peer clock:** an `updated_at` more than 5 minutes ahead of the phone's
+  clock is clamped to the phone's time. Because its real time is unknown, a
+  clamped copy overwrites no existing entry and restores no deleted one; a new
+  entry is added with the phone's time.
+- **Policy:** sync writes only entries `gather` would send (default tenant,
+  personal, no expiry). An existing entry with another tenant, sharing or an
+  expiry is left unchanged and counted as skipped.
+- `PasswordSync.mergeWithDetail` counts kept deletes, clamps and policy skips
+  on top of the usual counts. The wire format and the sync response are
+  unchanged.
+
 ## Main flow
 
 ```mermaid
