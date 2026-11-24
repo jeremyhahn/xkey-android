@@ -59,12 +59,6 @@ class PqcSoftwareKeyStore(
     private val cipher: KeystoreAeadCipher by lazy { cipher ?: KeystoreAeadCipher(WRAP_KEY_ALIAS) }
     private val random = SecureRandom()
 
-    init {
-        // Every app store reads the same directory with the same wrap key, so
-        // any one can serve callers built without a Context (PivKeyManager).
-        if (cipher == null) shared = this
-    }
-
     /** The file a key under [alias] lives in. */
     internal fun fileFor(alias: String): File =
         File(File(context.filesDir, DIR), SyncCodec.sha256Hex(alias.toByteArray(Charsets.UTF_8)) + ".key")
@@ -223,8 +217,10 @@ class PqcSoftwareKeyStore(
         const val WRAP_KEY_ALIAS = "xkey_pqc_wrap"
 
         /**
-         * The app's store, once any [PqcSoftwareKeyStore] has been built with
-         * the Keystore wrap key ([KeystoreManager] builds one); null before.
+         * The app's one store, once [registerShared] has built it; null
+         * before. Every app caller (KeystoreManager, the PIV screen, a PIV
+         * key manager built without a store) uses it, so one instance
+         * serializes every record.
          */
         @Volatile
         var shared: PqcSoftwareKeyStore? = null
@@ -238,7 +234,7 @@ class PqcSoftwareKeyStore(
          */
         @Synchronized
         fun registerShared(context: Context): PqcSoftwareKeyStore =
-            shared ?: PqcSoftwareKeyStore(context.applicationContext ?: context)
+            shared ?: PqcSoftwareKeyStore(context.applicationContext ?: context).also { shared = it }
 
         /** Forgets the [shared] store, as a fresh process has none. Tests only. */
         @Synchronized

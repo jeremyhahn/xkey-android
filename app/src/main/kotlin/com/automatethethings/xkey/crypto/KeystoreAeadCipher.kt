@@ -17,6 +17,7 @@ package com.automatethethings.xkey.crypto
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import java.security.KeyStore
+import java.util.concurrent.ConcurrentHashMap
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
@@ -47,6 +48,13 @@ class KeystoreAeadCipher(private val alias: String) {
         private const val GCM_IV_SIZE = 12
         private const val GCM_TAG_LENGTH_BITS = 128
         private const val AES_KEY_SIZE_BITS = 256
+
+        /**
+         * One lock per alias for the whole process: every instance on an
+         * alias looks its key up and generates it under the same lock, so two
+         * first uses never make two keys and strand what the first sealed.
+         */
+        private val creationLocks = ConcurrentHashMap<String, Any>()
     }
 
     private val keyStore: KeyStore = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
@@ -81,7 +89,14 @@ class KeystoreAeadCipher(private val alias: String) {
 
     private fun getOrCreateKey(): SecretKey {
         (keyStore.getKey(alias, null) as? SecretKey)?.let { return it }
+        synchronized(creationLocks.computeIfAbsent(alias) { Any() }) {
+            // Another instance may have made the key while this one waited.
+            (keyStore.getKey(alias, null) as? SecretKey)?.let { return it }
+            return generateKey()
+        }
+    }
 
+    private fun generateKey(): SecretKey {
         val spec = KeyGenParameterSpec.Builder(
             alias,
             KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT

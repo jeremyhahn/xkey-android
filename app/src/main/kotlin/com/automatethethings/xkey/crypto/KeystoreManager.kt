@@ -116,7 +116,7 @@ class KeystoreManager(
     /** The device API level; a JVM test stands in a device here. */
     @VisibleForTesting private val sdkInt: Int = Build.VERSION.SDK_INT,
     /** Software ML-DSA keys; hardware ones live in [keyStore] through [PqcHardware.backend]. */
-    private val pqcStore: PqcSoftwareKeyStore = PqcSoftwareKeyStore(context)
+    private val pqcStore: PqcSoftwareKeyStore = PqcSoftwareKeyStore.registerShared(context)
 ) {
 
     private val keyStore: KeyStore = KeyStore.getInstance(KEYSTORE_PROVIDER).apply {

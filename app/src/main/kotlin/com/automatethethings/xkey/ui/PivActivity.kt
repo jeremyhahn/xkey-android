@@ -143,7 +143,10 @@ class PivActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
 
         val db = XKeyDatabase.getInstance(this)
-        pivKeyManager = PivKeyManager(db.pivSlotDao(), pqcStore = PqcSoftwareKeyStore(applicationContext))
+        pivKeyManager = PivKeyManager(
+            db.pivSlotDao(),
+            pqcStore = PqcSoftwareKeyStore.registerShared(applicationContext)
+        )
 
         buildUI()
         setContentView(rootLayout)
