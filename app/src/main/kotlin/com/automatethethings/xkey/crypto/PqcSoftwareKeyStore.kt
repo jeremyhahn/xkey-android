@@ -81,7 +81,11 @@ class PqcSoftwareKeyStore(
         val pair = generator.generateKeyPair()
         val spki = SubjectPublicKeyInfoFactory.createSubjectPublicKeyInfo(pair.public).encoded
         val pkcs8 = PrivateKeyInfoFactory.createPrivateKeyInfo(pair.private).encoded
-        val plaintext = sealedPlaintext(alias, set, authDurationSeconds.coerceAtLeast(NO_USER_AUTHENTICATION), pkcs8)
+        // A damaged generation file must not block a new key; the new key's generation replaces it.
+        val generation = (runCatching { storedGeneration(alias) }.getOrNull() ?: 0L) + 1
+        val plaintext = sealedPlaintext(
+            alias, set, spki, generation, authDurationSeconds.coerceAtLeast(NO_USER_AUTHENTICATION), pkcs8
+        )
         pkcs8.fill(0)
         val sealed = try {
             cipher.encrypt(plaintext)
@@ -89,16 +93,42 @@ class PqcSoftwareKeyStore(
             plaintext.fill(0)
         }
         write(fileFor(alias), Record(alias, set, spki, sealed).encode())
+        // Written after the record: a failed write here leaves a record newer than the stored generation, which opens.
+        write(generationFileFor(alias), ByteBuffer.allocate(8).putLong(generation).array())
         return spki
+    }
+
+    /** The file holding the generation of the newest key made under [alias]; delete keeps it. */
+    internal fun generationFileFor(alias: String): File =
+        File(File(context.filesDir, DIR), SyncCodec.sha256Hex(alias.toByteArray(Charsets.UTF_8)) + ".gen")
+
+    /** The generation of the newest key made under [alias], or 0 when none was. */
+    private fun storedGeneration(alias: String): Long {
+        val file = generationFileFor(alias)
+        if (!file.exists()) return 0
+        val bytes = try {
+            file.readBytes()
+        } catch (e: IOException) {
+            throw PqcKeyRecordException("ML-DSA generation is unreadable")
+        }
+        if (bytes.size != 8) throw PqcKeyRecordException("ML-DSA generation is damaged")
+        return ByteBuffer.wrap(bytes).long
     }
 
     /** Whether a readable record for [alias] exists. */
     @Synchronized
     fun contains(alias: String): Boolean = record(alias) != null
 
-    /** The SubjectPublicKeyInfo DER of the key under [alias], or null. */
+    /** The SubjectPublicKeyInfo DER of the key under [alias], or null when there is none or it does not open. */
     @Synchronized
-    fun publicKeyDer(alias: String): ByteArray? = record(alias)?.spki?.copyOf()
+    fun publicKeyDer(alias: String): ByteArray? {
+        val record = record(alias) ?: return null
+        return try {
+            openRecord(alias, record) { _, _ -> record.spki.copyOf() }
+        } catch (e: GeneralSecurityException) {
+            null
+        }
+    }
 
     /** The parameter set of the key under [alias], or null. */
     @Synchronized
@@ -114,18 +144,7 @@ class PqcSoftwareKeyStore(
     @Synchronized
     fun authDurationSeconds(alias: String): Int? {
         val record = record(alias) ?: return null
-        var plaintext: ByteArray? = null
-        try {
-            plaintext = cipher.decrypt(record.sealed)
-            return readSealedHeader(ByteBuffer.wrap(plaintext), alias, record.set)
-        } catch (e: GeneralSecurityException) {
-            if (e is PqcKeyRecordException) throw e
-            throw PqcKeyRecordException("ML-DSA record does not open")
-        } catch (e: RuntimeException) {
-            throw PqcKeyRecordException("ML-DSA record is damaged")
-        } finally {
-            plaintext?.fill(0)
-        }
+        return openRecord(alias, record) { authDurationSeconds, _ -> authDurationSeconds }
     }
 
     /**
@@ -146,22 +165,60 @@ class PqcSoftwareKeyStore(
         val record = record(alias) ?: throw PqcKeyRecordException("No ML-DSA key under this alias")
         // Checked under the store's lock: a concurrent generate cannot swap the record after this.
         if (record.set != set) throw PqcKeyRecordException("ML-DSA key under this alias is not ${set.wireName}")
-        val plaintext = cipher.decrypt(record.sealed)
+        return openRecord(alias, record) { authDurationSeconds, key ->
+            requireUserAuthentication(authDurationSeconds, userAuthenticatedAt)
+            val signer = MLDSASigner()
+            signer.init(true, ParametersWithRandom(key, random))
+            signer.update(data, 0, data.size)
+            signer.generateSignature()
+        }
+    }
+
+    /**
+     * Opens [record] for [alias] and passes its sealed policy and private key
+     * to [use]: the one place a sealed key is opened. Refuses a record sealed
+     * for another alias or set, one whose clear public key is not the sealed
+     * one or not its private key's, and one older than the alias's stored
+     * generation. Every plaintext is zeroed before it returns.
+     *
+     * @throws PqcKeyRecordException when the record does not open or is refused.
+     */
+    private fun <T> openRecord(
+        alias: String,
+        record: Record,
+        use: (authDurationSeconds: Int, key: MLDSAPrivateKeyParameters) -> T
+    ): T {
+        val plaintext = try {
+            cipher.decrypt(record.sealed)
+        } catch (e: GeneralSecurityException) {
+            if (e is PqcKeyRecordException) throw e
+            throw PqcKeyRecordException("ML-DSA record does not open")
+        }
         var pkcs8: ByteArray? = null
         try {
             val buffer = ByteBuffer.wrap(plaintext)
-            val authDurationSeconds = readSealedHeader(buffer, alias, record.set)
-            requireUserAuthentication(authDurationSeconds, userAuthenticatedAt)
+            if (readField(buffer) != alias || readField(buffer) != record.set.wireName) {
+                throw PqcKeyRecordException("ML-DSA record was sealed for another key")
+            }
+            val sealedSpki = readSizedField(buffer)
+            if (!sealedSpki.contentEquals(record.spki)) {
+                throw PqcKeyRecordException("ML-DSA record's public key is not the sealed one")
+            }
+            if (buffer.long < storedGeneration(alias)) {
+                throw PqcKeyRecordException("ML-DSA record is older than the key under this alias")
+            }
+            val authDurationSeconds = buffer.int
             pkcs8 = ByteArray(buffer.remaining()).also { buffer.get(it) }
             val key = PrivateKeyFactory.createKey(pkcs8) as? MLDSAPrivateKeyParameters
                 ?: throw PqcKeyRecordException("ML-DSA record holds another key type")
             if (key.parameters.name != bcParameters(record.set).name) {
                 throw PqcKeyRecordException("ML-DSA record holds another parameter set")
             }
-            val signer = MLDSASigner()
-            signer.init(true, ParametersWithRandom(key, random))
-            signer.update(data, 0, data.size)
-            return signer.generateSignature()
+            val derivedSpki = SubjectPublicKeyInfoFactory.createSubjectPublicKeyInfo(key.publicKeyParameters).encoded
+            if (!derivedSpki.contentEquals(record.spki)) {
+                throw PqcKeyRecordException("ML-DSA record's public key is not its private key's")
+            }
+            return use(authDurationSeconds, key)
         } catch (e: IOException) {
             throw PqcKeyRecordException("ML-DSA record is damaged")
         } catch (e: RuntimeException) {
@@ -174,7 +231,8 @@ class PqcSoftwareKeyStore(
 
     /**
      * Deletes the key under [alias]; true when there was one, false when
-     * there was none.
+     * there was none. The alias's generation stays, so the deleted record
+     * cannot be put back.
      *
      * @throws IOException when a record exists and cannot be removed: the
      *   key is still usable, so a caller must keep its slot row or metadata.
@@ -217,7 +275,8 @@ class PqcSoftwareKeyStore(
 
     /**
      * The on-disk record: the alias, set and public key in the clear, and the
-     * sealed `alias || set || user-authentication policy || PKCS#8`.
+     * sealed `alias || set || public key || generation || user-authentication
+     * policy || PKCS#8`, so the clear fields are checked against the sealed ones.
      */
     @Suppress("ArrayInDataClass")
     internal data class Record(
@@ -310,8 +369,8 @@ class PqcSoftwareKeyStore(
 
         private const val DIR = "pqc_keys"
         private const val MAX_FIELD = 64 * 1024
-        // Version 2 seals the user-authentication policy; version 1 records
-        // (never released) carry none and are refused, not migrated.
+        // Version 2 seals the public key, generation and user-authentication policy;
+        // earlier records (never released) do not open and are not migrated.
         private val MAGIC = byteArrayOf('X'.code.toByte(), 'P'.code.toByte(), 'Q'.code.toByte(), '2'.code.toByte())
 
         /** Throws unless [userAuthenticatedAt] meets [authDurationSeconds]. */
@@ -323,21 +382,6 @@ class PqcSoftwareKeyStore(
             if (age < 0 || age > windowMs) throw BiometricRequiredException()
         }
 
-        /**
-         * Reads `alias || set || policy` off [buffer], leaving it at the
-         * PKCS#8, and returns the policy.
-         *
-         * @throws PqcKeyRecordException when the plaintext was sealed for
-         *   another alias or set.
-         */
-        private fun readSealedHeader(buffer: ByteBuffer, alias: String, set: MlDsaParameterSet): Int {
-            val sealedAlias = readField(buffer)
-            val sealedSet = readField(buffer)
-            if (sealedAlias != alias || sealedSet != set.wireName) {
-                throw PqcKeyRecordException("ML-DSA record was sealed for another key")
-            }
-            return buffer.int
-        }
 
         internal fun bcParameters(set: MlDsaParameterSet): MLDSAParameters = when (set) {
             MlDsaParameterSet.ML_DSA_44 -> MLDSAParameters.ml_dsa_44
@@ -345,28 +389,38 @@ class PqcSoftwareKeyStore(
             MlDsaParameterSet.ML_DSA_87 -> MLDSAParameters.ml_dsa_87
         }
 
-        /** `len || alias || len || set || policy || pkcs8`, in one array the caller zeroes. */
+        /**
+         * `len || alias || len || set || len || spki || generation || policy || pkcs8`,
+         * in one array the caller zeroes.
+         */
         private fun sealedPlaintext(
             alias: String,
             set: MlDsaParameterSet,
+            spki: ByteArray,
+            generation: Long,
             authDurationSeconds: Int,
             pkcs8: ByteArray
         ): ByteArray {
             val aliasBytes = alias.toByteArray(Charsets.UTF_8)
             val setBytes = set.wireName.toByteArray(Charsets.UTF_8)
-            val buffer = ByteBuffer.allocate(4 + aliasBytes.size + 4 + setBytes.size + 4 + pkcs8.size)
+            val buffer = ByteBuffer.allocate(
+                4 + aliasBytes.size + 4 + setBytes.size + 4 + spki.size + 8 + 4 + pkcs8.size
+            )
             buffer.putInt(aliasBytes.size).put(aliasBytes)
             buffer.putInt(setBytes.size).put(setBytes)
+            buffer.putInt(spki.size).put(spki)
+            buffer.putLong(generation)
             buffer.putInt(authDurationSeconds)
             buffer.put(pkcs8)
             return buffer.array()
         }
 
-        private fun readField(buffer: ByteBuffer): String {
+        private fun readField(buffer: ByteBuffer): String = String(readSizedField(buffer), Charsets.UTF_8)
+
+        private fun readSizedField(buffer: ByteBuffer): ByteArray {
             val size = buffer.int
             if (size < 0 || size > buffer.remaining()) throw PqcKeyRecordException("ML-DSA record is damaged")
-            val bytes = ByteArray(size).also { buffer.get(it) }
-            return String(bytes, Charsets.UTF_8)
+            return ByteArray(size).also { buffer.get(it) }
         }
     }
 }
