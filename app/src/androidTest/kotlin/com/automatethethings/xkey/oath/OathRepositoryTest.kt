@@ -309,11 +309,11 @@ class OathRepositoryTest {
 
     @Test
     fun importFromUri_decodesASecretWhoseLengthIsNotAWholeNumberOfBytes() = runBlocking {
-        // 4 Base32 characters carry 20 bits, which yields 2 whole bytes; the
-        // trailing 4 bits are discarded rather than emitted as a partial byte.
-        val id = repository.importFromUri("otpauth://totp/user?secret=MZXW")
+        // 17 Base32 characters carry 85 bits, which yields 10 whole bytes; the
+        // trailing 5 bits are discarded rather than emitted as a partial byte.
+        val id = repository.importFromUri("otpauth://totp/user?secret=MZXWMZXWMZXWMZXWM")
 
-        assertEquals(2, storedSecret(id).size)
+        assertEquals(10, storedSecret(id).size)
     }
 
     // -------------------------------------------------------------------------
