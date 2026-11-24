@@ -41,6 +41,7 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 
@@ -238,11 +239,11 @@ class GenerationEchoTest {
     // -----------------------------------------------------------------
 
     @Test
-    fun `a request missing its id echoes the generation with id 0`() = runTest {
+    fun `a request missing its id echoes the generation with a null id`() = runTest {
         val response = answer("""{"generation":48,"method":"ping"}""")
 
         assertEquals("48", rawGeneration(response))
-        assertEquals(0L, JSONObject(response).getLong("id"))
+        assertTrue(JSONObject(response).isNull("id"))
         assertEquals(ErrorCodes.INTERNAL_ERROR, errorCode(response))
     }
 
