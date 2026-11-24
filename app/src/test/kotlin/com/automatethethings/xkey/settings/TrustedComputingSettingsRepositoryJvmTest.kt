@@ -312,6 +312,88 @@ class TrustedComputingSettingsRepositoryJvmTest {
         assertFalse(settings.trustNewDevices)
     }
 
+    // -------------------------------------------------------------------------
+    // A cleared endpoint stays cleared
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun `updateXkmsEndpoint null with a legacy server URL stored reads back null`() = runBlocking {
+        writeLegacy(caServerUrl = "https://legacy.example.com")
+        repository.updateXkmsEndpoint("https://xkms.example.com")
+        repository.updateXkmsEndpoint(null)
+
+        assertNull(reopened().getSettings().xkmsEndpoint)
+    }
+
+    @Test
+    fun `updateSettings with no endpoint and a legacy server URL stored reads back null`() = runBlocking {
+        writeLegacy(caServerUrl = "https://legacy.example.com")
+        repository.updateSettings(TrustedComputingSettingsData.STRICT)
+
+        assertEquals(TrustedComputingSettingsData.STRICT, reopened().getSettings())
+    }
+
+    @Test
+    fun `resetToDefaults leaves no legacy key`() = runBlocking {
+        writeLegacy(actAsCaServer = true, caServerUrl = "https://legacy.example.com")
+        repository.resetToDefaults()
+
+        val keys = storedKeys()
+        assertFalse(keys.contains(KEY_ACT_AS_CA_SERVER.name))
+        assertFalse(keys.contains(KEY_CA_SERVER_URL.name))
+        assertEquals(TrustedComputingSettingsData.DEFAULT, reopened().getSettings())
+    }
+
+    // -------------------------------------------------------------------------
+    // Audit entries
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun `each security-relevant update records one entry with old and new value`() = runBlocking {
+        repository.updateEnabled(true)
+        repository.updateCASource(CertificateAuthoritySource.XKMS)
+        repository.updateXkmsEndpoint("https://xkms.example.com")
+        repository.updateRequireTrustedIDevID(true)
+        repository.updateRequireFullAttestation(true)
+        repository.updateTrustNewDevices(false)
+        repository.updateImportToSystemStore(true)
+        repository.updateXkmsEndpoint(null)
+        repository.updateTrustNewDevices(true)
+
+        assertEquals(9, inserted.size)
+        assertChange(inserted[0], "trustedComputingEnabled", "false", "true")
+        assertChange(inserted[1], "caSource", "NONE", "XKMS")
+        assertChange(inserted[2], "xkmsEndpoint", "", "https://xkms.example.com")
+        assertChange(inserted[3], "requireTrustedIDevID", "false", "true")
+        assertChange(inserted[4], "requireFullAttestation", "false", "true")
+        assertChange(inserted[5], "trustNewDevices", "true", "false")
+        assertChange(inserted[6], "importToSystemStore", "false", "true")
+        assertChange(inserted[7], "xkmsEndpoint", "https://xkms.example.com", "")
+        assertChange(inserted[8], "trustNewDevices", "false", "true")
+    }
+
+    @Test
+    fun `a legacy source is the old value of a CA source change`() = runBlocking {
+        writeLegacy(actAsCaServer = true)
+        repository.updateCASource(CertificateAuthoritySource.XKMS)
+
+        assertEquals(1, inserted.size)
+        assertChange(inserted[0], "caSource", "THIS_DEVICE", "XKMS")
+    }
+
+    @Test
+    fun `writing the stored trusted computing values records nothing`() = runBlocking {
+        repository.updateEnabled(false)
+        repository.updateCASource(CertificateAuthoritySource.NONE)
+        repository.updateXkmsEndpoint(null)
+        repository.updateRequireTrustedIDevID(false)
+        repository.updateRequireFullAttestation(false)
+        repository.updateTrustNewDevices(true)
+        repository.updateImportToSystemStore(false)
+
+        assertEquals(emptyList<AuditLogEntity>(), inserted)
+    }
+
     private companion object {
         val KEY_CA_SOURCE = stringPreferencesKey("ca_source")
         val KEY_ACT_AS_CA_SERVER = booleanPreferencesKey("act_as_ca_server")
