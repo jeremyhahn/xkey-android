@@ -1,11 +1,11 @@
 # Device attestation architecture
 
-> **Status: REFERENCE** · Last verified: 2026-11-12
-> As-built description of device attestation protocol version 2: the phone proves to a paired desktop, through `local.attestDevice`, that it is the same hardware-backed handset and that it is present on this Noise session now.
+> Status: reference. Last checked against main on 2026-11-23.
+> This page describes device attestation protocol version 2: the phone proves to a paired desktop, through `local.attestDevice`, that it is the same hardware-backed handset and that it is present on this Noise session now.
 
-## Summary
+## Overview
 
-The phone holds one persistent **Device Attestation Key** (DAK), an EC P-256
+The phone holds one persistent device attestation key (DAK), an EC P-256
 Keystore key minted once under the fixed `AttestTranscript.GENESIS_CHALLENGE`
 (`"xkey-device-attestation-v1"`), StrongBox first, TEE as fallback. Its
 attestation chain proves once that the key is hardware-backed on a
@@ -23,7 +23,7 @@ reconnect (see [usb-transport](../usb-transport/architecture.md)).
 | Component | File | Role |
 |-----------|------|------|
 | `DeviceAttestationKey` | `app/src/main/kotlin/com/automatethethings/xkey/crypto/DeviceAttestationKey.kt` | Alias `xkey_device_attestation_key`; `chain()` (mints on first call, refuses a chain shorter than 2), `sign()` (`SHA256withECDSA`, ASN.1 DER), `fingerprint()`, `fingerprintHex()`, `rotate()`; `WIRE_SIGNATURE_ALGORITHM = "ES256"` |
-| `AttestTranscript` | `app/src/main/kotlin/com/automatethethings/xkey/protocol/AttestTranscript.kt` | Pure byte layouts: `PROTOCOL_VERSION = 2`, `PURPOSE_PAIR`, `PURPOSE_REATTEST`, `PURPOSE_VERIFY_USER`, `build`, `channelBinding`, `shortAuthString`, `formatShortAuthString` |
+| `AttestTranscript` | `app/src/main/kotlin/com/automatethethings/xkey/protocol/AttestTranscript.kt` | Pure byte layouts: `PROTOCOL_VERSION = 2`, `PURPOSE_PAIR`, `PURPOSE_REATTEST`, `PURPOSE_VERIFY_USER`, `build`, `channelBinding`, `shortAuthString`, `formatShortAuthString`. `PURPOSE_VERIFY_USER` is used by `local.verifyUser`, which signs with the user verification key, not the DAK |
 | `AttestedKeyFingerprint` | `app/src/main/kotlin/com/automatethethings/xkey/protocol/AttestedKeyFingerprint.kt` | `of` / `hexOf`: SHA-256 of the leaf SPKI |
 | `RequestHandler.handleLocalAttestDevice` | `app/src/main/kotlin/com/automatethethings/xkey/protocol/Handler.kt` | The prover; helpers `deriveChannelBinding`, `requireUserPresenceForAttestation`, `parseAttestationExtension`, `bindFingerprintAtPairing`, `attestingPeerPublicKeyHex` |
 | `LocalAttestDeviceParams`, `LocalAttestDeviceResult` | `app/src/main/kotlin/com/automatethethings/xkey/protocol/Messages.kt` | Request and response bodies |
@@ -52,7 +52,7 @@ channel binding (`NNNN-NNNN-NNNN`).
 
 - `local.attestDevice` (`MethodNames.LOCAL_ATTEST_DEVICE`). Params:
   `protocolVersion` (must be `2`), `nonce` (base64, 32 bytes), `purpose`
-  (`pair` or `reattest`). Result (`LocalAttestDeviceResult`): `protocolVersion`,
+  (`pair` or `reattest`; `verify-user` is refused here). Result (`LocalAttestDeviceResult`): `protocolVersion`,
   `format = "android-keystore"`, `certificateChain` (base64 DER, leaf first),
   `securityLevel`, `nonce`, `purpose`, `signature` (base64), `signatureAlgorithm`,
   `bootState`, `deviceLocked`, `verifiedBootKey`, `verifiedBootHash`.

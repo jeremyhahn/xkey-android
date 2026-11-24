@@ -53,13 +53,13 @@ Never does:
 | password-vault | shipped | The phone's password store, synced with the desktop through `syncPasswords` | `docs/password-vault/` |
 | contacts | shipped | Recipient public keys for encryption and signature verification, with import and export | `docs/contacts/` |
 | file-operations | shipped | Sign, verify, encrypt and decrypt files received through the Android Share sheet | `docs/file-operations/` |
-| media-signing | shipped | A foreground service watches MediaStore, hashes new photos and videos, signs them and embeds the signature in EXIF or XMP; auto-sign toggle and key choice | `docs/media-signing/` |
-| co-signing | shipped | Multi-party signing of media by QR or BLE exchange (`cosign.request`, `cosign.response`); Android-only, not part of the desktop contract | `docs/co-signing/` |
-| verified-media-viewer | shipped | Shows media with signature verification badges | `docs/verified-media-viewer/` |
+| media-signing | shipped | A foreground service watches MediaStore, hashes new photos and videos, signs them and stores the signature in the EXIF UserComment of a JPEG or in a `.xkeysig` file beside any other file; auto-sign toggle and key choice | `docs/media-signing/` |
+| co-signing | shipped | Multi-party signing of media: phones co-sign by QR exchange, and the phone answers `cosign.request` from a paired device with `cosign.response` (it never sends a request); Android-only, not part of the desktop contract | `docs/co-signing/` |
+| verified-media-viewer | shipped | Shows media with one coloured row per signer giving its verification result | `docs/verified-media-viewer/` |
 | audit-log | shipped | Records security events in Room; audit screen and recent activity on the home screen | `docs/audit-log/` |
 | release-signing | shipped | `assembleRelease` and `bundleRelease` sign with credentials outside version control and fail with a message when they are missing | `docs/release-signing/` |
 | remote-backup-password | shipped | Send the required `password` on `remote.createBackup` and `remote.restoreBackup` (go-xkms#690) | `docs/remote-backup-password/` |
-| password-vault-rpcs | planned | Answer the `Password*` and `SealStore*` methods the desktop sends over USB (go-xkms#692), including the per-user vault's new unlock body | none |
+| password-vault-rpcs | shipped | Answer the nine `Password*` and six `SealStore*` methods the desktop sends over USB (go-xkms#692), including the per-user vault's new unlock body | `docs/password-vault-rpcs/` |
 | phone-initiated-pairing | shipped | Answer `local.attestDevice` on sessions the phone opens and display the pairing SAS (go-xkms#1306) | `docs/phone-initiated-pairing/` |
 | request-generation-echo | shipped | Echo a per-request `generation` in every pairing response, the phone half of the go-xkms#128 flag day | `docs/request-generation-echo/` |
 | fido2-built-in-uv | shipped | A biometric-gated, verifiable "verify user" RPC so the desktop authenticator can issue a pinUvAuthToken through UV `local.verifyUser` per go-xkms#1716 | `docs/fido2-built-in-uv/` |
