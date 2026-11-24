@@ -21,6 +21,7 @@ import androidx.test.core.app.ApplicationProvider
 import com.automatethethings.xkey.storage.XKeyDatabase
 import io.mockk.every
 import io.mockk.mockk
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -54,6 +55,8 @@ class OathRepositoryHardeningTest {
         val secretManager = mockk<OathSecretManager>()
         every { secretManager.encryptSecret(any()) } answers { firstArg() }
         every { secretManager.decryptSecret(any()) } answers { firstArg() }
+        every { secretManager.decryptSecret(match { it.contentEquals(CORRUPT) }) } throws
+            javax.crypto.AEADBadTagException("tag mismatch")
         repository = OathRepository(dao, secretManager)
     }
 
@@ -114,7 +117,31 @@ class OathRepositoryHardeningTest {
         assertEquals(setOf("SHA1", "SHA256", "SHA512"), dao.getAll().map { it.algorithm }.toSet())
     }
 
+    @Test
+    fun `a row whose secret cannot be decrypted is flagged and the rest of the list still has codes`() = runBlocking {
+        val good = repository.addCredential(issuer = "A", accountName = "good", secret = RFC_SEED)
+        val bad = repository.addCredential(issuer = "B", accountName = "bad", secret = CORRUPT)
+
+        val rows = repository.observeAll().first().associateBy { it.credential.oathId }
+
+        assertEquals(2, rows.size)
+        assertFalse(rows.getValue(good).codeError)
+        assertEquals(6, rows.getValue(good).code.length)
+        assertTrue(rows.getValue(good).code.all { it.isDigit() })
+        assertTrue(rows.getValue(bad).codeError)
+        assertFalse(rows.getValue(bad).code.any { it.isDigit() })
+
+        repository.deleteCredential(bad)
+        assertEquals(listOf(good), repository.observeAll().first().map { it.credential.oathId })
+    }
+
     private companion object {
+        /** The RFC 4226 appendix D seed. */
+        val RFC_SEED = "12345678901234567890".toByteArray(Charsets.US_ASCII)
+
+        /** A stored secret the secret manager cannot decrypt (an invalidated Keystore key). */
+        val CORRUPT = ByteArray(16) { 0x5A }
+
         /** 16 Base32 characters: 10 bytes, the 80-bit minimum. */
         const val SECRET = "JBSWY3DPEHPK3PXP"
     }
