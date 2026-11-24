@@ -21,6 +21,7 @@ import com.automatethethings.xkey.truststore.TrustStoreRepository
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import kotlin.coroutines.cancellation.CancellationException
 
 /**
  * Single source of truth for bidirectional store synchronization. Owns the
@@ -92,7 +93,15 @@ class SyncEngine(
             }
             val label = obj.optString("purpose", "").ifBlank { "sync" }
             // Stored as synced: shown and synced back out, never a trust anchor.
-            if (repo.importSyncedCertificate(der, label) != null) added++ else skipped++
+            // Each certificate merges on its own: a storage failure skips it alone.
+            val stored = try {
+                repo.importSyncedCertificate(der, label)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                null
+            }
+            if (stored != null) added++ else skipped++
         }
         return CertCounts(added, skipped)
     }
