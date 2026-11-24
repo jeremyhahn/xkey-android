@@ -40,9 +40,11 @@ import androidx.test.runner.AndroidJUnitRunner
  *   on and keeps it on ([ShowOverKeyguard]). The keyguard itself is never
  *   dismissed or weakened.
  *
- * Every value it changes is read first and written back in [finish]. The
- * originals are also parked in `Settings.Global` under [SAVED_PREFIX] keys
- * until they are restored, so a run killed before [finish] (a crashed test
+ * Every value it changes is read first and written back in [finish], through
+ * [SettingsGuard] and [DeviceSettings], which read back every write. The
+ * originals are parked in `Settings.Global` under [SAVED_PREFIX] keys, and each
+ * saved value stays until its restore has been read back, so a failed restore
+ * or a run killed before [finish] (a crashed test
  * process, a pulled cable) is repaired by the next run instead of having its
  * zeroed values taken as the device's own.
  */

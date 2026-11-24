@@ -31,20 +31,41 @@ data class DeviceSetting(val table: String, val name: String)
  */
 class DeviceSettings(private val shell: SettingsShell) {
 
-    /** The setting's value, or `null` when it has none. */
+    /**
+     * The setting's value, or `null` when it has none.
+     *
+     * `settings get` prints the value or the literal `null`; empty output means
+     * the read itself failed, so it throws [SettingsAccessException] rather than
+     * being taken as "no value".
+     */
     fun read(table: String, name: String): String? {
         val output = shell.run("settings get $table $name").trim()
-        return output.takeUnless { it.isEmpty() || it == NULL_OUTPUT }
+        if (output.isEmpty()) throw SettingsAccessException("could not read $table $name")
+        return output.takeUnless { it == NULL_OUTPUT }
     }
 
-    /** Sets the setting to [value]. */
+    /**
+     * Sets the setting to [value] and reads it back; throws
+     * [SettingsAccessException] unless the read-back equals [value].
+     */
     fun write(table: String, name: String, value: String) {
         shell.run("settings put $table $name $value")
+        val readBack = read(table, name)
+        if (readBack != value) {
+            throw SettingsAccessException("$table $name reads back $readBack after writing $value")
+        }
     }
 
-    /** Removes the setting's value. */
+    /**
+     * Removes the setting's value and reads it back; throws
+     * [SettingsAccessException] unless the setting then has no value.
+     */
     fun delete(table: String, name: String) {
         shell.run("settings delete $table $name")
+        val readBack = read(table, name)
+        if (readBack != null) {
+            throw SettingsAccessException("$table $name reads back $readBack after deleting it")
+        }
     }
 
     private companion object {
@@ -67,20 +88,34 @@ class SettingsGuard(
     private val warn: (String, Throwable) -> Unit = { _, _ -> },
 ) {
 
-    /** Saves each setting's original value, then sets its testing value. */
+    /**
+     * Saves each setting's original value, then sets its testing value.
+     *
+     * A setting whose saved key or current value cannot be read, or whose
+     * backup does not read back, is left as it is.
+     */
     fun prepare() {
         testingValues.forEach { (setting, value) ->
-            val savedKey = savedKey(setting)
-            if (settings.read(SAVED_TABLE, savedKey) == null) {
-                // No earlier run left a value behind: the current one is the owner's.
-                val current = settings.read(setting.table, setting.name)
-                settings.write(SAVED_TABLE, savedKey, current ?: UNSET_MARKER)
+            try {
+                val savedKey = savedKey(setting)
+                if (settings.read(SAVED_TABLE, savedKey) == null) {
+                    // No earlier run left a value behind: the current one is the owner's.
+                    val current = settings.read(setting.table, setting.name)
+                    settings.write(SAVED_TABLE, savedKey, current ?: UNSET_MARKER)
+                }
+                // Only reached once a verified backup exists.
+                settings.write(setting.table, setting.name, value)
+            } catch (e: Exception) {
+                warn("could not prepare ${setting.name}; left as it is", e)
             }
-            settings.write(setting.table, setting.name, value)
         }
     }
 
-    /** Writes each saved original back and drops its saved copy. */
+    /**
+     * Writes each saved original back and drops its saved copy only once the
+     * restore reads back. A failed read or restore keeps the saved copy for the
+     * next run and moves on to the next setting.
+     */
     fun restore() {
         testingValues.keys.forEach { setting ->
             try {
@@ -91,9 +126,10 @@ class SettingsGuard(
                 } else {
                     settings.write(setting.table, setting.name, original)
                 }
+                // Only reached once the restore above has read back.
                 settings.delete(SAVED_TABLE, savedKey)
             } catch (e: Exception) {
-                warn("could not restore ${setting.name}", e)
+                warn("could not restore ${setting.name}; its saved value is kept", e)
             }
         }
     }
