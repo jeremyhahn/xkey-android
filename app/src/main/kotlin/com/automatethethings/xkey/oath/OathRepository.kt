@@ -146,7 +146,10 @@ private fun percentEncode(value: String): String =
  */
 class OathRepository(
     private val dao: OathCredentialDao,
-    private val secretManager: OathSecretManager
+    private val secretManager: OathSecretManager,
+    // The paired desktop a desktop request came from; null for the phone's own screens.
+    private val auditDeviceId: String? = null,
+    private val auditDeviceName: String? = null
 ) {
 
     /**
@@ -196,6 +199,11 @@ class OathRepository(
         )
 
         dao.insert(entity)
+        // Every add (QR scan, manual entry, local.oathAdd) passes here: the
+        // one place it is audited. The row names the credential, never its secret.
+        AuditLogger.logOathCredentialCreated(
+            oathId, issuer, accountName, entity.oathType, auditDeviceId, auditDeviceName
+        )
         return oathId
     }
 
@@ -585,6 +593,11 @@ class OathRepository(
         } catch (e: Exception) {
             Log.w(TAG, "Usage record failed for OATH credential $oathId: ${e.javaClass.simpleName}")
         }
+        // A generation the user or desktop asked for (an HOTP copy advances
+        // the counter); list refreshes go through observeAll and are not audited.
+        AuditLogger.logOathCodeGenerated(
+            oathId, credential.issuer, credential.accountName, auditDeviceId, auditDeviceName
+        )
 
         return code
     }
@@ -645,10 +658,20 @@ class OathRepository(
      * a sync merge running at the same time, or any later one, never adds
      * the credential back, and no interruption leaves one without the other.
      *
+     * Audited here, so a delete on the phone and local.oathRemove write the
+     * same single row; nothing is deleted or audited when no credential has
+     * [oathId].
+     *
      * @param oathId The unique identifier of the credential to delete.
+     * @return true if a credential was deleted, false if none had [oathId].
      */
-    suspend fun deleteCredential(oathId: String) {
+    suspend fun deleteCredential(oathId: String): Boolean {
+        val credential = dao.getByOathId(oathId) ?: return false
         dao.deleteAndRecordDeletion(oathId, System.currentTimeMillis())
+        AuditLogger.logOathCredentialDeleted(
+            oathId, credential.issuer, credential.accountName, auditDeviceId, auditDeviceName
+        )
+        return true
     }
 
     /**

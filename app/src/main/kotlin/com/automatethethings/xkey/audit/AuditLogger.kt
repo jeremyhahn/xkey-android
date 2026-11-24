@@ -1055,16 +1055,20 @@ object AuditLogger {
      * @param deviceId The device ID involved (if applicable).
      * @param deviceName The device name (if applicable).
      * @param reason The reason for denial.
+     * @param operation The refused request method (for example
+     *   `local.signFido2Assertion`), if applicable.
      */
     fun logPolicyDenied(
         keyId: String? = null,
         keyLabel: String? = null,
         deviceId: String? = null,
         deviceName: String? = null,
-        reason: String
+        reason: String,
+        operation: String? = null
     ) {
         val details = JSONObject().apply {
             put("reason", reason)
+            operation?.let { put("operation", it) }
         }
         log(
             AuditLogEntity(
@@ -1366,8 +1370,8 @@ object AuditLogger {
         issuer: String?,
         accountName: String,
         oathType: String,
-        deviceId: String?,
-        deviceName: String?
+        deviceId: String? = null,
+        deviceName: String? = null
     ) {
         val details = JSONObject().apply {
             issuer?.let { put("issuer", it) }
@@ -1391,8 +1395,8 @@ object AuditLogger {
         oathId: String,
         issuer: String?,
         accountName: String,
-        deviceId: String?,
-        deviceName: String?
+        deviceId: String? = null,
+        deviceName: String? = null
     ) {
         log(
             AuditLogEntity(
@@ -1410,8 +1414,8 @@ object AuditLogger {
         oathId: String,
         issuer: String?,
         accountName: String,
-        deviceId: String?,
-        deviceName: String?
+        deviceId: String? = null,
+        deviceName: String? = null
     ) {
         log(
             AuditLogEntity(

@@ -602,6 +602,7 @@ class RequestHandler(
             handler(request)
         } catch (e: ProtocolException) {
             Log.e(TAG, "Handler error: ${e.message}")
+            if (e.errorCode == ErrorCodes.OPERATION_DENIED) auditPolicyDenied(request.method, e)
             Response.error(request.id, e.errorCode, e.message ?: "Handler error")
         } catch (e: KeyNotFoundException) {
             Log.e(TAG, "Key not found: ${e.message}")
@@ -662,6 +663,31 @@ class RequestHandler(
         } catch (e: Exception) {
             Log.e(TAG, "Unexpected handler error", e)
             Response.error(request.id, ErrorCodes.INTERNAL_ERROR, "Internal error: ${e.message}")
+        }
+    }
+
+    /**
+     * Records a policy refusal ([ErrorCodes.OPERATION_DENIED]) as one
+     * POLICY_DENIED audit row. Every refusal a handler throws passes
+     * [dispatch]'s catch, so this is the one place they are recorded; a throw
+     * site never logs its own. The row carries the requesting peer, the
+     * request method and the refusal message, which names at most a key or
+     * credential id, never key material or request data. Recording never
+     * changes the response.
+     */
+    private suspend fun auditPolicyDenied(method: String, e: ProtocolException) {
+        try {
+            val peer = currentPeerPublicKeyHex()
+            AuditLogger.logPolicyDenied(
+                deviceId = peer,
+                deviceName = auditPeerName(peer),
+                reason = e.message ?: "Operation denied",
+                operation = method
+            )
+        } catch (c: kotlin.coroutines.cancellation.CancellationException) {
+            throw c
+        } catch (x: Exception) {
+            Log.w(TAG, "policy denial not audited: ${x.javaClass.simpleName}")
         }
     }
 
@@ -2227,6 +2253,17 @@ class RequestHandler(
         return AuditCaller(peer, auditPeerName(peer))
     }
 
+    /** An OATH repository whose audit rows name this request's paired desktop. */
+    private suspend fun oathRepositoryFor(db: XKeyDatabase): com.automatethethings.xkey.oath.OathRepository {
+        val caller = auditCaller()
+        return com.automatethethings.xkey.oath.OathRepository(
+            db.oathCredentialDao(),
+            com.automatethethings.xkey.oath.OathSecretManager(),
+            auditDeviceId = caller.peerPublicKeyHex,
+            auditDeviceName = caller.deviceName
+        )
+    }
+
     /**
      * Handles local.getPublicKey - export public key in specified format.
      */
@@ -3790,10 +3827,7 @@ class RequestHandler(
 
         return try {
             val db = XKeyDatabase.getInstance(context)
-            val oathRepository = com.automatethethings.xkey.oath.OathRepository(
-                db.oathCredentialDao(),
-                com.automatethethings.xkey.oath.OathSecretManager()
-            )
+            val oathRepository = oathRepositoryFor(db)
             // Read once, before the code: a removal landing after the code is
             // computed must not turn expires_in into 0 or the audit entry's
             // account into an empty one.
@@ -3814,11 +3848,7 @@ class RequestHandler(
                 (period - (System.currentTimeMillis() / 1000 % period)).toInt()
             } else 0
 
-            val caller = auditCaller()
-            AuditLogger.logOathCodeGenerated(
-                credentialId, cred.issuer, cred.accountName, caller.peerPublicKeyHex, caller.deviceName
-            )
-
+            // OathRepository.generateCode wrote the audit row.
             val result = JSONObject().apply {
                 put("code", code)
                 put("expires_in", expiresIn)
@@ -3851,10 +3881,7 @@ class RequestHandler(
 
         return try {
             val db = XKeyDatabase.getInstance(context)
-            val oathRepository = com.automatethethings.xkey.oath.OathRepository(
-                db.oathCredentialDao(),
-                com.automatethethings.xkey.oath.OathSecretManager()
-            )
+            val oathRepository = oathRepositoryFor(db)
 
             val type = credential.optString("type", "totp").lowercase()
             val issuer = credential.optString("issuer", null)
@@ -3873,12 +3900,7 @@ class RequestHandler(
                 period = credential.optInt("period", 30),
                 counter = credential.optLong("counter", 0)
             )
-
-            // The entry names the stored credential, not the caller's free-form name.
-            val caller = auditCaller()
-            AuditLogger.logOathCredentialCreated(
-                credentialId, issuer, accountName, type.uppercase(), caller.peerPublicKeyHex, caller.deviceName
-            )
+            // OathRepository.addCredential wrote the audit row, under credentialId.
 
             val result = JSONObject().apply {
                 put("success", true)
@@ -3910,20 +3932,13 @@ class RequestHandler(
 
         return try {
             val db = XKeyDatabase.getInstance(context)
-            val cred = db.oathCredentialDao().getByOathId(credentialId)
-            if (cred == null) {
-                // Nothing has that id: say so rather than claim a deletion.
-                return Response.success(request.id, JSONObject().apply { put("deleted", false) })
-            }
+            val oathRepository = oathRepositoryFor(db)
             // Recorded and deleted in one transaction, so no sync with another paired device adds it back.
-            db.oathCredentialDao().deleteAndRecordDeletion(credentialId, System.currentTimeMillis())
+            // Nothing has that id: say so rather than claim a deletion. The
+            // repository writes the audit row, as for a delete on the phone.
+            val deleted = oathRepository.deleteCredential(credentialId)
 
-            val caller = auditCaller()
-            AuditLogger.logOathCredentialDeleted(
-                credentialId, cred.issuer, cred.accountName, caller.peerPublicKeyHex, caller.deviceName
-            )
-
-            val result = JSONObject().apply { put("deleted", true) }
+            val result = JSONObject().apply { put("deleted", deleted) }
             Response.success(request.id, result)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to remove OATH credential", e)
