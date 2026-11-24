@@ -320,6 +320,106 @@ class BootstrapSettingsRepositoryJvmTest {
         assertEquals(emptyList<AuditLogEntity>(), inserted)
     }
 
+    // -------------------------------------------------------------------------
+    // Stored timeout, validation and scheme
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun `a stored per-method timeout of zero or below reads as the default`() = runBlocking {
+        for (stored in listOf(0, -1, Int.MIN_VALUE)) {
+            store.edit { it[KEY_PER_METHOD_TIMEOUT] = stored }
+            assertEquals(
+                BootstrapSettingsData.DEFAULT_PER_METHOD_TIMEOUT_SECONDS,
+                repository.getSettings().perMethodTimeoutSeconds
+            )
+        }
+    }
+
+    @Test
+    fun `updateSpkiSettings refuses a pin that is not 64 hex characters`() = runBlocking {
+        repository.updateSpkiSettings(pinSha256 = PIN)
+        for (bad in listOf(PIN.dropLast(1), PIN + "0", PIN.dropLast(1) + "g", "sha256/" + PIN.drop(7))) {
+            val refused = runCatching { repository.updateSpkiSettings(enabled = true, pinSha256 = bad) }
+            assertTrue("pin $bad was accepted", refused.exceptionOrNull() is IllegalArgumentException)
+        }
+
+        val settings = reopened().getSettings()
+        assertEquals(PIN, settings.spkiPinSha256)
+        assertEquals(false, settings.spkiEnabled)
+    }
+
+    @Test
+    fun `updateNoiseSettings refuses an invalid static key`() = runBlocking {
+        repository.updateNoiseSettings(serverStaticKey = NOISE_KEY)
+        for (bad in listOf(NOISE_KEY.take(32), NOISE_KEY + "AB", NOISE_KEY.dropLast(1) + "Z")) {
+            val refused = runCatching { repository.updateNoiseSettings(enabled = true, serverStaticKey = bad) }
+            assertTrue("key $bad was accepted", refused.exceptionOrNull() is IllegalArgumentException)
+        }
+
+        val settings = reopened().getSettings()
+        assertEquals(NOISE_KEY, settings.noiseServerStaticKey)
+        assertEquals(false, settings.noiseEnabled)
+    }
+
+    @Test
+    fun `an empty pin and key clear them`() = runBlocking {
+        repository.updateSpkiSettings(pinSha256 = PIN)
+        repository.updateNoiseSettings(serverStaticKey = NOISE_KEY)
+        repository.updateSpkiSettings(pinSha256 = "")
+        repository.updateNoiseSettings(serverStaticKey = "")
+
+        val settings = reopened().getSettings()
+        assertEquals("", settings.spkiPinSha256)
+        assertEquals("", settings.noiseServerStaticKey)
+    }
+
+    @Test
+    fun `deriveSettingsFromUrl ignores a URL that is not http or https`() = runBlocking {
+        repository.deriveSettingsFromUrl("ftp://kms.example.com:2121")
+
+        assertEquals(BootstrapSettingsData.DEFAULT, reopened().getSettings())
+    }
+
+    // -------------------------------------------------------------------------
+    // Audit entries
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun `turning DNSSEC off and on records each change`() = runBlocking {
+        repository.updateDaneSettings(requireDnssec = false)
+        repository.updateDaneSettings(serverUrl = "https://dane.example.com", requireDnssec = true)
+
+        assertEquals(2, inserted.size)
+        assertChange(inserted[0], "daneRequireDnssec", "true", "false")
+        assertChange(inserted[1], "daneRequireDnssec", "false", "true")
+    }
+
+    @Test
+    fun `a new SPKI pin records one entry`() = runBlocking {
+        repository.updateSpkiSettings(enabled = true, serverUrl = "https://spki.example.com", pinSha256 = PIN)
+
+        assertEquals(1, inserted.size)
+        assertChange(inserted[0], "spkiPinSha256", "", PIN)
+    }
+
+    @Test
+    fun `a new Noise static key records one entry`() = runBlocking {
+        repository.updateNoiseSettings(enabled = true, serverAddr = "noise.example.com:8445", serverStaticKey = NOISE_KEY)
+
+        assertEquals(1, inserted.size)
+        assertChange(inserted[0], "noiseServerStaticKey", "", NOISE_KEY)
+    }
+
+    @Test
+    fun `unchanged DNSSEC, pin and key record nothing`() = runBlocking {
+        repository.updateDaneSettings(requireDnssec = true, serverUrl = "https://dane.example.com")
+        repository.updateSpkiSettings(pinSha256 = "", enabled = true)
+        repository.updateNoiseSettings(serverStaticKey = "", enabled = true)
+        repository.updateDaneSettings(dnsOverTls = true)
+
+        assertEquals(emptyList<AuditLogEntity>(), inserted)
+    }
+
     private companion object {
         const val PIN = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
         const val NOISE_KEY = "FEDCBA9876543210FEDCBA9876543210FEDCBA9876543210FEDCBA9876543210"
