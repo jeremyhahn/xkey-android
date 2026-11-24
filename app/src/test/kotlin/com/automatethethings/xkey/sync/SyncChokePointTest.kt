@@ -27,8 +27,9 @@ import java.io.File
  * `PasswordDao.insertIfAbsentUnlessDeleted`), and nothing outside
  * `PasswordDao` calls the raw statements those are built from. A HOTP
  * counter is advanced only by compare-and-set
- * (`OathCredentialDao.advanceCounter`, from `OathRepository.generateCode`),
- * so a counter a sync raised is never rewound.
+ * (`OathCredentialDao.claimCounter`, from `OathRepository.generateCode`),
+ * so a counter a sync raised is never rewound, and nothing calls the
+ * unconditional `OathCredentialDao.updateCounter`.
  */
 class SyncChokePointTest {
 
@@ -60,9 +61,9 @@ class SyncChokePointTest {
 
     @Test
     fun `a HOTP counter moves only by compare-and-set, from generateCode`() {
-        val unconditional = sources.filter { Regex("""\bupdateCounter\s*\(""").containsMatchIn(it.readText()) }
+        val unconditional = sources.filter { Regex("""\.\s*updateCounter\s*\(""").containsMatchIn(it.readText()) }
         assertEquals(emptyList<File>(), unconditional)
-        val callers = sources.filter { Regex("""\.\s*advanceCounter\s*\(""").containsMatchIn(it.readText()) }
+        val callers = sources.filter { Regex("""\.\s*claimCounter\s*\(""").containsMatchIn(it.readText()) }
         assertEquals(listOf("OathRepository.kt"), callers.map { it.name })
     }
 }
