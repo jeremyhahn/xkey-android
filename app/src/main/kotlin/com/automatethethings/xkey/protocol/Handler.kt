@@ -1935,7 +1935,7 @@ class RequestHandler(
         val caller = auditCaller()
 
         // Software-backed keys are operated on outside the Keystore.
-        com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(symParams.keyId)?.let { sw ->
+        com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(symParams.keyId)?.useAndZero { sw ->
             requireSoftwareKeyType(sw, otherType = "HMAC", operation = "AES-GCM")
             val swStart = System.currentTimeMillis()
             val ct = com.automatethethings.xkey.crypto.SoftwareKeyOps.aesGcmEncrypt(sw.material, plaintext, aad)
@@ -1997,7 +1997,7 @@ class RequestHandler(
         val caller = auditCaller()
 
         // Software-backed keys are operated on outside the Keystore.
-        com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(symParams.keyId)?.let { sw ->
+        com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(symParams.keyId)?.useAndZero { sw ->
             requireSoftwareKeyType(sw, otherType = "HMAC", operation = "AES-GCM")
             val swStart = System.currentTimeMillis()
             // A tag mismatch or a short input answers as the Keystore path does.
@@ -2265,6 +2265,20 @@ class RequestHandler(
             )
         }
     }
+
+    /**
+     * Runs [block] with this software key, then zeroes its decrypted
+     * material whatever the outcome: SoftwareKeyStore.get decrypts a fresh
+     * copy for each call, and nothing may keep it past the operation.
+     */
+    private inline fun <R> com.automatethethings.xkey.crypto.SoftwareKey.useAndZero(
+        block: (com.automatethethings.xkey.crypto.SoftwareKey) -> R
+    ): R =
+        try {
+            block(this)
+        } finally {
+            material.fill(0)
+        }
 
     /**
      * Handles local.getPublicKey - export public key in specified format.
