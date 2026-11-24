@@ -733,11 +733,7 @@ class KeystoreManager(
         // were silently leaking those entries.
         val alias = resolveKeystoreAlias(credentialId) ?: return false
         // A general alias may hold a software ML-DSA record instead of a Keystore entry.
-        val deleted = withAliasGate(alias) {
-            val inKeystore = keyStore.containsAlias(alias)
-            if (inKeystore) keyStore.deleteEntry(alias)
-            pqcStore.delete(alias) || inKeystore
-        }
+        val deleted = withAliasGate(alias) { keyStore.containsAlias(alias).also { if (it) keyStore.deleteEntry(alias) } or pqcStore.delete(alias) }
         if (!deleted) return false
 
         // Log key deletion
