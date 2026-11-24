@@ -1006,49 +1006,13 @@ class KeyDetailActivity : AppCompatActivity() {
         return card
     }
 
-    /**
-     * Adds a premium detail row with optional monospace styling.
-     */
     private fun addPremiumDetailRow(
         parent: LinearLayout,
         label: String,
         value: String,
         isMonospace: Boolean = false
     ) {
-        val row = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            ).apply {
-                bottomMargin = dpToPxInt(8)
-            }
-            gravity = Gravity.CENTER_VERTICAL
-        }
-
-        val labelView = TextView(this).apply {
-            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 0.4f)
-            text = label
-            setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_BodySmall)
-            setTextColor(resolveThemeColor(com.google.android.material.R.attr.colorOnSurfaceVariant))
-        }
-        row.addView(labelView)
-
-        val valueView = TextView(this).apply {
-            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 0.6f)
-            text = value
-            setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_BodySmall)
-            setTextColor(resolveThemeColor(com.google.android.material.R.attr.colorOnSurface))
-            typeface = if (isMonospace) Typeface.MONOSPACE else Typeface.DEFAULT_BOLD
-            gravity = Gravity.END
-            maxLines = if (isMonospace) 1 else 2
-            if (isMonospace) {
-                textSize = 10f
-            }
-        }
-        row.addView(valueView)
-
-        parent.addView(row)
+        parent.addView(DetailValueRow.create(this, label, value, isMonospace))
     }
 
     /**
