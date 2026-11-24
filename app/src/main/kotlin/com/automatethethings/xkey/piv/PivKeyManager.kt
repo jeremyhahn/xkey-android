@@ -563,7 +563,10 @@ class PivKeyManager(
      * @throws IllegalStateException If the slot does not contain a key in Android Keystore.
      * @throws java.security.GeneralSecurityException If the signing operation fails.
      */
-    suspend fun sign(slot: PivSlot, data: ByteArray, algorithm: PivAlgorithm? = null): ByteArray {
+    suspend fun sign(slot: PivSlot, data: ByteArray, algorithm: PivAlgorithm? = null): ByteArray =
+        PivSlotLocks.withSlot(slot) { signLocked(slot, data, algorithm) }
+
+    private suspend fun signLocked(slot: PivSlot, data: ByteArray, algorithm: PivAlgorithm?): ByteArray {
         val alias = slot.keystoreAlias
         val recorded = recordedAlgorithm(slot)
         // A slot without a recorded algorithm predates the row; the legacy
@@ -636,6 +639,10 @@ class PivKeyManager(
             "X25519 peer key is ${peerPublicKeyRaw32.size} bytes, not ${PivPublicKeyEncoding.CURVE25519_KEY_SIZE}"
         }
         require(peerPublicKeyRaw32.any { it != 0.toByte() }) { "X25519 peer key is all zeros" }
+        return PivSlotLocks.withSlot(slot) { agreeLocked(slot, peerPublicKeyRaw32) }
+    }
+
+    private suspend fun agreeLocked(slot: PivSlot, peerPublicKeyRaw32: ByteArray): ByteArray {
         val recorded = recordedAlgorithm(slot)
         if (recorded != PivAlgorithm.X25519) {
             throw PivAlgorithmMismatchException(
@@ -694,7 +701,10 @@ class PivKeyManager(
      * @param slot The PIV slot to get the certificate for.
      * @return DER-encoded certificate bytes, or null if the slot has no key.
      */
-    suspend fun getCertificate(slot: PivSlot): ByteArray? {
+    suspend fun getCertificate(slot: PivSlot): ByteArray? =
+        PivSlotLocks.withSlot(slot) { getCertificateLocked(slot) }
+
+    private suspend fun getCertificateLocked(slot: PivSlot): ByteArray? {
         // First check for an explicitly imported certificate in Room
         val entity = pivSlotDao.getBySlotId(slot.hexId)
         if (entity?.certificateDer != null) {
@@ -770,8 +780,13 @@ class PivKeyManager(
  * certificate against key A must finish before another caller can replace or
  * delete A, or its upsert would bring A's row back. [PivKeyManager.listSlots]
  * reads each slot under its lock so a listing never mixes two generations.
- * Different slots do not wait for each other; signing, agreement and the
- * getters take no lock.
+ * [PivKeyManager.sign], [PivKeyManager.agree] and
+ * [PivKeyManager.getCertificate] read the row's algorithm or certificate and
+ * the Keystore entry for one answer, so they hold the lock too: a generation
+ * that has replaced the Keystore key but not yet written its row is waited
+ * for. [PivKeyManager.getPublicKey] reads only the Keystore and takes no
+ * lock. Different slots do not wait for each other. The lock is not
+ * reentrant: a locked body never calls a public locking method.
  */
 internal object PivSlotLocks {
     private val locks: Map<PivSlot, Mutex> = PivSlot.entries.associateWith { Mutex() }
