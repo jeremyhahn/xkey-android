@@ -188,6 +188,24 @@ class DesktopBackupServiceTest {
     }
 
     @Test
+    fun `create with no backup_id in the reply returns the id the envelope was stored under`() = runBlocking {
+        connectDesktop()
+        sender.succeedWith("""{"backup_data":"${b64(envelope)}","item_count":3}""")
+
+        val result = service.createDesktopBackup(password(), all)
+
+        assertTrue("the returned id must name a backup", result.backupId.isNotBlank())
+        assertEquals(3, result.itemCount)
+        assertArrayEquals(envelope, result.backupData)
+        assertArrayEquals(envelope, store().load(result.backupId))
+        assertEquals(result.backupId, service.latestStoredBackupId())
+
+        sender.succeedWith(restoreReply)
+        service.restoreDesktopBackup(result.backupId, password())
+        assertEquals(b64(envelope), sender.lastRequest.params!!.getString("backup_data"))
+    }
+
+    @Test
     fun `latestStoredBackupId is null with nothing stored`() = runBlocking {
         assertNull(service.latestStoredBackupId())
     }
