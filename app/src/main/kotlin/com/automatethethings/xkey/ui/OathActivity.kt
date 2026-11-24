@@ -135,6 +135,8 @@ class OathActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Codes stay out of screenshots, recordings and the recents thumbnail.
+        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
 
         val db = XKeyDatabase.getInstance(this)
         repository = OathRepository(db.oathCredentialDao(), OathSecretManager())

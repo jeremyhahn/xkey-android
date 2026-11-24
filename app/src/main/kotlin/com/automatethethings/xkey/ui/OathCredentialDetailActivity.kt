@@ -23,6 +23,7 @@ import android.text.TextPaint
 import android.util.TypedValue
 import android.view.MenuItem
 import android.view.ViewGroup
+import android.view.WindowManager
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -84,6 +85,8 @@ class OathCredentialDetailActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // The code stays out of screenshots, recordings and the recents thumbnail.
+        window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
         if (intent.getStringExtra(EXTRA_OATH_ID).isNullOrEmpty()) {
             finish()
             return
