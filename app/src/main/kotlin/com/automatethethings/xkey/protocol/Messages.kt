@@ -1116,7 +1116,9 @@ data class LocalGenerateKeyParams(
         private fun keySizeBitsOf(params: JSONObject, algorithm: Int): Int? {
             if (!params.has("keySizeBits") || params.isNull("keySizeBits")) return null
             val raw = params.get("keySizeBits")
-            val bits = (raw as? Number)?.toInt()
+            // A whole number in Int range only: Number.toInt() would truncate
+            // 2048.9 and wrap 4294969344 to 2048.
+            val bits = (raw as? Number)?.let { exactInt(it.toString()) }
                 ?: (raw as? String)?.trim()?.toIntOrNull()
                 ?: throw ProtocolException("'keySizeBits' must be an integer", errorCode = ErrorCodes.INVALID_PARAMS)
             if (bits == 0) return null
@@ -1138,6 +1140,15 @@ data class LocalGenerateKeyParams(
                 )
             }
             return bits
+        }
+
+        /** [text] as an Int when it is a whole number in Int range, else null. */
+        private fun exactInt(text: String): Int? = try {
+            java.math.BigDecimal(text).intValueExact()
+        } catch (_: NumberFormatException) {
+            null
+        } catch (_: ArithmeticException) {
+            null
         }
 
         fun fromJson(params: JSONObject): LocalGenerateKeyParams {

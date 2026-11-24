@@ -132,7 +132,7 @@ class KeystoreManager(
      * @return true if StrongBox is available.
      */
     fun isStrongBoxAvailable(): Boolean {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+        return if (sdkInt >= Build.VERSION_CODES.P) {
             context.packageManager.hasSystemFeature(
                 PackageManager.FEATURE_STRONGBOX_KEYSTORE
             )
@@ -1082,7 +1082,8 @@ class KeystoreManager(
             .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_RSA_OAEP)
 
         applyAuthDuration(specBuilder, authDurationSeconds)
-        applyStrongBox(specBuilder, preferStrongBox)
+        // StrongBox guarantees RSA 2048 only; larger moduli go to the TEE.
+        applyStrongBox(specBuilder, preferStrongBox && keySizeBits == 2048)
         applyAttestationChallenge(specBuilder)
 
         try {
@@ -2035,7 +2036,7 @@ class KeystoreManager(
         preferStrongBox: Boolean
     ): Boolean {
         if (preferStrongBox &&
-            Build.VERSION.SDK_INT >= Build.VERSION_CODES.P &&
+            sdkInt >= Build.VERSION_CODES.P &&
             isStrongBoxAvailable()
         ) {
             specBuilder.setIsStrongBoxBacked(true)
