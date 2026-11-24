@@ -15,6 +15,7 @@
 package com.automatethethings.xkey.crypto
 
 import android.content.Context
+import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
@@ -719,7 +720,9 @@ class KeystoreManager(
         // actually removed; callers that deleted through the FIDO2-only alias
         // were silently leaking those entries.
         val alias = resolveKeystoreAlias(credentialId) ?: return false
-        withAliasGate(alias) { keyStore.deleteEntry(alias) }
+        // The alias resolved outside the gate; another delete may have
+        // removed it since, so only a removal under the gate counts.
+        if (!withAliasGate(alias) { removeAliasLocked(alias) }) return false
 
         // Log key deletion
         AuditLogger.logKeyDeleted(
@@ -1194,20 +1197,57 @@ class KeystoreManager(
     /**
      * Check if an Ed25519 key exists in EncryptedSharedPreferences.
      */
-    @RequiresApi(Build.VERSION_CODES.TIRAMISU)
     private fun hasEd25519Key(alias: String): Boolean {
         return try {
-            val prefs = EncryptedSharedPreferences.create(
-                context,
-                ED25519_PREFS_NAME,
-                MasterKey.Builder(context).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build(),
-                EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-                EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
-            )
-            prefs.contains(alias)
+            ed25519Prefs().contains(alias)
         } catch (e: Exception) {
             false
         }
+    }
+
+    /** The EncryptedSharedPreferences store of software Ed25519 private keys. */
+    internal fun ed25519Prefs(): SharedPreferences = EncryptedSharedPreferences.create(
+        context,
+        ED25519_PREFS_NAME,
+        MasterKey.Builder(context).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build(),
+        EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+        EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+    )
+
+    /** True on API 33+, where Ed25519 keys are generated in software. */
+    internal fun softwareEd25519Supported(): Boolean =
+        sdkInt >= Build.VERSION_CODES.TIRAMISU
+
+    /**
+     * Removes the software Ed25519 key stored under [alias], if any. Call it
+     * inside `withAliasGate(alias)`.
+     *
+     * @return true only if a key was stored and its removal committed.
+     */
+    private fun removeSoftwareEd25519Key(alias: String): Boolean {
+        if (!softwareEd25519Supported()) return false
+        val prefs = try {
+            ed25519Prefs()
+        } catch (e: Exception) {
+            // As in hasEd25519Key: an unreadable store holds no key we can find.
+            return false
+        }
+        if (!prefs.contains(alias)) return false
+        return prefs.edit().remove(alias).commit()
+    }
+
+    /**
+     * Removes the Keystore entry and the software Ed25519 key under [alias].
+     * Call it inside `withAliasGate(alias)`, so the existence checks and the
+     * removals are one step against any other delete of the alias.
+     *
+     * @return true if either existed and was removed.
+     */
+    private fun removeAliasLocked(alias: String): Boolean {
+        val inKeystore = keyStore.containsAlias(alias)
+        if (inKeystore) keyStore.deleteEntry(alias)
+        val inSoftware = removeSoftwareEd25519Key(alias)
+        return inKeystore || inSoftware
     }
 
     /**
@@ -1852,7 +1892,7 @@ class KeystoreManager(
 
     /** True if an Ed25519 software key is stored under [alias] (API 33+ only). */
     internal fun hasSoftwareEd25519Key(alias: String): Boolean =
-        Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && hasEd25519Key(alias)
+        softwareEd25519Supported() && hasEd25519Key(alias)
 
     /**
      * List all key aliases managed by xKey.
@@ -1897,9 +1937,7 @@ class KeystoreManager(
     fun deleteByAlias(alias: String): Boolean {
         // PIV slot keys are deleted through PivKeyManager with their row.
         if (alias.startsWith(PIV_KEYSTORE_ALIAS_PREFIX)) return false
-        if (!keyStore.containsAlias(alias)) return false
-        withAliasGate(alias) { keyStore.deleteEntry(alias) }
-        return true
+        return withAliasGate(alias) { removeAliasLocked(alias) }
     }
 
     /**
@@ -1921,10 +1959,7 @@ class KeystoreManager(
      */
     fun deleteGeneralKey(keyId: String): Boolean {
         val alias = buildGeneralAlias(keyId)
-        if (!keyStore.containsAlias(alias)) {
-            return false
-        }
-        withAliasGate(alias) { keyStore.deleteEntry(alias) }
+        if (!withAliasGate(alias) { removeAliasLocked(alias) }) return false
 
         // Log key deletion
         AuditLogger.logKeyDeleted(
@@ -1946,10 +1981,7 @@ class KeystoreManager(
      */
     fun deleteCredentialKey(credentialId: String): Boolean {
         val alias = credentialAlias(credentialId)
-        if (!keyStore.containsAlias(alias)) {
-            return false
-        }
-        withAliasGate(alias) { keyStore.deleteEntry(alias) }
+        if (!withAliasGate(alias) { removeAliasLocked(alias) }) return false
 
         AuditLogger.logKeyDeleted(
             keyId = credentialId,
