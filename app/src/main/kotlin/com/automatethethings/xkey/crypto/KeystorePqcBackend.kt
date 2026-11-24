@@ -27,7 +27,6 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
 import org.bouncycastle.asn1.x509.SubjectPublicKeyInfo
 import java.security.GeneralSecurityException
@@ -94,9 +93,8 @@ class KeystorePqcBackend(
 
     /** Waits up to [timeoutMs] for the probe; the sets found so far on timeout. Tests only. */
     @VisibleForTesting
-    fun awaitProbe(timeoutMs: Long): Set<MlDsaParameterSet> = runBlocking {
+    suspend fun awaitProbe(timeoutMs: Long): Set<MlDsaParameterSet> =
         withTimeoutOrNull(timeoutMs) { probed.await() } ?: supportedParameterSets()
-    }
 
     /**
      * Generates a non-exportable [set] signing key under [alias], replacing

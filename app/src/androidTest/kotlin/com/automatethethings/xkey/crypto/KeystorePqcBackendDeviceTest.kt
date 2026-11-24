@@ -23,6 +23,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.runBlocking
 import org.bouncycastle.asn1.x509.SubjectPublicKeyInfo
 import org.bouncycastle.crypto.signers.MLDSASigner
 import org.bouncycastle.crypto.util.PublicKeyFactory
@@ -59,7 +60,7 @@ class KeystorePqcBackendDeviceTest {
         assumeTrue("ML-DSA needs API ${KeystorePqcBackend.MIN_SDK}", Build.VERSION.SDK_INT >= KeystorePqcBackend.MIN_SDK)
         backend = KeystorePqcBackend()
         backend.startProbe(scope)
-        supported = backend.awaitProbe(PROBE_TIMEOUT_MS)
+        supported = runBlocking { backend.awaitProbe(PROBE_TIMEOUT_MS) }
         assumeTrue("no hardware ML-DSA on this device", supported.isNotEmpty())
     }
 

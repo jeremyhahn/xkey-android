@@ -20,6 +20,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.runBlocking
 import org.bouncycastle.crypto.generators.MLDSAKeyPairGenerator
 import org.bouncycastle.crypto.params.MLDSAKeyGenerationParameters
 import org.bouncycastle.crypto.params.MLDSAParameters
@@ -41,6 +42,10 @@ import java.util.concurrent.atomic.AtomicInteger
  */
 class KeystorePqcBackendTest {
 
+    /** [KeystorePqcBackend.awaitProbe] from a plain test thread. */
+    private fun KeystorePqcBackend.awaitProbeBlocking(timeoutMs: Long): Set<MlDsaParameterSet> =
+        runBlocking { awaitProbe(timeoutMs) }
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     @After
@@ -57,7 +62,7 @@ class KeystorePqcBackendTest {
                 KeyProperties.SECURITY_LEVEL_TRUSTED_ENVIRONMENT
             })
             backend.startProbe(scope)
-            assertEquals("API $sdk", emptySet<MlDsaParameterSet>(), backend.awaitProbe(5_000))
+            assertEquals("API $sdk", emptySet<MlDsaParameterSet>(), backend.awaitProbeBlocking(5_000))
             assertEquals("API $sdk", emptySet<MlDsaParameterSet>(), backend.supportedParameterSets())
             assertEquals("API $sdk runs no probe", 0, calls.get())
         }
@@ -74,7 +79,7 @@ class KeystorePqcBackendTest {
         backend.startProbe(scope)
 
         val expected = setOf(MlDsaParameterSet.ML_DSA_65, MlDsaParameterSet.ML_DSA_87)
-        assertEquals(expected, backend.awaitProbe(5_000))
+        assertEquals(expected, backend.awaitProbeBlocking(5_000))
         assertEquals(expected, backend.supportedParameterSets())
     }
 
@@ -88,7 +93,7 @@ class KeystorePqcBackendTest {
             }
         })
         backend.startProbe(scope)
-        assertEquals(emptySet<MlDsaParameterSet>(), backend.awaitProbe(5_000))
+        assertEquals(emptySet<MlDsaParameterSet>(), backend.awaitProbeBlocking(5_000))
     }
 
     @Test
@@ -100,7 +105,7 @@ class KeystorePqcBackendTest {
         backend.startProbe(scope)
         assertEquals(
             setOf(MlDsaParameterSet.ML_DSA_44, MlDsaParameterSet.ML_DSA_87),
-            backend.awaitProbe(5_000)
+            backend.awaitProbeBlocking(5_000)
         )
     }
 
@@ -119,7 +124,7 @@ class KeystorePqcBackendTest {
         assertTrue("never blocks", TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started) < 1_000)
 
         release.countDown()
-        assertEquals(MlDsaParameterSet.entries.toSet(), backend.awaitProbe(5_000))
+        assertEquals(MlDsaParameterSet.entries.toSet(), backend.awaitProbeBlocking(5_000))
         assertEquals(MlDsaParameterSet.entries.toSet(), backend.supportedParameterSets())
     }
 
@@ -132,9 +137,9 @@ class KeystorePqcBackendTest {
         })
         backend.startProbe(scope)
         backend.startProbe(scope)
-        backend.awaitProbe(5_000)
+        backend.awaitProbeBlocking(5_000)
         backend.startProbe(scope)
-        backend.awaitProbe(5_000)
+        backend.awaitProbeBlocking(5_000)
         assertEquals(MlDsaParameterSet.entries.size, calls.get())
     }
 
@@ -147,7 +152,7 @@ class KeystorePqcBackendTest {
             backend.generate("xkey_key_t", MlDsaParameterSet.ML_DSA_65, -1, false)
         }
         backend.startProbe(scope)
-        backend.awaitProbe(5_000)
+        backend.awaitProbeBlocking(5_000)
         assertThrows(UnsupportedAlgorithmException::class.java) {
             backend.generate("xkey_key_t", MlDsaParameterSet.ML_DSA_44, -1, false)
         }
@@ -160,7 +165,7 @@ class KeystorePqcBackendTest {
     fun `generate refuses everything below API 37`() {
         val backend = KeystorePqcBackend(sdkInt = 36, probe = { KeyProperties.SECURITY_LEVEL_STRONGBOX })
         backend.startProbe(scope)
-        backend.awaitProbe(5_000)
+        backend.awaitProbeBlocking(5_000)
         for (set in MlDsaParameterSet.entries) {
             assertThrows(set.wireName, UnsupportedAlgorithmException::class.java) {
                 backend.generate("xkey_key_t", set, -1, false)
