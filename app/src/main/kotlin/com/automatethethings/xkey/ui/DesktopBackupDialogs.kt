@@ -98,6 +98,7 @@ class DesktopBackupDialogs(
                     (if (password.text.isEmpty()) password else confirm).error = activity.getString(problem)
                     return@setOnClickListener
                 }
+                if (desktopGone(dialog)) return@setOnClickListener
                 val secret = take(password)
                 dialog.dismiss()
                 runWithNotice(R.string.desktop_backup_in_progress, secret, onRetry = null) { gatt ->
@@ -163,6 +164,7 @@ class DesktopBackupDialogs(
                     password.error = activity.getString(problem)
                     return@setOnClickListener
                 }
+                if (desktopGone(dialog)) return@setOnClickListener
                 val secret = take(password)
                 dialog.dismiss()
                 runWithNotice(
@@ -241,6 +243,18 @@ class DesktopBackupDialogs(
                 notice.dismiss()
             }
         }
+    }
+
+    /**
+     * When the desktop went away after [dialog] opened, closes it (which
+     * wipes its fields) and says so, before any password is copied; returns
+     * whether it did.
+     */
+    private fun desktopGone(dialog: DialogInterface): Boolean {
+        if (service() != null) return false
+        dialog.dismiss()
+        Snackbar.make(root, R.string.sync_not_connected, Snackbar.LENGTH_LONG).show()
+        return true
     }
 
     /** A password field: no autofill, no keyboard learning, no saved state. */
