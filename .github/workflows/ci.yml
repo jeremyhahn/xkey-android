@@ -5,7 +5,7 @@
 # limits from the repository variables CI_HOSTED_SHARE,
 # CI_SELF_HOSTED_BIGDISK and CI_SELF_HOSTED_BIGDISK_DOCKER; the
 # HOSTED_JOBS_PER_REPO and HOSTED_QUEUE_GRACE_SECONDS env values are removed.
-# (adapted: applied as `Balanced runner pool (ruling 1137)`, see v1.54-local.)
+# (adapted: applied as `Balanced runner pool`, see v1.54-local.)
 # v1.54-local: the balanced pool is on, with the template's v1.55-v1.59 fixes
 # to that step (a listing short of its total_count is a lower bound and the
 # pick still uses it); the template's other v1.55-v1.59 changes are not
@@ -51,8 +51,8 @@
 # v1.52: a pull request whose head repository is not this repository (a fork)
 # runs every job on ubuntu-latest: preflight's runs-on and the runner
 # selection never pick a self-hosted runner for a fork's head.
-# (adapted: applied. preflight's runs-on and `Balanced runner pool (ruling
-# 1137)` give a fork's head ubuntu-latest on every variable setting.)
+# (adapted: applied. preflight's runs-on and `Balanced runner pool` give a
+# fork's head ubuntu-latest on every variable setting.)
 # v1.51: `Runner labels` also checks every runs-on under pull_request_target,
 # where a fork's head never reaches a self-hosted runner.
 # (adapted: no `Runner labels` step here, see below. code-review.yml's
@@ -267,7 +267,7 @@ jobs:
       # bigdisk limit unset or 0, or any API answer incomplete, every job is
       # hosted. A fork's head is hosted before any API call. The step reads
       # no repository code. Off github.com each job keeps its forge label.
-      - name: Balanced runner pool (ruling 1137)
+      - name: Balanced runner pool
         id: runner
         env:
           SERVER: ${{ github.server_url }}
