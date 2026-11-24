@@ -26,6 +26,8 @@ class XKeyApplication : Application() {
         createNotificationChannels()
         initializeAuditLogger()
         registerGrantCleanup()
+        // Media signatures the app may not write into the file (API 30+).
+        com.automatethethings.xkey.media.XmpMetadataHelper.usePrivateStore(this)
     }
 
     /**

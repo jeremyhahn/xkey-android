@@ -104,9 +104,8 @@ sequenceDiagram
     Svc->>Svc: Build SignatureEntry (role=CREATOR)
     Svc->>Svc: Build ContentAuthenticityData
 
-    Svc->>MS: Query file path from URI
-    Svc->>XMP: writeSignature(filePath, data)
-    Note over XMP: Write to EXIF TAG_USER_COMMENT
+    Svc->>XMP: writeSignature(contentResolver, uri, data)
+    Note over XMP: Write to EXIF TAG_USER_COMMENT;<br/>refused on API 30+ for another app's capture:<br/>kept in app-private storage by content hash
 
     Note over User: User opens photo later in Verified Viewer<br/>and sees green verification badge
 ```

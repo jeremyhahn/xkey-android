@@ -84,21 +84,41 @@ sequenceDiagram
     Svc->>Svc: Build SignatureEntry (role=CREATOR)
     Svc->>Svc: Build ContentAuthenticityData
 
-    Svc->>Svc: getFilePathFromUri(uri)
-    alt File path available
-        Svc->>XMP: writeSignature(filePath, data)
+    alt JPEG
+        Svc->>XMP: writeSignature(contentResolver, uri, data)
+    else other media
+        Svc->>XMP: writeSignature(filePath, data) (sidecar)
+    end
+    alt write refused (another app's capture, API 30+)
+        Svc->>XMP: privateStore.put(data), keyed by content hash
     end
 
-    Svc->>Svc: Add URI to processedUris set
-
-    Svc->>AL: logMediaAutoSigned(keyId, label, uri)
+    alt signed
+        Svc->>AL: logMediaAutoSigned(keyId, label, uri)
+    else signing or storing failed
+        Svc->>AL: logKeyUsed(media_auto_sign, success=false)
+    end
 ```
 
 ### Deduplication
 
-The service maintains an in-memory `Set<String>` of processed URIs to prevent
-re-signing when `ContentObserver` fires multiple times for the same file.
-The set is bounded to 1000 entries; when full, the oldest 500 are evicted.
+`AutoSignQueue` claims a URI when its first `ContentObserver` event arrives,
+before the debounce, so a burst of events for one capture (insert, pending
+cleared, rescan) starts one signing job: one signature, one audit row, one
+writer on the file. The claim is released when the attempt is skipped
+(signing off, no key) or the content cannot be read yet, so a later event
+retries; a signed capture, or one whose failure was audited, stays claimed.
+The set is bounded to 1000 entries; when full, 500 are evicted.
+
+### Where the signature goes
+
+On API 30+ the app has no write access to another app's media, so the
+in-file write (EXIF through the ContentResolver, or a sidecar by path) is
+refused. The signature is then kept in app-private storage
+(`noBackupFilesDir/media-signatures/<content hash>.json`), and
+`readSignatureFromUri` hashes the content it is shown and looks the hash up
+there when the file carries no signature. The signature is verifiable on this
+device; it does not travel with a shared copy of the file.
 
 ### Debounce
 
@@ -152,6 +172,9 @@ When reading signatures, `XmpMetadataHelper.readSignature()` checks in order:
 
 1. EXIF `TAG_USER_COMMENT` (for JPEG)
 2. Sidecar `.xkeysig` file (fallback for all formats)
+
+`readSignatureFromUri()` reads EXIF for a JPEG, then the private store
+keyed by the content hash.
 
 ## ContentAuthenticityData Schema
 

@@ -292,7 +292,8 @@ class MediaSigningService : Service() {
 
     /**
      * Signs one capture. [AutoSignQueue.Outcome.RETRY] when it was skipped
-     * (signing off, no key, no path yet) so a later event may try again.
+     * (signing off, no key) or the content could not be read yet (a
+     * pending capture throws), so a later event may try again.
      */
     private suspend fun signNewMedia(uri: Uri, mediaType: String): AutoSignQueue.Outcome {
         val uriString = uri.toString()
@@ -327,11 +328,44 @@ class MediaSigningService : Service() {
             )
             return AutoSignQueue.Outcome.DONE
         }
-        val hashBytes = contentHash.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
 
-        // Sign with the configured key. The key fingerprinted and the
-        // key signed with are one lookup: the public key under the
-        // alias the signature is made with.
+        // From here a failure is audited and the capture is done: retrying
+        // on every later MediaStore event would fail the same way, and a
+        // log line alone leaves the user believing the capture is signed.
+        val where = try {
+            val data = signContentHash(keyId, keyEntity, contentHash)
+            XmpMetadataHelper.persistSignature(data) { writeIntoMedia(uri, data) }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "Auto-signing $uri failed: ${e.javaClass.simpleName}")
+            AuditLogger.logKeyUsed(
+                keyId = keyId,
+                keyLabel = keyEntity.label,
+                keyType = keyEntity.keyType,
+                operation = "media_auto_sign",
+                success = false,
+                errorMessage = e.javaClass.simpleName
+            )
+            return AutoSignQueue.Outcome.DONE
+        }
+
+        AuditLogger.logMediaAutoSigned(keyId, keyEntity.label, uriString)
+        Log.i(TAG, "Auto-signed $mediaType ($where): $uri")
+        return AutoSignQueue.Outcome.DONE
+    }
+
+    /**
+     * The signature data for [contentHash] under the configured key. The key
+     * fingerprinted and the key signed with are one lookup: the public key
+     * under the alias the signature is made with.
+     */
+    private suspend fun signContentHash(
+        keyId: String,
+        keyEntity: com.automatethethings.xkey.storage.entity.KeyEntity,
+        contentHash: String
+    ): ContentAuthenticityData {
+        val hashBytes = contentHash.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
         val alias = KeystoreManager.generalKeyAlias(keyId)
         val pubKeyDer = keystoreManager.publicKeyDERAt(alias)
             ?: throw com.automatethethings.xkey.crypto.KeyNotFoundException(keyId)
@@ -341,37 +375,32 @@ class MediaSigningService : Service() {
             hashBytes,
             KeystoreManager.jcaSignatureAlgorithm(keyEntity.algorithm)
         )
-        val signatureBase64 = android.util.Base64.encodeToString(signature, android.util.Base64.NO_WRAP)
-
-        val keyFingerprint = MediaHasher.hashBytes(pubKeyDer)
-
-        // Build signature data
         val entry = SignatureEntry(
-            keyFingerprint = keyFingerprint,
+            keyFingerprint = MediaHasher.hashBytes(pubKeyDer),
             signerName = keyEntity.label,
             algorithm = keyEntity.algorithm,
-            value = signatureBase64,
+            value = android.util.Base64.encodeToString(signature, android.util.Base64.NO_WRAP),
             timestamp = Instant.now().toString(),
             role = SignerRole.CREATOR
         )
-        val data = ContentAuthenticityData(
-            contentHash = contentHash,
-            signatures = listOf(entry)
-        )
+        return ContentAuthenticityData(contentHash = contentHash, signatures = listOf(entry))
+    }
 
-        // The signature lives in the file's own metadata, so without a
-        // path there is nowhere to put it. Leaving the URI unprocessed
-        // lets a later event retry it; recording it as auto-signed would
-        // put a claim in the audit log that nothing backs.
-        val filePath = getFilePathFromUri(uri) ?: run {
-            Log.w(TAG, "No file path for $uri; cannot persist a signature")
-            return AutoSignQueue.Outcome.RETRY
+    /**
+     * Writes [data] into the capture itself. A JPEG goes through the
+     * ContentResolver, which reaches the app's own files without a raw
+     * path; other media get a sidecar beside the file. On API 30+ another
+     * app's capture refuses both (EACCES, SecurityException), and
+     * [XmpMetadataHelper.persistSignature] keeps the signature privately.
+     */
+    private fun writeIntoMedia(uri: Uri, data: ContentAuthenticityData) {
+        if (MediaHasher.isCanonicalisedJpeg(contentResolver.getType(uri))) {
+            XmpMetadataHelper.writeSignature(contentResolver, uri, data)
+        } else {
+            val filePath = getFilePathFromUri(uri)
+                ?: throw java.io.FileNotFoundException("no file path for $uri")
+            XmpMetadataHelper.writeSignature(filePath, data)
         }
-        XmpMetadataHelper.writeSignature(filePath, data)
-
-        AuditLogger.logMediaAutoSigned(keyId, keyEntity.label, uriString)
-        Log.i(TAG, "Auto-signed $mediaType: $uri")
-        return AutoSignQueue.Outcome.DONE
     }
 
     private fun getFilePathFromUri(uri: Uri): String? {
