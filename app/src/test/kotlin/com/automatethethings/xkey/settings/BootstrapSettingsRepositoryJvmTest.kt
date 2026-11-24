@@ -263,19 +263,23 @@ class BootstrapSettingsRepositoryJvmTest {
         assertEquals(BootstrapMethod.DEFAULT_ORDER, repository.getSettings().methodOrder)
     }
 
-    /**
-     * Found: duplicates are kept (fromCommaSeparated keeps them on purpose,
-     * see BootstrapSettingsDataTest), so a stored order can try one method
-     * twice. The enabled list carries the duplicate too.
-     */
     @Test
-    fun `found - stored method order keeps duplicates`() = runBlocking {
-        store.edit { it[KEY_METHOD_ORDER] = "direct,DIRECT,dane" }
+    fun `stored method order drops duplicates and keeps the first occurrence`() = runBlocking {
+        store.edit { it[KEY_METHOD_ORDER] = "direct,DANE,DIRECT,spki,dane" }
 
+        val settings = repository.getSettings()
         assertEquals(
-            listOf(BootstrapMethod.DIRECT, BootstrapMethod.DIRECT, BootstrapMethod.DANE),
-            repository.getSettings().methodOrder
+            listOf(BootstrapMethod.DIRECT, BootstrapMethod.DANE, BootstrapMethod.SPKI),
+            settings.methodOrder
         )
+        assertEquals(listOf(BootstrapMethod.DANE), settings.getEnabledMethods())
+    }
+
+    @Test
+    fun `stored method order of one repeated method reads as that method once`() = runBlocking {
+        store.edit { it[KEY_METHOD_ORDER] = "noise,NOISE,noise" }
+
+        assertEquals(listOf(BootstrapMethod.NOISE), repository.getSettings().methodOrder)
     }
 
     // -------------------------------------------------------------------------
