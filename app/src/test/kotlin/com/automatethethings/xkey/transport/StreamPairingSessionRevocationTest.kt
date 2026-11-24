@@ -1014,11 +1014,11 @@ class StreamPairingSessionRevocationTest {
         val replacing = CompletableDeferred<Unit>()
         val finish = CountDownLatch(1)
         val newKey = keyPair(ByteArray(91) { 5 })
-        val manager = PivKeyManager(mockk<PivSlotDao>(relaxed = true)) { _, _ ->
+        val manager = PivKeyManager(mockk<PivSlotDao>(relaxed = true), generateKeyPair = { _, _ ->
             replacing.complete(Unit)
             finish.await(TIMEOUT_MS, TimeUnit.MILLISECONDS)
             newKey
-        }
+        })
         var generated: PivSlotInfo? = null
         assertRevokedAtAdmissionDuring(slot.keystoreAlias) { _, resumeShare ->
             val generating = scope.async(Dispatchers.IO) { manager.generateKey(slot, PivAlgorithm.ES256) }
@@ -1042,7 +1042,7 @@ class StreamPairingSessionRevocationTest {
         val slot = PivSlot.CARD_AUTHENTICATION
         pivEdges()
         val newKey = keyPair(ByteArray(91) { 7 })
-        val manager = PivKeyManager(mockk<PivSlotDao>(relaxed = true)) { _, _ -> newKey }
+        val manager = PivKeyManager(mockk<PivSlotDao>(relaxed = true), generateKeyPair = { _, _ -> newKey })
         val phone = connectPaired()
         val router = BidirectionalMessageRouter(requestHandler)
         val session = ShareSession.of(listOf(ShareSession.Transport(pairing.boundSender()!!.second, router))) { true }!!
