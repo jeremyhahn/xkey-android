@@ -429,7 +429,10 @@ class XKeyDatabaseMigrationTest {
         val credentialId = "legacy-credential-v$version"
 
         createLegacyDatabase(version) { db ->
-            insertKey(db, keyId = keyId, source = LEGACY_SOURCE)
+            // MIGRATION_10_11 rewrites the legacy source; it is only on the path
+            // from v10 and earlier, so later start versions seed the current one.
+            val source = if (version <= 10) LEGACY_SOURCE else CURRENT_SOURCE
+            insertKey(db, keyId = keyId, source = source)
             insertCredential(db, credentialId)
         }
 
@@ -439,7 +442,7 @@ class XKeyDatabaseMigrationTest {
             assertEquals("test-label", key!!.label)
             assertEquals("ES256", key.algorithm)
             assertEquals(
-                "MIGRATION_10_11 must run as part of every path",
+                "the key source must be the current one after migrating from v$version",
                 CURRENT_SOURCE,
                 key.source
             )

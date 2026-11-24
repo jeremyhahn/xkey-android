@@ -125,8 +125,8 @@ class MainActivity : AppCompatActivity() {
             gattService = binder.getService()
             serviceBound = true
 
-            // Set activity reference for biometric prompts
-            gattService?.setActivity(this@MainActivity)
+            // Prompts need no registration here: PromptActivityTracker hosts
+            // them on whichever screen is in front (#320).
 
             // Start observing service state
             observeServiceState()
@@ -668,17 +668,11 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        gattService?.setActivity(this)
         updatePairedDevicesCount()
         updateTrustStoreCount()
         updateCertificateCount()
         updateOathCount()
         updatePasskeysCount()
-    }
-
-    override fun onPause() {
-        super.onPause()
-        gattService?.setActivity(null)
     }
 
     override fun onDestroy() {
@@ -687,7 +681,6 @@ class MainActivity : AppCompatActivity() {
         stopConnectionDurationUpdater()
 
         if (serviceBound) {
-            gattService?.setActivity(null)
             unbindService(serviceConnection)
             serviceBound = false
         }

@@ -68,8 +68,8 @@ import java.util.Base64
  * struct, written out by hand: fields in struct order, `omitempty` fields
  * dropped, and no `params` key for a nil-params call. It enters through
  * [UsbAccessoryServer.handlePlaintext], the dispatch the USB message loop
- * runs each decrypted message through, on a server wired as `XKeyGattService`
- * wires it. Pairing is not enforced here: that gate runs before dispatch and
+ * runs a paired desktop's decrypted messages through, on a server wired as
+ * `XKeyGattService` wires it. The pairing gate runs before this dispatch and
  * is tested on its own.
  *
  * Each `result` must decode as Go's `encoding/json` decodes it into the

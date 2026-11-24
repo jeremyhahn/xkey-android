@@ -406,7 +406,7 @@ class KeyManagementFlowTest {
         onView(withText(string(R.string.key_delete_message, key.label)))
             .inRoot(isDialog())
             .check(matches(isDisplayed()))
-        onView(withId(android.R.id.button2)).inRoot(isDialog()).perform(click())
+        DialogFlowSupport.clickInDialog(withId(android.R.id.button2))
         waitForIdle()
 
         assertNotNull(
@@ -431,7 +431,7 @@ class KeyManagementFlowTest {
 
         openContextMenu(scenario, key.keyId)
         clickMenuItem(R.string.key_menu_delete)
-        onView(withId(android.R.id.button1)).inRoot(isDialog()).perform(click())
+        DialogFlowSupport.clickInDialog(withId(android.R.id.button1))
 
         awaitCondition("The key row should be deleted") {
             runBlocking { keyDao.getByKeyId(key.keyId) } == null
@@ -456,7 +456,7 @@ class KeyManagementFlowTest {
         onView(withText(string(R.string.remote_key_delete_message, seededLabel)))
             .inRoot(isDialog())
             .check(matches(isDisplayed()))
-        onView(withId(android.R.id.button1)).inRoot(isDialog()).perform(click())
+        DialogFlowSupport.clickInDialog(withId(android.R.id.button1))
 
         awaitCondition("The remote key row should be deleted") {
             runBlocking { keyDao.getByKeyId(seededKeyId) } == null
@@ -658,7 +658,7 @@ class KeyManagementFlowTest {
     }
 
     private fun dismissDialog() {
-        onView(withId(android.R.id.button2)).inRoot(isDialog()).perform(click())
+        DialogFlowSupport.clickInDialog(withId(android.R.id.button2))
         waitForIdle()
     }
 
@@ -689,7 +689,7 @@ class KeyManagementFlowTest {
         onView(isAssignableFrom(MaterialSwitch::class.java))
             .inRoot(isDialog())
             .perform(setChecked(false))
-        onView(withId(android.R.id.button1)).inRoot(isDialog()).perform(click())
+        DialogFlowSupport.clickInDialog(withId(android.R.id.button1))
 
         var created: KeyEntity? = null
         awaitCondition("A new key row should be created", timeoutMs) {

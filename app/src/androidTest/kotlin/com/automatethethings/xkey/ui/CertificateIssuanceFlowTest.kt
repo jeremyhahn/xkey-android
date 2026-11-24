@@ -424,7 +424,7 @@ class CertificateIssuanceFlowTest {
      * the dialog title and as the FAB, so a text matcher would be ambiguous.
      */
     private fun clickPositiveButton() {
-        onView(withId(android.R.id.button1)).inRoot(isDialog()).perform(click())
+        DialogFlowSupport.clickInDialog(withId(android.R.id.button1))
     }
 
     /** Fills the uniquely-hinted field [hintRes], scrolling it into view first. */
