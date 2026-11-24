@@ -21,6 +21,7 @@ import android.util.Log
 import com.automatethethings.xkey.crypto.FakeSharedPreferences
 import com.automatethethings.xkey.crypto.KeyDeletionException
 import com.automatethethings.xkey.crypto.KeystoreManager
+import com.automatethethings.xkey.crypto.PausedRemoval
 import com.automatethethings.xkey.storage.dao.CredentialMetadataDao
 import com.automatethethings.xkey.storage.dao.KeyDao
 import com.automatethethings.xkey.storage.entity.KeyEntity
@@ -34,6 +35,10 @@ import io.mockk.unmockkAll
 import io.mockk.verify
 import java.security.KeyStore
 import java.util.Collections
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
+import kotlin.concurrent.thread
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertThrows
@@ -132,5 +137,45 @@ class KeyStoreSyncManagerStaleEntryTest {
 
         coVerify(exactly = 0) { keyDao.deleteByKeyId(any()) }
         assertTrue("the key is still on disk", "xkey_key_edsync" in prefs.disk)
+    }
+
+    @Test
+    fun `sync overlapping a removal whose commit then fails keeps the key row`() {
+        val prefs = FakeSharedPreferences(mapOf("xkey_key_edrace" to "secret"))
+        val manager = spyk(KeystoreManager(mockk<Context>(relaxed = true)))
+        every { manager.softwareEd25519Supported() } returns true
+        every { manager.ed25519Prefs() } returns prefs
+        val credentialDao = mockk<CredentialMetadataDao>(relaxed = true)
+        coEvery { credentialDao.getAll() } returns emptyList()
+        val keyDao = mockk<KeyDao>(relaxed = true)
+        val key = mockk<KeyEntity>(relaxed = true)
+        every { key.keyId } returns "edrace"
+        every { key.source } returns "local"
+        coEvery { keyDao.getAll() } returns listOf(key)
+        // The probe's thread, published as it enters, and whether it returned.
+        val probeThread = AtomicReference<Thread>()
+        val probeDone = CountDownLatch(1)
+        every { manager.keyMaterialAbsent("edrace") } answers {
+            probeThread.set(Thread.currentThread())
+            try {
+                callOriginal()
+            } finally {
+                probeDone.countDown()
+            }
+        }
+
+        val removal = PausedRemoval.start(prefs) { manager.deleteByAlias("xkey_key_edrace") }
+        val sync = thread { runBlocking { KeyStoreSyncManager(manager, credentialDao, keyDao).syncAll() } }
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
+        while (probeDone.count > 0L && probeThread.get()?.state != Thread.State.WAITING) {
+            check(System.nanoTime() < deadline) { "the sync never probed the key" }
+            Thread.sleep(5)
+        }
+        removal.failCommit()
+        sync.join(10_000)
+
+        assertTrue("the removal did not commit", removal.result.isFailure)
+        coVerify(exactly = 0) { keyDao.deleteByKeyId(any()) }
+        assertTrue("the key is still on disk", "xkey_key_edrace" in prefs.disk)
     }
 }

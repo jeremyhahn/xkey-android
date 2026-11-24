@@ -26,6 +26,9 @@ import io.mockk.mockkStatic
 import io.mockk.spyk
 import io.mockk.unmockkAll
 import java.security.KeyStore
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
+import kotlin.concurrent.thread
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -140,6 +143,59 @@ class KeystoreManagerUncommittedRemovalTest {
         assertTrue("the key is still on disk", "xkey_key_ue" in prefs.disk)
     }
 
+    @Test
+    fun `keyMaterialAbsent during an in-flight removal that then fails reports the key present`() {
+        val prefs = FakeSharedPreferences(mapOf("xkey_key_uf" to "secret"))
+        val manager = softwareEd25519Manager(prefs)
+        val removal = PausedRemoval.start(prefs) { manager.deleteByAlias("xkey_key_uf") }
+
+        val absent = AtomicReference<Result<Boolean>>()
+        val probe = thread { absent.set(runCatching { manager.keyMaterialAbsent("uf") }) }
+        awaitParkedOrDone(probe)
+        removal.failCommit()
+        probe.join(10_000)
+
+        assertTrue("the removal did not commit", removal.result.isFailure)
+        val read = absent.get()
+        assertTrue("a key still on disk must not read as absent, got $read", read.isFailure || read.getOrNull() == false)
+        assertTrue("the key is still on disk", "xkey_key_uf" in prefs.disk)
+    }
+
+    @Test
+    fun `no presence path reads a key absent while its removal is in flight`() {
+        val prefs = FakeSharedPreferences(mapOf("xkey_key_ug" to "secret"))
+        val manager = softwareEd25519Manager(prefs)
+        val removal = PausedRemoval.start(prefs) { manager.deleteByAlias("xkey_key_ug") }
+
+        val resolved = AtomicReference<Result<String?>>()
+        val stored = AtomicReference<Result<Boolean>>()
+        val absent = AtomicReference<Result<Boolean>>()
+        val deleted = AtomicReference<Result<Boolean>>()
+        val deletedByAlias = AtomicReference<Result<Boolean>>()
+        val probe = thread {
+            resolved.set(runCatching { manager.resolveKeystoreAlias("ug") })
+            stored.set(runCatching { manager.hasSoftwareEd25519Key("xkey_key_ug") })
+            absent.set(runCatching { manager.keyMaterialAbsent("ug") })
+            deleted.set(runCatching { manager.deleteKey("ug") })
+            deletedByAlias.set(runCatching { manager.deleteByAlias("xkey_key_ug") })
+        }
+        awaitParkedOrDone(probe)
+        removal.failCommit()
+        probe.join(10_000)
+
+        assertTrue("the removal did not commit", removal.result.isFailure)
+        assertEquals("resolveKeystoreAlias", "xkey_key_ug", resolved.get().getOrNull())
+        assertEquals("hasSoftwareEd25519Key", true, stored.get().getOrNull())
+        val read = absent.get()
+        assertTrue("keyMaterialAbsent, got $read", read.isFailure || read.getOrNull() == false)
+        assertTrue("deleteKey must throw, got ${deleted.get()}", deleted.get().exceptionOrNull() is KeyDeletionException)
+        assertTrue(
+            "deleteByAlias must throw, got ${deletedByAlias.get()}",
+            deletedByAlias.get().exceptionOrNull() is KeyDeletionException
+        )
+        assertTrue("the key is still on disk", "xkey_key_ug" in prefs.disk)
+    }
+
     /** A manager on an API 33+ device whose software Ed25519 store is [prefs]. */
     private fun softwareEd25519Manager(prefs: SharedPreferences): KeystoreManager {
         val manager = spyk(keystoreManager)
@@ -147,6 +203,55 @@ class KeystoreManagerUncommittedRemovalTest {
         every { manager.ed25519Prefs() } returns prefs
         return manager
     }
+}
+
+/**
+ * A key removal run on its own thread whose commit is held after the
+ * in-memory edit, before the disk write, until [failCommit].
+ */
+internal class PausedRemoval private constructor(
+    private val prefs: FakeSharedPreferences,
+    private val pause: FakeSharedPreferences.CommitPause,
+    private val worker: Thread,
+    private val outcome: AtomicReference<Result<Boolean>>
+) {
+    /** The removal's outcome; valid after [failCommit]. */
+    val result: Result<Boolean> get() = outcome.get()
+
+    /** Lets the held commit fail to reach disk and waits for the removal to end. */
+    fun failCommit() {
+        prefs.diskFails = true
+        pause.release.countDown()
+        worker.join(10_000)
+        check(!worker.isAlive) { "the removal did not end" }
+    }
+
+    companion object {
+        /** Starts [remove] and returns once its commit is held. */
+        fun start(prefs: FakeSharedPreferences, remove: () -> Boolean): PausedRemoval {
+            val pause = FakeSharedPreferences.CommitPause()
+            prefs.pauseNextCommit = pause
+            val outcome = AtomicReference<Result<Boolean>>()
+            val worker = thread { outcome.set(runCatching(remove)) }
+            check(pause.reached.await(10, TimeUnit.SECONDS)) { "the removal never reached its commit" }
+            return PausedRemoval(prefs, pause, worker, outcome)
+        }
+    }
+}
+
+/**
+ * Waits until [probe] has ended or is parked (on a lock such as an alias
+ * gate), so a probe that does not wait has already read the store.
+ */
+internal fun awaitParkedOrDone(probe: Thread) {
+    val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
+    while (System.nanoTime() < deadline) {
+        when (probe.state) {
+            Thread.State.TERMINATED, Thread.State.WAITING, Thread.State.TIMED_WAITING, Thread.State.BLOCKED -> return
+            else -> Thread.sleep(5)
+        }
+    }
+    error("probe neither ended nor waited")
 }
 
 /**
@@ -168,15 +273,39 @@ internal class FakeSharedPreferences(initial: Map<String, Any?> = emptyMap()) : 
     /** Commits that reached disk. */
     @Volatile var diskWrites = 0
 
-    @Synchronized private fun commitEdit(removes: Set<String>, clear: Boolean, puts: Map<String, Any?>): Boolean {
-        if (clear) memory.clear()
-        removes.forEach { memory.remove(it) }
-        memory.putAll(puts)
-        if (diskFails) return false
-        disk.clear()
-        disk.putAll(memory)
-        diskWrites++
-        return true
+    /**
+     * Holds the next commit between its in-memory edit and its disk write,
+     * with the store unlocked, as Android's disk writer does.
+     */
+    class CommitPause {
+        /** Counted down once the edit is in memory and the commit waits. */
+        val reached = java.util.concurrent.CountDownLatch(1)
+
+        /** Counted down by the test to let the commit write (or fail). */
+        val release = java.util.concurrent.CountDownLatch(1)
+    }
+
+    /** Pauses the next commit only; set [diskFails] before release to fail it. */
+    @Volatile var pauseNextCommit: CommitPause? = null
+
+    private fun commitEdit(removes: Set<String>, clear: Boolean, puts: Map<String, Any?>): Boolean {
+        val pause = synchronized(this) {
+            if (clear) memory.clear()
+            removes.forEach { memory.remove(it) }
+            memory.putAll(puts)
+            pauseNextCommit.also { pauseNextCommit = null }
+        }
+        if (pause != null) {
+            pause.reached.countDown()
+            check(pause.release.await(10, java.util.concurrent.TimeUnit.SECONDS)) { "commit pause never released" }
+        }
+        synchronized(this) {
+            if (diskFails) return false
+            disk.clear()
+            disk.putAll(memory)
+            diskWrites++
+            return true
+        }
     }
 
     @Synchronized override fun getAll(): MutableMap<String, *> = HashMap(memory)
