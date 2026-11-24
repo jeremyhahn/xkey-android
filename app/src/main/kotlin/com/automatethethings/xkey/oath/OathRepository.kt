@@ -196,7 +196,10 @@ class OathRepository(
      * @param uri The `otpauth://` URI string to parse.
      * @return The generated unique oath identifier for the imported credential.
      * @throws IllegalArgumentException if the URI scheme is not `otpauth`,
-     *         the type is not `totp` or `hotp`, or the `secret` parameter is missing.
+     *         the type is not `totp` or `hotp`, the `secret` parameter is missing,
+     *         not Base32 or under 80 bits, the algorithm is not SHA1, SHA256 or
+     *         SHA512, digits is not 6 to 8, or the period is not 1 to 300 seconds.
+     *         The message never carries the secret.
      */
     suspend fun importFromUri(uri: String): String = importParsed(uri, structuredLabel = false)
 
@@ -265,12 +268,25 @@ class OathRepository(
             "Missing required 'secret' query parameter"
         }
         val secret = base32Decode(secretBase32)
+        // Never name the secret here: the message reaches the UI and logs.
+        require(secret.size >= MIN_SECRET_BYTES) {
+            "Secret is too short: ${secret.size} bytes decoded, at least $MIN_SECRET_BYTES required"
+        }
 
         // Optional parameters with defaults
         val issuer = parsed.getQueryParameter("issuer") ?: labelIssuer
         val algorithm = parsed.getQueryParameter("algorithm")?.uppercase() ?: "SHA1"
         val digits = parsed.getQueryParameter("digits")?.toIntOrNull() ?: 6
         val periodSeconds = parsed.getQueryParameter("period")?.toIntOrNull() ?: 30
+        // A value OathEngine cannot compute a code from would be stored and
+        // then fail on every tick of the list, so it is refused here.
+        require(algorithm in SUPPORTED_ALGORITHMS) {
+            "Unsupported algorithm: expected SHA1, SHA256 or SHA512"
+        }
+        require(digits in SUPPORTED_DIGITS) { "Unsupported digits: $digits, expected 6 to 8" }
+        require(periodSeconds in SUPPORTED_PERIOD_SECONDS) {
+            "Unsupported period: $periodSeconds seconds, expected 1 to 300"
+        }
 
         // The HOTP counter is part of the credential, not an update applied
         // after it: a credential inserted at counter 0 and only afterwards
@@ -430,6 +446,18 @@ class OathRepository(
          * RFC 4648 Base32 alphabet (A-Z, 2-7).
          */
         private const val BASE32_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
+
+        /** RFC 4226 section 4 R6: a shared secret of at least 128 bits is recommended, 80 required. */
+        private const val MIN_SECRET_BYTES = 10
+
+        /** The HMAC algorithms [OathEngine] computes. */
+        private val SUPPORTED_ALGORITHMS = setOf("SHA1", "SHA256", "SHA512")
+
+        /** The code lengths [OathEngine] computes. */
+        private val SUPPORTED_DIGITS = 6..8
+
+        /** The TOTP time steps accepted, in seconds. */
+        private val SUPPORTED_PERIOD_SECONDS = 1..300
 
         /**
          * Decode a Base32-encoded string to raw bytes.
