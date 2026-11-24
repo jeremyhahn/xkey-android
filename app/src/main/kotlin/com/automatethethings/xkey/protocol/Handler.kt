@@ -3840,9 +3840,8 @@ class RequestHandler(
                 // Nothing has that id: say so rather than claim a deletion.
                 return Response.success(request.id, JSONObject().apply { put("deleted", false) })
             }
-            // Recorded first, so no sync with another paired device adds it back.
-            db.oathCredentialDao().recordDeletion(credentialId, System.currentTimeMillis())
-            db.oathCredentialDao().deleteByOathId(credentialId)
+            // Recorded and deleted in one transaction, so no sync with another paired device adds it back.
+            db.oathCredentialDao().deleteAndRecordDeletion(credentialId, System.currentTimeMillis())
 
             AuditLogger.logOathCredentialDeleted(credentialId, cred.issuer, cred.accountName)
 
