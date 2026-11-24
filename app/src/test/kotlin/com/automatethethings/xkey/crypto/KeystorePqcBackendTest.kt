@@ -27,6 +27,7 @@ import org.bouncycastle.crypto.params.MLDSAParameters
 import org.bouncycastle.crypto.util.SubjectPublicKeyInfoFactory
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -236,6 +237,114 @@ class KeystorePqcBackendTest {
         assertThrows(KeyGenerationException::class.java) {
             KeystorePqcBackend.checkSpki(MlDsaParameterSet.ML_DSA_65, byteArrayOf(0x30, 0x00))
         }
+    }
+
+/** A fake Keystore for the generation seam: the aliases it holds and every location asked. */
+    private inner class FakeKeystore(private val level: (MlDsaParameterSet, Boolean) -> Int?) {
+        val aliases: MutableSet<String> = java.util.Collections.synchronizedSet(mutableSetOf())
+        val asked: MutableList<Pair<MlDsaParameterSet, Boolean>> =
+            java.util.Collections.synchronizedList(mutableListOf())
+        var failStrongBox = false
+
+        fun generate(alias: String, set: MlDsaParameterSet, auth: Int, strongBox: Boolean): PqcGeneratedKey {
+            asked += set to strongBox
+            if (strongBox && failStrongBox) throw IllegalStateException("StrongBox refused")
+            aliases += alias
+            return PqcGeneratedKey(bcSpki(set), level(set, strongBox))
+        }
+
+        fun delete(alias: String) {
+            aliases -= alias
+        }
+    }
+
+    private fun backendWith(
+        fake: FakeKeystore,
+        probe: (MlDsaParameterSet, Boolean) -> Int?
+    ): KeystorePqcBackend {
+        val backend = KeystorePqcBackend(
+            sdkInt = 37,
+            probe = probe,
+            generateKey = fake::generate,
+            deleteKey = fake::delete
+        )
+        backend.startProbe(scope)
+        backend.awaitProbeBlocking(5_000)
+        return backend
+    }
+
+    @Test
+    fun `a set only StrongBox makes in hardware is generated in StrongBox without preferStrongBox`() {
+        val fake = FakeKeystore { _, strongBox ->
+            if (strongBox) KeyProperties.SECURITY_LEVEL_STRONGBOX else KeyProperties.SECURITY_LEVEL_SOFTWARE
+        }
+        val backend = backendWith(fake) { _, strongBox ->
+            if (strongBox) KeyProperties.SECURITY_LEVEL_STRONGBOX else null
+        }
+
+        val spki = backend.generate("xkey_key_sb", MlDsaParameterSet.ML_DSA_65, -1, preferStrongBox = false)
+
+        KeystorePqcBackend.checkSpki(MlDsaParameterSet.ML_DSA_65, spki)
+        assertEquals(listOf(MlDsaParameterSet.ML_DSA_65 to true), fake.asked.toList())
+        assertTrue("xkey_key_sb" in fake.aliases)
+    }
+
+    @Test
+    fun `a generated key at software level is refused and its alias deleted`() {
+        val fake = FakeKeystore { _, _ -> KeyProperties.SECURITY_LEVEL_SOFTWARE }
+        val backend = backendWith(fake) { _, strongBox ->
+            if (strongBox) null else KeyProperties.SECURITY_LEVEL_TRUSTED_ENVIRONMENT
+        }
+
+        assertThrows(KeyGenerationException::class.java) {
+            backend.generate("xkey_key_sw", MlDsaParameterSet.ML_DSA_44, -1, preferStrongBox = false)
+        }
+        assertFalse("xkey_key_sw" in fake.aliases)
+        assertEquals(listOf(MlDsaParameterSet.ML_DSA_44 to false), fake.asked.toList())
+    }
+
+    @Test
+    fun `a StrongBox failure falls back to the TEE only when the TEE probed hardware`() {
+        val teeToo = FakeKeystore { _, strongBox ->
+            if (strongBox) KeyProperties.SECURITY_LEVEL_STRONGBOX else KeyProperties.SECURITY_LEVEL_TRUSTED_ENVIRONMENT
+        }.apply { failStrongBox = true }
+        val both = backendWith(teeToo) { _, strongBox ->
+            if (strongBox) KeyProperties.SECURITY_LEVEL_STRONGBOX else KeyProperties.SECURITY_LEVEL_TRUSTED_ENVIRONMENT
+        }
+        both.generate("xkey_key_fb", MlDsaParameterSet.ML_DSA_87, -1, preferStrongBox = true)
+        assertEquals(
+            listOf(MlDsaParameterSet.ML_DSA_87 to true, MlDsaParameterSet.ML_DSA_87 to false),
+            teeToo.asked.toList()
+        )
+        assertTrue("xkey_key_fb" in teeToo.aliases)
+
+        val strongBoxOnly = FakeKeystore { _, strongBox ->
+            if (strongBox) KeyProperties.SECURITY_LEVEL_STRONGBOX else KeyProperties.SECURITY_LEVEL_SOFTWARE
+        }.apply { failStrongBox = true }
+        val sbBackend = backendWith(strongBoxOnly) { _, strongBox ->
+            if (strongBox) KeyProperties.SECURITY_LEVEL_STRONGBOX else null
+        }
+        assertThrows(KeyGenerationException::class.java) {
+            sbBackend.generate("xkey_key_nf", MlDsaParameterSet.ML_DSA_87, -1, preferStrongBox = true)
+        }
+        assertEquals(listOf(MlDsaParameterSet.ML_DSA_87 to true), strongBoxOnly.asked.toList())
+        assertFalse("xkey_key_nf" in strongBoxOnly.aliases)
+    }
+
+    @Test
+    fun `no software-level key is ever kept whatever the set or location`() {
+        val fake = FakeKeystore { _, _ -> KeyProperties.SECURITY_LEVEL_SOFTWARE }
+        val backend = backendWith(fake) { _, strongBox ->
+            if (strongBox) KeyProperties.SECURITY_LEVEL_STRONGBOX else KeyProperties.SECURITY_LEVEL_TRUSTED_ENVIRONMENT
+        }
+        for (set in MlDsaParameterSet.entries) {
+            for (prefer in listOf(false, true)) {
+                assertThrows("$set prefer=$prefer", KeyGenerationException::class.java) {
+                    backend.generate("xkey_key_${set.name}", set, -1, prefer)
+                }
+            }
+        }
+        assertEquals(emptySet<String>(), fake.aliases.toSet())
     }
 
     private fun bcSpki(set: MlDsaParameterSet): ByteArray {
