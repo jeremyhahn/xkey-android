@@ -223,6 +223,35 @@ class LocalGenerateKeyMlDsaHandlerTest {
     }
 
     @Test
+    fun `every ML-DSA generation of a request runs inside the cancellation-safe unit that stores its row`() {
+        val generateCall = Regex("""keystoreManager\.generateMlDsaKey\(""")
+        val callers = java.io.File("src/main/kotlin/com/automatethethings/xkey/protocol").walk()
+            .filter { it.extension == "kt" && generateCall.containsMatchIn(it.readText()) }
+            .map { it.name }.toList()
+        assertEquals(listOf("Handler.kt"), callers)
+
+        val source = java.io.File("src/main/kotlin/com/automatethethings/xkey/protocol/Handler.kt").readText()
+        val material = source.indexOf("private suspend fun generateMlDsaMaterial(")
+        assertTrue("generateMlDsaMaterial is gone", material >= 0)
+        val materialEnd = source.indexOf("\n    /**", material)
+        val calls = generateCall.findAll(source).map { it.range.first }.toList()
+        assertEquals("one generateMlDsaKey call", 1, calls.size)
+        assertTrue("generateMlDsaKey runs outside generateMlDsaMaterial", calls[0] in material..materialEnd)
+
+        val uses = Regex("""(?<!fun )generateMlDsaMaterial\(""").findAll(source).map { it.range.first }.toList()
+        assertEquals("one generateMlDsaMaterial call", 1, uses.size)
+        val use = uses[0]
+        val unit = source.lastIndexOf("withContext(NonCancellable)", use)
+        val owner = source.lastIndexOf("private suspend fun createMlDsaKey(", use)
+        assertTrue("the call is not in createMlDsaKey", owner >= 0)
+        assertTrue("the call is outside the NonCancellable unit", unit > owner)
+        assertFalse("the unit closes before the call", source.substring(unit, use).contains("\n        }\n"))
+        val insert = source.indexOf("keyDao.insert(", use)
+        val nextFunction = source.indexOf("\n    /**", use)
+        assertTrue("the row is not stored in the same unit", insert in use..nextFunction)
+    }
+
+    @Test
     fun `a set the device makes in hardware defaults to hardware`() = runTest {
         PqcHardware.backend = backend(MlDsaParameterSet.ML_DSA_65)
 
