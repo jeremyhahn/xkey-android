@@ -100,7 +100,8 @@ class KeyUseHandlerTest {
         SW_HMAC_512 to Triple("HMAC-SHA512", "symmetric", RFC4231_KEY),
         SW_ODD_AES to Triple("AES-XTS", "symmetric", aesMaterial),
         SW_ODD_HMAC to Triple("HMAC-SHA224", "symmetric", RFC4231_KEY),
-        SW_ODD_NAME to Triple("XYZ", "symmetric", aesMaterial)
+        SW_ODD_NAME to Triple("XYZ", "symmetric", aesMaterial),
+        SW_SHORT_AES to Triple("AES-256-GCM", "symmetric", ByteArray(5) { 1 })
     )
 
     private val hwCiphertext = ByteArray(44) { 0x41 }
@@ -528,6 +529,13 @@ class KeyUseHandlerTest {
     }
 
     @Test
+    fun `a software AES key with bad material answers ENCRYPTION_FAILED`() = runTest {
+        val params = """{"keyId":"$SW_SHORT_AES","plaintext":"$data"}"""
+        assertCleanError("5-byte AES material", ErrorCodes.ENCRYPTION_FAILED, call(MethodNames.LOCAL_SYMMETRIC_ENCRYPT, params))
+        assertTrue("no key-use entry: $inserted", inserted.none { it.success && it.keyId != null })
+    }
+
+    @Test
     fun `symmetricDecrypt refuses a payload sent as plaintext`() = runTest {
         val ciphertext = b64(swCiphertext(unb64(data)))
         listOf(SW_AES, HW_AES).forEach { keyId ->
@@ -859,6 +867,7 @@ class KeyUseHandlerTest {
         const val SW_ODD_AES = "sw-odd-aes"
         const val SW_ODD_HMAC = "sw-odd-hmac"
         const val SW_ODD_NAME = "sw-odd-name"
+        const val SW_SHORT_AES = "sw-short-aes"
         const val HW_AES = "hw-aes"
         const val HW_HMAC = "hw-hmac"
         const val HW_EC = "hw-ec"
