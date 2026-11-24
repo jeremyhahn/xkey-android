@@ -440,18 +440,25 @@ class OathRepository(
      *
      * Audited here, so a delete on the phone and local.oathRemove write the
      * same single row; nothing is deleted or audited when no credential has
-     * [oathId].
+     * [oathId]. Two calls can both read the credential before either
+     * deletes it (a phone delete racing local.oathRemove): only the delete
+     * that removed the row is audited and returns true.
      *
      * @param oathId The unique identifier of the credential to delete.
-     * @return true if a credential was deleted, false if none had [oathId].
+     * @return true if this call deleted the credential, false if none had
+     *         [oathId] or a concurrent delete removed it first.
      */
     suspend fun deleteCredential(oathId: String): Boolean {
         val credential = dao.getByOathId(oathId) ?: return false
-        auditedWrite(
+        val deleted = auditedWrite(
             write = { dao.deleteByOathId(oathId) },
-            audit = { AuditLogger.logOathCredentialDeleted(oathId, credential.issuer, credential.accountName) }
+            audit = { rows ->
+                if (rows > 0) {
+                    AuditLogger.logOathCredentialDeleted(oathId, credential.issuer, credential.accountName)
+                }
+            }
         )
-        return true
+        return deleted > 0
     }
 
     /**

@@ -151,9 +151,11 @@ interface OathCredentialDao {
      * Delete an OATH credential by its unique OATH ID.
      *
      * @param oathId The unique OATH identifier of the credential to delete.
+     * @return The number of rows deleted: 0 when no credential had [oathId],
+     *         for example because a concurrent delete removed it first.
      */
     @Query("DELETE FROM oath_credentials WHERE oath_id = :oathId")
-    suspend fun deleteByOathId(oathId: String)
+    suspend fun deleteByOathId(oathId: String): Int
 
     // -------------------------------------------------------------------------
     // Aggregate Queries
