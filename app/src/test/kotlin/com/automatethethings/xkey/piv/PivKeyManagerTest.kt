@@ -376,6 +376,38 @@ class PivKeyManagerTest {
         assertArrayEquals(slotKey.public.encoded, parsed.publicKey.encoded)
     }
 
+    @Test
+    fun `deleteKey of an empty slot writes no deleted entry`() = runTest {
+        keystore.live = null
+        coEvery { pivSlotDao.deleteBySlotId("9A") } returns 0
+
+        PivKeyManager(pivSlotDao).deleteKey(PivSlot.AUTHENTICATION)
+
+        verify(exactly = 0) { AuditLogger.logKeyDeleted(any(), any(), any()) }
+    }
+
+    @Test
+    fun `deleteKey of a populated slot writes one deleted entry`() = runTest {
+        coEvery { pivSlotDao.deleteBySlotId("9A") } returns 1
+
+        PivKeyManager(pivSlotDao).deleteKey(PivSlot.AUTHENTICATION)
+
+        assertNull(keystore.live)
+        verify(exactly = 1) {
+            AuditLogger.logKeyDeleted(PivSlot.AUTHENTICATION.keystoreAlias, PivSlot.AUTHENTICATION.label, "piv")
+        }
+    }
+
+    @Test
+    fun `deleteKey of a slot with only its row writes one deleted entry`() = runTest {
+        keystore.live = null
+        coEvery { pivSlotDao.deleteBySlotId("9A") } returns 1
+
+        PivKeyManager(pivSlotDao).deleteKey(PivSlot.AUTHENTICATION)
+
+        verify(exactly = 1) { AuditLogger.logKeyDeleted(any(), any(), "piv") }
+    }
+
     private suspend fun importError(certDer: ByteArray): Throwable? =
         runCatching { PivKeyManager(pivSlotDao).importCertificate(PivSlot.AUTHENTICATION, certDer) }
             .exceptionOrNull()
