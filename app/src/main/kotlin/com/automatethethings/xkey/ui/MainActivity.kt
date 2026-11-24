@@ -49,6 +49,7 @@ import com.automatethethings.xkey.truststore.TrustStoreRepository
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.snackbar.Snackbar
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
@@ -274,6 +275,10 @@ class MainActivity : AppCompatActivity() {
                             getString(line.message, line.arg),
                         Snackbar.LENGTH_LONG
                     ).apply { setTextMaxLines(3) }.show()
+                } catch (e: CancellationException) {
+                    // The screen went away mid-sync: nothing failed, and
+                    // there is no screen left to tell.
+                    throw e
                 } catch (e: Exception) {
                     Snackbar.make(
                         binding.root,
