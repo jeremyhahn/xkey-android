@@ -161,6 +161,33 @@ class DesktopBackupDialogsCreateTest {
         coVerify(exactly = 0) { host.gatt.createDesktopBackup(any(), any()) }
     }
 
+    @Test
+    fun `the nothing-selected error sits on the store toggles, not on a password field`() {
+        val dialog = openCreate()
+        fill(dialog, "same pass")
+        host.toggles(dialog).forEach { it.isChecked = false }
+
+        host.clickPositive(dialog)
+
+        assertTrue("no password field may carry it", host.fields(dialog).all { it.error == null })
+        assertEquals(
+            host.string(R.string.desktop_backup_error_nothing_selected),
+            host.toggles(dialog)[0].error?.toString()
+        )
+    }
+
+    @Test
+    fun `a corrected store choice clears the nothing-selected error`() {
+        val dialog = openCreate()
+        fill(dialog, "same pass")
+        host.toggles(dialog).forEach { it.isChecked = false }
+        host.clickPositive(dialog)
+
+        host.toggles(dialog)[2].isChecked = true
+
+        assertTrue(host.toggles(dialog).all { it.error == null })
+    }
+
     // ------------------------------------------------------------------ send
 
     @Test
