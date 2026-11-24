@@ -496,6 +496,21 @@ class KeyUseHandlerTest {
     }
 
     @Test
+    fun `a software key decrypt that fails answers DECRYPTION_FAILED`() = runTest {
+        val good = swCiphertext(unb64(data))
+        val flipped = good.copyOf().also { it[it.size - 1] = (it[it.size - 1].toInt() xor 0x01).toByte() }
+        mapOf(
+            "a flipped tag byte" to """{"keyId":"$SW_AES","ciphertext":"${b64(flipped)}","aad":"$data"}""",
+            "a wrong aad" to """{"keyId":"$SW_AES","ciphertext":"${b64(good)}","aad":"${b64("other".toByteArray())}"}""",
+            "a missing aad" to """{"keyId":"$SW_AES","ciphertext":"${b64(good)}"}""",
+            "a ciphertext shorter than the iv" to """{"keyId":"$SW_AES","ciphertext":"${b64(ByteArray(5))}"}""",
+            "an empty ciphertext" to """{"keyId":"$SW_AES","ciphertext":""}"""
+        ).forEach { (case, params) ->
+            assertCleanError(case, ErrorCodes.DECRYPTION_FAILED, call(MethodNames.LOCAL_SYMMETRIC_DECRYPT, params))
+        }
+    }
+
+    @Test
     fun `found - symmetricDecrypt takes a payload sent as plaintext`() = runTest {
         // LocalSymmetricParams reads plaintext ?: ciphertext ?: data for both
         // directions, so a decrypt request naming its input "plaintext" is
