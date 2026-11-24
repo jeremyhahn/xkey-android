@@ -28,21 +28,37 @@ internal const val SUPPORTED_TEST_SDK = 33
 
 /**
  * The one way JVM tests build a [PivKeyManager]: on [SUPPORTED_TEST_SDK]
- * unless a test names another level, with every key reading as
- * [KeySecurityLevel.TEE] unless a test names another reader.
+ * unless a test names another level, with every key and the curve 25519
+ * hardware probe reading as [KeySecurityLevel.TEE] unless a test names
+ * other readers.
  *
  * [generateKeyPair] null keeps the manager's Android Keystore generator, for
  * tests that route `KeyPairGenerator.getInstance(..., "AndroidKeyStore")` to a
- * fake ([FakePivKeystore.generatesOnNextCall]).
+ * fake ([FakePivKeystore.generatesOnNextCall]). [probeSecurityLevel] null
+ * keeps the manager's own probe, which generates under a disposable alias
+ * with [generateKeyPair] and reads it with [securityLevelOf]; its answers are
+ * kept for the process until [PivKeyManager.forgetHardwareProbes].
  */
 internal fun testPivKeyManager(
     dao: PivSlotDao,
     generateKeyPair: ((alias: String, algorithm: PivAlgorithm) -> KeyPair)? = null,
     sdkInt: Int = SUPPORTED_TEST_SDK,
-    securityLevelOf: (alias: String) -> KeySecurityLevel? = { KeySecurityLevel.TEE }
+    securityLevelOf: (alias: String) -> KeySecurityLevel? = { KeySecurityLevel.TEE },
+    probeSecurityLevel: ((algorithm: PivAlgorithm) -> KeySecurityLevel?)? = { KeySecurityLevel.TEE }
 ): PivKeyManager =
     if (generateKeyPair == null) {
-        PivKeyManager(dao, sdkInt = sdkInt, securityLevelOf = securityLevelOf)
+        PivKeyManager(
+            dao,
+            sdkInt = sdkInt,
+            securityLevelOf = securityLevelOf,
+            probeSecurityLevel = probeSecurityLevel
+        )
     } else {
-        PivKeyManager(dao, generateKeyPair = generateKeyPair, sdkInt = sdkInt, securityLevelOf = securityLevelOf)
+        PivKeyManager(
+            dao,
+            generateKeyPair = generateKeyPair,
+            sdkInt = sdkInt,
+            securityLevelOf = securityLevelOf,
+            probeSecurityLevel = probeSecurityLevel
+        )
     }

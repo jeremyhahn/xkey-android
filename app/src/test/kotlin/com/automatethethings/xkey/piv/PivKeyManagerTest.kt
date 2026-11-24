@@ -86,6 +86,7 @@ class PivKeyManagerTest {
     private val slotKey = PivTestCertificates.ecKeyPair()
     private lateinit var keystore: FakePivKeystore
     private var generatorCalls = 0
+    private val generatedAliases = mutableListOf<String>()
 
     @Before
     fun setUp() {
@@ -107,6 +108,8 @@ class PivKeyManagerTest {
 
     @After
     fun tearDown() {
+        // The Keystore probe's answers are kept for the process.
+        PivKeyManager.forgetHardwareProbes()
         unmockkAll()
     }
 
@@ -461,10 +464,11 @@ class PivKeyManagerTest {
     }
 
     @Test
-    fun `generateKey Ed25519 in a software Keystore empties the slot and is refused`() = runTest {
+    fun `generateKey Ed25519 whose probe passed but whose key is software empties the slot and is refused`() = runTest {
         val newKey = PivTestCertificates.ed25519KeyPair()
+        val manager = manager(level = KeySecurityLevel.SOFTWARE, probe = KeySecurityLevel.TEE, generates = newKey)
 
-        val error = generateError(manager(level = KeySecurityLevel.SOFTWARE, generates = newKey), PivAlgorithm.ED25519)
+        val error = generateError(manager, PivAlgorithm.ED25519)
 
         assertTrue("got $error", error is PivAlgorithmUnavailableException)
         assertTrue(error?.message, error?.message?.contains("Android 13 secure hardware") == true)
@@ -474,8 +478,10 @@ class PivKeyManagerTest {
     }
 
     @Test
-    fun `generateKey X25519 whose security level cannot be read empties the slot and is refused`() = runTest {
-        val error = generateError(manager(level = null, generates = PivTestCertificates.x25519KeyPair()), PivAlgorithm.X25519)
+    fun `generateKey X25519 whose probe passed but whose key level cannot be read empties the slot and is refused`() = runTest {
+        val manager = manager(level = null, probe = KeySecurityLevel.STRONGBOX, generates = PivTestCertificates.x25519KeyPair())
+
+        val error = generateError(manager, PivAlgorithm.X25519)
 
         assertTrue("got $error", error is PivAlgorithmUnavailableException)
         assertNull(keystore.live)
@@ -518,6 +524,101 @@ class PivKeyManagerTest {
 
         assertEquals(PivAlgorithm.X25519, info.algorithm)
         coVerify { pivSlotDao.upsert(match { it.algorithm == "X25519" }) }
+    }
+
+    @Test
+    fun `generateKey Ed25519 whose hardware probe reads software keeps the slot's key, row and certificate`() = runTest {
+        val manager = manager(probe = KeySecurityLevel.SOFTWARE, generates = PivTestCertificates.ed25519KeyPair())
+
+        assertRefusedBeforeTheSlot(manager, PivAlgorithm.ED25519)
+    }
+
+    @Test
+    fun `generateKey X25519 whose hardware probe level cannot be read keeps the slot's key, row and certificate`() = runTest {
+        val manager = manager(probe = null, generates = PivTestCertificates.x25519KeyPair())
+
+        assertRefusedBeforeTheSlot(manager, PivAlgorithm.X25519)
+    }
+
+    /**
+     * The manager's own probe, over the generator and level reader: it makes
+     * its key under a disposable alias no slot has, always removes it, and
+     * asks the Keystore once per algorithm.
+     */
+    @Test
+    fun `the Keystore hardware probe uses a disposable alias, removes it, and runs once`() = runTest {
+        val slotAlias = PivSlot.AUTHENTICATION.keystoreAlias
+        val manager = testPivKeyManager(
+            pivSlotDao,
+            generateKeyPair = { alias, _ -> generate(alias, PivTestCertificates.ed25519KeyPair(), null) },
+            securityLevelOf = { alias -> if (alias == slotAlias) KeySecurityLevel.TEE else KeySecurityLevel.SOFTWARE },
+            probeSecurityLevel = null
+        )
+
+        assertRefusedBeforeTheSlot(manager, PivAlgorithm.ED25519)
+        val probeAlias = generatedAliases.single()
+        assertTrue(probeAlias, probeAlias.startsWith(PIV_KEYSTORE_ALIAS_PREFIX))
+        assertFalse("the probe alias is a slot's", PivSlot.entries.any { it.keystoreAlias == probeAlias })
+        verify { keystore.keyStore.deleteEntry(probeAlias) }
+
+        assertFalse(PivAlgorithm.ED25519 in manager.availableAlgorithms())
+        assertEquals("the probe ran again", 1, generatedAliases.count { it == probeAlias })
+    }
+
+    @Test
+    fun `the Keystore hardware probe that cannot generate removes its alias and offers no curve 25519`() = runTest {
+        val manager = testPivKeyManager(
+            pivSlotDao,
+            generateKeyPair = { alias, _ -> generate(alias, null, ProviderException("Unsupported EC curve")) },
+            probeSecurityLevel = null
+        )
+
+        val offered = manager.availableAlgorithms()
+
+        assertEquals(listOf(PivAlgorithm.ES256, PivAlgorithm.ES384, PivAlgorithm.RS2048), offered)
+        assertEquals(2, generatedAliases.size)
+        generatedAliases.forEach { alias -> verify { keystore.keyStore.deleteEntry(alias) } }
+        assertTrue(keystore.live === slotKey)
+    }
+
+    @Test
+    fun `availableAlgorithms on API 33 whose probe reads software offers only ES256, ES384 and RS2048`() = runTest {
+        val offered = manager(probe = KeySecurityLevel.SOFTWARE).availableAlgorithms()
+
+        assertEquals(listOf(PivAlgorithm.ES256, PivAlgorithm.ES384, PivAlgorithm.RS2048), offered)
+    }
+
+    @Test
+    fun `availableAlgorithms offers curve 25519 only on API 33 with a secure hardware probe`() = runTest {
+        assertEquals(PivAlgorithm.entries.toList(), manager(probe = KeySecurityLevel.TEE).availableAlgorithms())
+        assertEquals(PivAlgorithm.entries.toList(), manager(probe = KeySecurityLevel.STRONGBOX).availableAlgorithms())
+        assertEquals(
+            listOf(PivAlgorithm.ES256, PivAlgorithm.ES384, PivAlgorithm.RS2048),
+            manager(sdkInt = 32, probe = KeySecurityLevel.TEE).availableAlgorithms()
+        )
+    }
+
+    /**
+     * Slot 9A holds key A with a row and an imported certificate; generating
+     * [algorithm] with [manager] is refused as unavailable without the slot's
+     * alias reaching the generator, and A, its row and its certificate stay.
+     */
+    private suspend fun assertRefusedBeforeTheSlot(manager: PivKeyManager, algorithm: PivAlgorithm) {
+        val cert = PivTestCertificates.selfSigned(slotKey)
+        coEvery { pivSlotDao.getBySlotId("9A") } returns PivTestCertificates.slotRow(slotKey.public.encoded, cert)
+
+        val error = generateError(manager, algorithm)
+
+        assertTrue("got $error", error is PivAlgorithmUnavailableException)
+        assertFalse(
+            "the generator ran under the slot's alias",
+            PivSlot.AUTHENTICATION.keystoreAlias in generatedAliases
+        )
+        assertTrue("the slot lost its key", keystore.live === slotKey)
+        verify(exactly = 0) { keystore.keyStore.deleteEntry(PivSlot.AUTHENTICATION.keystoreAlias) }
+        coVerify(exactly = 0) { pivSlotDao.upsert(any()) }
+        coVerify(exactly = 0) { pivSlotDao.deleteBySlotId(any()) }
+        assertArrayEquals(cert, manager.getCertificate(PivSlot.AUTHENTICATION))
     }
 
     @Test
@@ -637,27 +738,35 @@ class PivKeyManagerTest {
     }
 
     /**
-     * A manager whose Keystore generator puts the next key in [keystore] (or
-     * throws [generatorError]), on platform level [sdkInt], reading [level]
-     * as every key's security level.
+     * A manager whose Keystore generator puts the next key in [keystore] when
+     * it generates under the slot's alias (or throws [generatorError]), on
+     * platform level [sdkInt], reading [level] as every key's security level
+     * and [probe] as the hardware probe's answer for every curve 25519
+     * algorithm. Every alias the generator is called with lands in
+     * [generatedAliases].
      */
     private fun manager(
         sdkInt: Int = SUPPORTED_TEST_SDK,
         level: KeySecurityLevel? = KeySecurityLevel.TEE,
+        probe: KeySecurityLevel? = level,
         generates: KeyPair? = null,
         generatorError: Exception? = null
     ) = testPivKeyManager(
         pivSlotDao,
-        generateKeyPair = { _, _ ->
-            generatorCalls++
-            generatorError?.let { throw it }
-            val next = generates ?: error("this test generates no key")
-            keystore.live = next
-            next
-        },
+        generateKeyPair = { alias, _ -> generate(alias, generates, generatorError) },
         sdkInt = sdkInt,
-        securityLevelOf = { level }
+        securityLevelOf = { level },
+        probeSecurityLevel = { probe }
     )
+
+    private fun generate(alias: String, generates: KeyPair?, generatorError: Exception?): KeyPair {
+        generatorCalls++
+        generatedAliases += alias
+        generatorError?.let { throw it }
+        val next = generates ?: error("this test generates no key")
+        if (alias == PivSlot.AUTHENTICATION.keystoreAlias) keystore.live = next
+        return next
+    }
 
     private suspend fun generateError(manager: PivKeyManager, algorithm: PivAlgorithm): Throwable? =
         runCatching { manager.generateKey(PivSlot.AUTHENTICATION, algorithm) }.exceptionOrNull()
