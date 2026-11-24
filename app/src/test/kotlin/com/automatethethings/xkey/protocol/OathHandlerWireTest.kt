@@ -330,6 +330,48 @@ class OathHandlerWireTest {
         coVerify(exactly = 0) { dao.claimCounter(any(), any()) }
     }
 
+
+    @Test
+    fun `oathGenerate at HOTP_COUNTER_MAX answers OPERATION_DENIED without the exception text`() = runTest {
+        store(hotp(ID_HOTP, counter = OathRepository.HOTP_COUNTER_MAX))
+
+        val response = generate(ID_HOTP)
+
+        assertEquals(ErrorCodes.OPERATION_DENIED, errorCode(response))
+        assertFalse(errorMessage(response), errorMessage(response).contains("for OATH credential"))
+        coVerify(exactly = 0) { dao.claimCounter(any(), any()) }
+        assertEquals(OathRepository.HOTP_COUNTER_MAX, rows.getValue(ID_HOTP).counter)
+        assertTrue("no code, no audit entry: $audit", audit.isEmpty())
+    }
+
+    @Test
+    fun `oathGenerate for a stored period of 0 answers INTERNAL_ERROR without the exception text`() = runTest {
+        // A synced row can carry period 0; the real engine refuses it.
+        store(totp(ID_TOTP, period = 0))
+
+        val response = generate(ID_TOTP)
+
+        assertEquals(ErrorCodes.INTERNAL_ERROR, errorCode(response))
+        assertFalse(errorMessage(response), errorMessage(response).contains("Period"))
+        assertFalse(errorMessage(response), errorMessage(response).contains("Exception"))
+        assertTrue("no code, no audit entry: $audit", audit.isEmpty())
+    }
+
+    @Test
+    fun `oathGenerate reports the credential it generated for, when it is removed right after`() = runTest {
+        store(totp(ID_TOTP, issuer = "Acme", account = "alice", period = 30))
+        // A removal lands after the code is computed and before the answer.
+        coEvery { dao.recordUsage(ID_TOTP, any()) } answers { rows.remove(ID_TOTP); Unit }
+
+        val result = result(generate(ID_TOTP))
+
+        val expiresIn = result.getInt("expires_in")
+        assertTrue("expires_in $expiresIn", expiresIn in 1..30)
+        val entry = audit.single { it.operationType == AuditOperationType.OATH_CODE_GENERATED }
+        assertEquals(ID_TOTP, entry.keyId)
+        assertEquals("Acme:alice", entry.keyLabel)
+    }
+
     // -------------------------------------------------------------------------
     // Harness
     // -------------------------------------------------------------------------
