@@ -32,9 +32,9 @@ class PerOperationSignScanTest {
 
     private fun source(path: String) = File(sourceRoot, path).readText()
 
-    /** The name of the function each `initSign(` call sits in, in order. */
+    /** The name of the top-level or member function each `initSign(` call sits in, in order. */
     private fun initSignFunctions(text: String): List<String> {
-        val fn = Regex("""\bfun\s+(?:<[^>]*>\s*)?(?:[A-Za-z0-9_.]+\.)?([A-Za-z0-9_]+)\s*\(""")
+        val fn = Regex("""(?m)^(?:    )?(?:[a-z]+ )*fun\s+(?:<[^>]*>\s*)?(?:[A-Za-z0-9_.]+\.)?([A-Za-z0-9_]+)\s*\(""")
         return Regex("""\.initSign\(|\binitSign\(""").findAll(text).map { call ->
             fn.findAll(text.substring(0, call.range.first)).lastOrNull()?.groupValues?.get(1) ?: "<top>"
         }.toList()

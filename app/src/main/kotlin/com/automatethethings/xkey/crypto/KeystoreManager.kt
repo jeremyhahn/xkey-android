@@ -83,6 +83,18 @@ class HmacResult(val mac: ByteArray, val algorithm: String)
 class DecryptResult(val plaintext: ByteArray, val algorithm: String)
 
 /**
+ * Signs with a per-operation Keystore key (user authentication required for
+ * every use): initialises a Signature with [jcaAlgorithm] for the key under
+ * [alias], passes it to the biometric prompt as its CryptoObject, and once
+ * the prompt authorizes it signs [data] with that same Signature. The one way
+ * [KeystoreManager.signApproved] and [KeystoreManager.signApprovedMlDsa]
+ * reach such a key.
+ */
+fun interface CryptoObjectSigner {
+    suspend fun sign(alias: String, jcaAlgorithm: String, data: ByteArray): ByteArray
+}
+
+/**
  * Manages cryptographic keys in Android Keystore for FIDO2 operations.
  *
  * This class provides hardware-backed key storage with StrongBox support
@@ -513,8 +525,7 @@ class KeystoreManager(
 
         // First, try to sign without biometric (uses cached auth if within timeout)
         try {
-            val signature = Signature.getInstance(SIGNATURE_ALGORITHM)
-            signature.initSign(privateKey)
+            val signature = freshSignature(alias, privateKey, SIGNATURE_ALGORITHM)
             signature.update(dataHash)
             return signature.sign()
         } catch (e: Exception) {
@@ -653,8 +664,7 @@ class KeystoreManager(
             ?: throw KeyNotFoundException(credentialId)
 
         try {
-            val signature = Signature.getInstance(SIGNATURE_ALGORITHM)
-            signature.initSign(privateKey)
+            val signature = freshSignature(alias, privateKey, SIGNATURE_ALGORITHM)
             signature.update(dataHash)
             return signature.sign()
         } catch (e: Exception) {
@@ -682,6 +692,7 @@ class KeystoreManager(
         var depth = 0
         while (current != null && depth < MAX_CAUSE_DEPTH) {
             if (current is android.security.keystore.UserNotAuthenticatedException) return true
+            if (current is BiometricRequiredException) return true
             if (hasKeystoreErrorCodes() && isUserAuthenticationRequired(current)) return true
             val next = current.cause
             current = if (next === current) null else next
@@ -1362,8 +1373,7 @@ class KeystoreManager(
             ?: throw KeyNotFoundException(keyId)
 
         try {
-            val signature = Signature.getInstance(jcaAlgorithm)
-            signature.initSign(privateKey)
+            val signature = freshSignature(alias, privateKey, jcaAlgorithm)
             signature.update(data)
             return signature.sign()
         } catch (e: Exception) {
@@ -1416,37 +1426,138 @@ class KeystoreManager(
      * delete and key generation under an alias also takes, so no key can be
      * replaced between the check and the signature.
      *
+     * A per-operation key ([isPerOperationKey]) signs only through
+     * [cryptoObjectSigner], the prompt that authorizes its Signature as a
+     * CryptoObject, and only a signature that verifies under
+     * [approvedPublicKeyDer] is returned.
+     *
+     * @param cryptoObjectSigner The CryptoObject-bound prompt a per-operation
+     *   key signs through; null where there is none.
      * @throws KeyNotFoundException if [alias] holds no key.
      * @throws ApprovedKeyChangedException if the key under [alias] is not the approved one.
-     * @throws BiometricRequiredException if the key requires user authentication.
+     * @throws BiometricRequiredException if the key requires user authentication,
+     *   or is a per-operation key and there is no [cryptoObjectSigner].
      * @throws SigningException if signing fails.
      */
+
     suspend fun signApproved(
         alias: String,
         approvedPublicKeyDer: ByteArray,
         data: ByteArray,
-        jcaAlgorithm: String
-    ): ByteArray = withAliasGate(alias) {
-        val current = publicKeyDERAt(alias) ?: throw KeyNotFoundException(alias)
-        if (!current.contentEquals(approvedPublicKeyDer)) throw ApprovedKeyChangedException(alias)
-        val privateKey = keyStore.getKey(alias, null) as? PrivateKey
-            ?: throw KeyNotFoundException(alias)
-        try {
-            val signature = Signature.getInstance(jcaAlgorithm)
-            signature.initSign(privateKey)
-            signature.update(data)
-            signature.sign()
-        } catch (e: Exception) {
-            if (requiresUserAuthentication(e)) throw BiometricRequiredException()
-            throw SigningException("Signing with $jcaAlgorithm failed", e)
+        jcaAlgorithm: String,
+        cryptoObjectSigner: CryptoObjectSigner? = null
+    ): ByteArray {
+        val signed: ByteArray? = withAliasGate(alias) {
+            val current = publicKeyDERAt(alias) ?: throw KeyNotFoundException(alias)
+            if (!current.contentEquals(approvedPublicKeyDer)) throw ApprovedKeyChangedException(alias)
+            val privateKey = keyStore.getKey(alias, null) as? PrivateKey
+                ?: throw KeyNotFoundException(alias)
+            if (isPerOperationKey(alias)) return@withAliasGate null
+            try {
+                val signature = freshSignature(alias, privateKey, jcaAlgorithm)
+                signature.update(data)
+                signature.sign()
+            } catch (e: Exception) {
+                if (requiresUserAuthentication(e)) throw BiometricRequiredException()
+                throw SigningException("Signing with $jcaAlgorithm failed", e)
+            }
         }
+        return signed ?: signBoundToPrompt(alias, approvedPublicKeyDer, data, jcaAlgorithm, null, cryptoObjectSigner)
+    }
+
+    /**
+     * Signs [data] with the per-operation key under [alias] through
+     * [cryptoObjectSigner], the CryptoObject-bound prompt, outside the alias
+     * gate so the prompt never holds it. The signature counts only if it
+     * verifies under [approvedPublicKeyDer]: the approved key made it, whatever
+     * the alias held while the prompt waited.
+     *
+     * @param set The ML-DSA parameter set of the key, or null for a JCA key.
+     * @throws BiometricRequiredException when there is no [cryptoObjectSigner].
+     * @throws ApprovedKeyChangedException when the signature is not the approved key's.
+     */
+    private suspend fun signBoundToPrompt(
+        alias: String,
+        approvedPublicKeyDer: ByteArray,
+        data: ByteArray,
+        jcaAlgorithm: String,
+        set: MlDsaParameterSet?,
+        cryptoObjectSigner: CryptoObjectSigner?
+    ): ByteArray {
+        val signer = cryptoObjectSigner ?: throw BiometricRequiredException()
+        val signature = signer.sign(alias, jcaAlgorithm, data)
+        if (!verifiesUnder(approvedPublicKeyDer, jcaAlgorithm, set, data, signature)) {
+            throw ApprovedKeyChangedException(alias)
+        }
+        return signature
+    }
+
+    /** Whether [signature] over [data] verifies under the X.509 [publicKeyDer]. */
+    private fun verifiesUnder(
+        publicKeyDer: ByteArray,
+        jcaAlgorithm: String,
+        set: MlDsaParameterSet?,
+        data: ByteArray,
+        signature: ByteArray
+    ): Boolean = try {
+        if (set != null) {
+            val verifier = org.bouncycastle.crypto.signers.MLDSASigner()
+            verifier.init(false, org.bouncycastle.crypto.util.PublicKeyFactory.createKey(publicKeyDer))
+            verifier.update(data, 0, data.size)
+            verifier.verifySignature(signature)
+        } else {
+            val keyAlgorithm = if (jcaAlgorithm.uppercase().contains("RSA")) "RSA" else "EC"
+            val publicKey = java.security.KeyFactory.getInstance(keyAlgorithm)
+                .generatePublic(java.security.spec.X509EncodedKeySpec(publicKeyDer))
+            Signature.getInstance(jcaAlgorithm).run {
+                initVerify(publicKey)
+                update(data)
+                verify(signature)
+            }
+        }
+    } catch (e: Exception) {
+        false
+    }
+
+    /**
+     * True when the Keystore key under [alias] needs the user's
+     * authentication for every use (validity 0): such a key signs only with
+     * a Signature its prompt authorized as a CryptoObject. An unreadable
+     * [KeyInfo] reads as not per-operation.
+     */
+    fun isPerOperationKey(alias: String): Boolean = try {
+        val key = if (keyStore.containsAlias(alias)) keyStore.getKey(alias, null) as? PrivateKey else null
+        if (key == null) {
+            false
+        } else {
+            val info = keyInfoReader(alias, key)
+            @Suppress("DEPRECATION")
+            info.isUserAuthenticationRequired && info.userAuthenticationValidityDurationSeconds <= 0
+        }
+    } catch (e: Exception) {
+        false
+    }
+
+    /**
+     * A Signature initialised for [privateKey] under [alias] outside any
+     * prompt: the one place this class does so. A per-operation key is
+     * refused first, since only its prompt's CryptoObject can authorize it.
+     *
+     * @throws BiometricRequiredException for a per-operation key.
+     */
+    private fun freshSignature(alias: String, privateKey: PrivateKey, jcaAlgorithm: String): Signature {
+        if (isPerOperationKey(alias)) throw BiometricRequiredException()
+        val signature = Signature.getInstance(jcaAlgorithm)
+        signature.initSign(privateKey)
+        return signature
     }
 
     /**
      * [signApproved] for an ML-DSA key: signs [data] (pure ML-DSA) with the
      * [set] key under [alias], only while that key is the approved one. A
      * software key signs through [PqcSoftwareKeyStore]; a Keystore key through
-     * [PqcHardware.backend]'s JCA algorithm.
+     * [PqcHardware.backend]'s JCA algorithm, and a per-operation Keystore key
+     * only through [cryptoObjectSigner].
      *
      * @throws KeyNotFoundException if [alias] holds no key.
      * @throws ApprovedKeyChangedException if the key under [alias] is not the approved one.
@@ -1456,39 +1567,47 @@ class KeystoreManager(
      *   use ([PqcSoftwareKeyStore.userAuthenticationTime]), or null. A
      *   software key checks it against its sealed policy; the Keystore
      *   enforces a hardware key's own.
+     * @param cryptoObjectSigner As for [signApproved].
      * @throws BiometricRequiredException if the key requires user authentication.
      * @throws SigningException if signing fails.
      */
+
     suspend fun signApprovedMlDsa(
         alias: String,
         approvedPublicKeyDer: ByteArray,
         data: ByteArray,
         set: MlDsaParameterSet,
-        userAuthenticatedAt: Long? = null
-    ): ByteArray = withAliasGate(alias) {
-        val current = publicKeyDERAt(alias) ?: throw KeyNotFoundException(alias)
-        if (!current.contentEquals(approvedPublicKeyDer)) throw ApprovedKeyChangedException(alias)
-        MlDsaParameterSet.requireSpkiSet(current, set)
-        if (!keyStore.containsAlias(alias)) {
+        userAuthenticatedAt: Long? = null,
+        cryptoObjectSigner: CryptoObjectSigner? = null
+    ): ByteArray {
+        var jcaAlgorithm = ""
+        val signed: ByteArray? = withAliasGate(alias) {
+            val current = publicKeyDERAt(alias) ?: throw KeyNotFoundException(alias)
+            if (!current.contentEquals(approvedPublicKeyDer)) throw ApprovedKeyChangedException(alias)
+            MlDsaParameterSet.requireSpkiSet(current, set)
+            if (!keyStore.containsAlias(alias)) {
+                try {
+                    return@withAliasGate pqcStore.sign(alias, set, data, userAuthenticatedAt)
+                } catch (e: PqcKeyRecordException) {
+                    throw SigningException("Signing with ${set.wireName} failed", e)
+                }
+            }
+            val backend = PqcHardware.backend
+                ?: throw UnsupportedAlgorithmException(set.wireName)
+            jcaAlgorithm = backend.jcaSignatureAlgorithm(set)
+            val privateKey = keyStore.getKey(alias, null) as? PrivateKey
+                ?: throw KeyNotFoundException(alias)
+            if (isPerOperationKey(alias)) return@withAliasGate null
             try {
-                return@withAliasGate pqcStore.sign(alias, set, data, userAuthenticatedAt)
-            } catch (e: PqcKeyRecordException) {
+                val signature = freshSignature(alias, privateKey, jcaAlgorithm)
+                signature.update(data)
+                signature.sign()
+            } catch (e: Exception) {
+                if (requiresUserAuthentication(e)) throw BiometricRequiredException()
                 throw SigningException("Signing with ${set.wireName} failed", e)
             }
         }
-        val backend = PqcHardware.backend
-            ?: throw UnsupportedAlgorithmException(set.wireName)
-        val privateKey = keyStore.getKey(alias, null) as? PrivateKey
-            ?: throw KeyNotFoundException(alias)
-        try {
-            val signature = Signature.getInstance(backend.jcaSignatureAlgorithm(set))
-            signature.initSign(privateKey)
-            signature.update(data)
-            signature.sign()
-        } catch (e: Exception) {
-            if (requiresUserAuthentication(e)) throw BiometricRequiredException()
-            throw SigningException("Signing with ${set.wireName} failed", e)
-        }
+        return signed ?: signBoundToPrompt(alias, approvedPublicKeyDer, data, jcaAlgorithm, set, cryptoObjectSigner)
     }
 
     /**

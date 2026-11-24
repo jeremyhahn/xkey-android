@@ -1904,7 +1904,10 @@ class RequestHandler(
         // user-authentication policy needs this request's own prompt whatever
         // the request asks: software enforces its policy, not the Keystore.
         val keyRequiresUserAuth = keystoreManager.pqcSoftwareKeyRequiresUserAuth(signParams.keyId)
-        val biometricRequired = if (keyRequiresUserAuth) {
+        val signingAlias = KeystoreManager.generalKeyAlias(signParams.keyId)
+        // A per-operation Keystore key is approved by the CryptoObject prompt that signs.
+        val perOperation = keystoreManager.isPerOperationKey(signingAlias)
+        val biometricRequired = if (keyRequiresUserAuth || perOperation) {
             true
         } else if (signParams.userVerificationRequired) {
             sessionAuthManager?.isBiometricRequired(currentSettings, requestSessionId()) ?: true
@@ -1917,14 +1920,35 @@ class RequestHandler(
         // The stored key as it was before the approval, so the key signed
         // with is the one the owner approved. A key with no row is held to
         // the public key under its alias as it was before the approval.
-        val signingAlias = KeystoreManager.generalKeyAlias(signParams.keyId)
         val selected = keyDao.getByKeyId(signParams.keyId)?.let { approvalSnapshot(it, signingAlias) }
         val unlistedDer = if (selected == null) keystoreManager.publicKeyDERAt(signingAlias) else null
+        val launcher = biometricLauncher
+        val cryptoObjectSigner = if (perOperation && launcher != null) {
+            com.automatethethings.xkey.crypto.CryptoObjectSigner { alias, jcaAlgorithm, bytes ->
+                val notice = OwnNotifications(operationType = "sign", rpName = null)
+                try {
+                    launcher.requestCryptoSignature(
+                        credentialId = signParams.keyId,
+                        dataHash = bytes,
+                        title = "Signing Request",
+                        subtitle = "Verify your identity to sign data",
+                        showOnLockScreen = keyguardManager.isKeyguardLocked,
+                        keyAlias = alias,
+                        signatureAlgorithm = jcaAlgorithm,
+                        onLaunch = notice.onLaunch
+                    ).also { sessionAuthManager?.recordAuthentication(requestSessionId()) }
+                } finally {
+                    notice.close()
+                }
+            }
+        } else {
+            null
+        }
         var approved = false
-        if (biometricRequired && biometricLauncher != null) {
+        if (biometricRequired && launcher != null && cryptoObjectSigner == null) {
             val notice = OwnNotifications(operationType = "sign", rpName = null)
             try {
-                biometricLauncher.requestAuthentication(
+                launcher.requestAuthentication(
                     title = "Signing Request",
                     subtitle = "Verify your identity to sign data",
                     showOnLockScreen = keyguardManager.isKeyguardLocked,
@@ -1966,13 +1990,15 @@ class RequestHandler(
                 val startTime = System.currentTimeMillis()
                 val signature = try {
                     if (signingKey != null) {
-                        signingKey.signMlDsa(data, set, userAuthenticatedAt)
+                        signingKey.signMlDsa(data, set, userAuthenticatedAt, cryptoObjectSigner)
                     } else {
                         val approvedDer = unlistedDer ?: throw ProtocolException(
                             "Key not found: ${signParams.keyId}",
                             errorCode = ErrorCodes.KEY_NOT_FOUND
                         )
-                        keystoreManager.signApprovedMlDsa(signingAlias, approvedDer, data, set, userAuthenticatedAt)
+                        keystoreManager.signApprovedMlDsa(
+                            signingAlias, approvedDer, data, set, userAuthenticatedAt, cryptoObjectSigner
+                        )
                     }
                 } catch (e: com.automatethethings.xkey.crypto.ApprovedKeyChangedException) {
                     throw ProtocolException(
@@ -1990,14 +2016,14 @@ class RequestHandler(
             val jcaAlgorithm = KeystoreManager.jcaSignatureAlgorithm(signAlgorithm)
             val startTime = System.currentTimeMillis()
             val signature = if (signingKey != null) {
-                signingKey.sign(data, jcaAlgorithm)
+                signingKey.sign(data, jcaAlgorithm, cryptoObjectSigner)
             } else {
                 val approvedDer = unlistedDer ?: throw ProtocolException(
                     "Key not found: ${signParams.keyId}",
                     errorCode = ErrorCodes.KEY_NOT_FOUND
                 )
                 try {
-                    keystoreManager.signApproved(signingAlias, approvedDer, data, jcaAlgorithm)
+                    keystoreManager.signApproved(signingAlias, approvedDer, data, jcaAlgorithm, cryptoObjectSigner)
                 } catch (e: com.automatethethings.xkey.crypto.ApprovedKeyChangedException) {
                     throw ProtocolException(
                         "Key ${signParams.keyId} changed while its approval waited",
@@ -5357,13 +5383,17 @@ private class ApprovedKey(
      *   approval saw no key, or [ErrorCodes.OPERATION_DENIED] when the key under
      *   [alias] is not the approved key.
      */
-    suspend fun sign(data: ByteArray, jcaAlgorithm: String): ByteArray {
+    suspend fun sign(
+        data: ByteArray,
+        jcaAlgorithm: String,
+        cryptoObjectSigner: com.automatethethings.xkey.crypto.CryptoObjectSigner? = null
+    ): ByteArray {
         val approvedDer = snapshot.publicKeyDer ?: throw ProtocolException(
             "Key ${row.keyId} had no public key when it was approved",
             errorCode = ErrorCodes.KEY_NOT_FOUND
         )
         return try {
-            keystore.signApproved(snapshot.alias, approvedDer, data, jcaAlgorithm)
+            keystore.signApproved(snapshot.alias, approvedDer, data, jcaAlgorithm, cryptoObjectSigner)
         } catch (e: com.automatethethings.xkey.crypto.ApprovedKeyChangedException) {
             throw ProtocolException(
                 "Key ${row.keyId} is not the key that was approved",
@@ -5380,13 +5410,18 @@ private class ApprovedKey(
      *
      * @throws ProtocolException as [sign] does.
      */
-    suspend fun signMlDsa(data: ByteArray, set: MlDsaParameterSet, userAuthenticatedAt: Long?): ByteArray {
+    suspend fun signMlDsa(
+        data: ByteArray,
+        set: MlDsaParameterSet,
+        userAuthenticatedAt: Long?,
+        cryptoObjectSigner: com.automatethethings.xkey.crypto.CryptoObjectSigner? = null
+    ): ByteArray {
         val approvedDer = snapshot.publicKeyDer ?: throw ProtocolException(
             "Key ${row.keyId} had no public key when it was approved",
             errorCode = ErrorCodes.KEY_NOT_FOUND
         )
         return try {
-            keystore.signApprovedMlDsa(snapshot.alias, approvedDer, data, set, userAuthenticatedAt)
+            keystore.signApprovedMlDsa(snapshot.alias, approvedDer, data, set, userAuthenticatedAt, cryptoObjectSigner)
         } catch (e: com.automatethethings.xkey.crypto.ApprovedKeyChangedException) {
             throw ProtocolException(
                 "Key ${row.keyId} is not the key that was approved",
