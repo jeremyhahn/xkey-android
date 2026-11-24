@@ -116,7 +116,7 @@ class SessionAuthManager(
                 // recorded reading cannot vouch for the window, so it has
                 val authTime = lastAuthTime.get() ?: return true
                 val now = clock()
-                val windowMs = settings.timeWindowSeconds * MILLIS_PER_SECOND
+                val windowMs = settings.effectiveTimeWindowSeconds * MILLIS_PER_SECOND
                 now < authTime || now - authTime >= windowMs
             }
 

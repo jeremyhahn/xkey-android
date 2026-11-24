@@ -193,6 +193,15 @@ public enum class AuthTimeWindow(public val seconds: Int) {
             seconds: Int,
             default: AuthTimeWindow = MINUTES_2
         ): AuthTimeWindow = fromSeconds(seconds) ?: default
+
+        /**
+         * Clamp a window in seconds into the offered range, [SECONDS_30] to [MINUTES_10].
+         *
+         * @param seconds The stored duration in seconds, which may be out of range.
+         * @return The duration clamped to 30-600 s.
+         */
+        public fun clampSeconds(seconds: Int): Int =
+            seconds.coerceIn(SECONDS_30.seconds, MINUTES_10.seconds)
     }
 }
 
@@ -251,6 +260,12 @@ public data class BiometricSettingsData(
      */
     val isBiometricEnabled: Boolean
         get() = uvPolicy == UserVerificationPolicy.REQUIRED
+
+    /**
+     * The time window in seconds clamped to 30-600 s; read this, never [timeWindowSeconds].
+     */
+    val effectiveTimeWindowSeconds: Int
+        get() = AuthTimeWindow.clampSeconds(timeWindowSeconds)
 
     /**
      * Get the [AuthTimeWindow] enum value matching [timeWindowSeconds].
@@ -497,10 +512,7 @@ public class BiometricSettingsRepository internal constructor(
                 runCatching { BiometricAuthMode.valueOf(name) }.getOrNull()
             } ?: BiometricAuthMode.PER_OPERATION,
             // A stored window outside the offered range is clamped into it.
-            timeWindowSeconds = timeWindowSeconds?.coerceIn(
-                AuthTimeWindow.SECONDS_30.seconds,
-                AuthTimeWindow.MINUTES_10.seconds
-            ) ?: AuthTimeWindow.MINUTES_2.seconds,
+            timeWindowSeconds = timeWindowSeconds?.let(AuthTimeWindow::clampSeconds) ?: AuthTimeWindow.MINUTES_2.seconds,
             attestationBiometricPolicy = attestationBiometricPolicyName?.let { name ->
                 runCatching { AttestationBiometricPolicy.valueOf(name) }.getOrNull()
             } ?: AttestationBiometricPolicy.ALWAYS,
