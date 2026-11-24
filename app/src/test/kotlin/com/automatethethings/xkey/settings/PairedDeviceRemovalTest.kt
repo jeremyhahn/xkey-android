@@ -42,6 +42,8 @@ class PairedDeviceRemovalTest {
     private companion object {
         val KEY_A = "a".repeat(64)
         val KEY_B = "b".repeat(64)
+        const val ADDRESS_A = "00:00:5E:00:53:0A"
+        const val ADDRESS_B = "00:00:5E:00:53:0B"
     }
 
     private val removed = CopyOnWriteArrayList<String>()
@@ -95,14 +97,49 @@ class PairedDeviceRemovalTest {
         assertTrue(repo.getAllDevices().isEmpty())
     }
 
-    /** A re-pairing under a new key evicts the old entry; the old key is no longer paired. */
+    /**
+     * A re-pairing over the same radio under a new key evicts the old entry;
+     * the old key is no longer paired.
+     */
     @Test
     fun addDeviceNotifiesAnEvictedEntryUnderAnotherKey() {
-        repo.addDevice(KEY_A, "desktop")
+        repo.addDevice(KEY_A, "desktop", bleAddress = ADDRESS_A)
 
-        repo.addDevice(KEY_B, "desktop")
+        repo.addDevice(KEY_B, "desktop", bleAddress = ADDRESS_A)
 
         assertEquals(listOf(KEY_A), removed)
+        assertFalse(repo.isDeviceKnown(KEY_A))
+        assertTrue(repo.isDeviceKnown(KEY_B))
+        assertEquals(1, repo.getAllDevices().size)
+    }
+
+    /**
+     * Two different desktops can share a host name. The name identifies
+     * nothing, so pairing the second keeps the first and revokes nothing.
+     */
+    @Test
+    fun aSameNamePairingKeepsTheOtherDesktop() {
+        repo.addDevice(KEY_A, "laptop", bleAddress = ADDRESS_A)
+
+        repo.addDevice(KEY_B, "laptop", bleAddress = ADDRESS_B)
+
+        assertTrue("a same-name pairing removed nothing: $removed", removed.isEmpty())
+        assertTrue(repo.isDeviceKnown(KEY_A))
+        assertTrue(repo.isDeviceKnown(KEY_B))
+        assertTrue(repo.pendingRevocations().isEmpty())
+    }
+
+    /** Over TCP or USB there is no radio address: the name alone still evicts nothing. */
+    @Test
+    fun aSameNamePairingWithoutAnAddressKeepsTheOtherDesktop() {
+        repo.addDevice(KEY_A, "laptop")
+
+        repo.addDevice(KEY_B, "laptop")
+
+        assertTrue("a same-name pairing removed nothing: $removed", removed.isEmpty())
+        assertTrue(repo.isDeviceKnown(KEY_A))
+        assertTrue(repo.isDeviceKnown(KEY_B))
+        assertTrue(repo.pendingRevocations().isEmpty())
     }
 
     @Test

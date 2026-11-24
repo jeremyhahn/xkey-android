@@ -109,14 +109,28 @@ interface OathCredentialDao {
     /**
      * Update the HOTP counter for a credential.
      *
-     * Should be called after each successful HOTP code generation to advance
-     * the counter and keep the credential in sync with the verifying server.
+     * Sets an absolute value. Code generation advances the counter with
+     * [claimCounter] instead: a read followed by this write races with a
+     * concurrent generation and hands out one code twice.
      *
      * @param oathId The unique OATH identifier of the HOTP credential.
      * @param counter The new counter value.
      */
     @Query("UPDATE oath_credentials SET counter = :counter WHERE oath_id = :oathId")
     suspend fun updateCounter(oathId: String, counter: Long)
+
+    /**
+     * Claim the HOTP counter value [expected]: advance the stored counter
+     * by one only while it still is [expected]. One SQL statement, so two
+     * callers that read the same value cannot both claim it. A counter at
+     * Long.MAX_VALUE is never advanced: SQLite would store the sum as a REAL.
+     *
+     * @return 1 if the value was claimed, 0 if the counter moved on (or the
+     *         row is gone) since it was read, or the counter is exhausted
+     *         (Long.MAX_VALUE).
+     */
+    @Query("UPDATE oath_credentials SET counter = counter + 1 WHERE oath_id = :oathId AND counter = :expected AND counter < 9223372036854775807")
+    suspend fun claimCounter(oathId: String, expected: Long): Int
 
     // -------------------------------------------------------------------------
     // Delete Operations
