@@ -417,8 +417,192 @@ class KeyUseHandlerTest {
     }
 
     // ---------------------------------------------------------------------
+    // Parameter errors
+    // ---------------------------------------------------------------------
+
+    @Test
+    fun `an unknown key id answers KEY_NOT_FOUND for each method`() = runTest {
+        allRequests().forEach { (method, params) ->
+            val response = call(method, withField(params, "keyId", "no-such-key"))
+            assertCleanError(method, ErrorCodes.KEY_NOT_FOUND, response)
+        }
+    }
+
+    @Test
+    fun `an empty key id answers KEY_NOT_FOUND for each method`() = runTest {
+        allRequests().forEach { (method, params) ->
+            val response = call(method, withField(params, "keyId", ""))
+            assertCleanError(method, ErrorCodes.KEY_NOT_FOUND, response)
+        }
+    }
+
+    @Test
+    fun `a keystore key of the wrong type is refused for each method`() = runTest {
+        // The Keystore holds each key under its own class: an AES key is no
+        // private key and an EC key no secret key.
+        listOf(
+            MethodNames.LOCAL_DECRYPT to """{"keyId":"$HW_AES","ciphertext":"${b64(ByteArray(256) { 5 })}"}""",
+            MethodNames.LOCAL_SYMMETRIC_ENCRYPT to """{"keyId":"$HW_EC","plaintext":"$data"}""",
+            MethodNames.LOCAL_SYMMETRIC_DECRYPT to """{"keyId":"$HW_RSA","ciphertext":"${b64(hwCiphertext)}"}""",
+            MethodNames.LOCAL_HMAC to """{"keyId":"$HW_AES","data":"$data"}""",
+            MethodNames.LOCAL_ECDH to """{"keyId":"$HW_AES","peerPublicKey":"$peerKey"}"""
+        ).forEach { (method, params) ->
+            assertCleanError(method, ErrorCodes.KEY_NOT_FOUND, call(method, params))
+        }
+        // A secret key has no public key to export.
+        val export = call(MethodNames.LOCAL_GET_PUBLIC_KEY, """{"keyId":"$HW_AES","format":"der"}""")
+        assertCleanError(MethodNames.LOCAL_GET_PUBLIC_KEY, ErrorCodes.EXPORT_FAILED, export)
+    }
+
+    @Test
+    fun `a missing field answers INVALID_PARAMS for each method`() = runTest {
+        allRequests().forEach { (method, params) ->
+            JSONObject(params).keys().asSequence().toList()
+                // aad is optional, and format defaults to DER.
+                .filter { it != "aad" && it != "format" }
+                .forEach { field ->
+                    val response = call(method, JSONObject(params).apply { remove(field) }.toString())
+                    assertCleanError("$method without $field", ErrorCodes.INVALID_PARAMS, response)
+                }
+        }
+    }
+
+    @Test
+    fun `a request with no params answers INVALID_PARAMS for each method`() = runTest {
+        allRequests().forEach { (method, _) ->
+            val request = """{"id":1,"method":"$method"}"""
+            val response = JSONObject(
+                String(handler.handleRawRequest(request.toByteArray(Charsets.UTF_8)), Charsets.UTF_8)
+            )
+            assertCleanError(method, ErrorCodes.INVALID_PARAMS, response)
+        }
+    }
+
+    @Test
+    fun `found - symmetricDecrypt takes a payload sent as plaintext`() = runTest {
+        // LocalSymmetricParams reads plaintext ?: ciphertext ?: data for both
+        // directions, so a decrypt request naming its input "plaintext" is
+        // decrypted rather than refused.
+        val ciphertext = result(
+            call(MethodNames.LOCAL_SYMMETRIC_ENCRYPT, """{"keyId":"$SW_AES","plaintext":"$data"}""")
+        ).getString("ciphertext")
+        val decrypted = result(
+            call(MethodNames.LOCAL_SYMMETRIC_DECRYPT, """{"keyId":"$SW_AES","plaintext":"$ciphertext"}""")
+        )
+        assertEquals(data, decrypted.getString("plaintext"))
+    }
+
+    @Test
+    fun `found - symmetricEncrypt takes a payload sent as ciphertext`() = runTest {
+        val encrypted = result(
+            call(MethodNames.LOCAL_SYMMETRIC_ENCRYPT, """{"keyId":"$SW_AES","ciphertext":"$data"}""")
+        )
+        assertArrayEquals(unb64(data), javaxGcmDecrypt(aesMaterial, unb64(encrypted.getString("ciphertext")), null))
+    }
+
+    // ---------------------------------------------------------------------
+    // Attestation gate
+    // ---------------------------------------------------------------------
+
+    @Test
+    fun `a paired desktop with stale attestation is refused before any key operation`() = runTest {
+        gatedRequests().forEach { (method, params) ->
+            val response = servedBy(PEER_STALE) { call(method, params) }
+            assertCleanError(method, ErrorCodes.DEVICE_ATTESTATION_REQUIRED, response)
+        }
+        assertNoKeyOperation()
+    }
+
+    @Test
+    fun `an unreadable paired-device store is refused before any key operation`() = runTest {
+        gatedRequests().forEach { (method, params) ->
+            val response = servedBy(PEER_UNREADABLE) { call(method, params) }
+            assertCleanError(method, ErrorCodes.DEVICE_ATTESTATION_REQUIRED, response)
+        }
+        assertNoKeyOperation()
+    }
+
+    @Test
+    fun `a paired desktop with current attestation is served`() = runTest {
+        gatedRequests().forEach { (method, params) ->
+            servedBy(PEER_OK) { result(call(method, params)) }
+        }
+    }
+
+    @Test
+    fun `found - getPublicKey has no attestation gate`() = runTest {
+        // local.getPublicKey exports public material only and never checks
+        // the desktop's attestation: a stale or unreadable peer is answered.
+        listOf(PEER_STALE, PEER_UNREADABLE).forEach { peer ->
+            val response = servedBy(peer) {
+                call(MethodNames.LOCAL_GET_PUBLIC_KEY, """{"keyId":"$HW_EC","format":"der"}""")
+            }
+            assertEquals(peer, b64(publicDer), result(response).getString("publicKey"))
+        }
+    }
+
+    @Test
+    fun `found - an unpaired peer and a request with no peer pass the gate`() = runTest {
+        // isDeviceAttestationCurrent allows a peer with no paired record and
+        // a request with no session peer: no device policy applies to either.
+        gatedRequests().forEach { (method, params) ->
+            servedBy(PEER_UNPAIRED) { result(call(method, params)) }
+            result(call(method, params))
+        }
+    }
+
+    // ---------------------------------------------------------------------
     // Helpers
     // ---------------------------------------------------------------------
+
+    /** A Keystore-key request and, where the method has one, a software-key request per method. */
+    private fun gatedRequests(): List<Pair<String, String>> = listOf(
+        MethodNames.LOCAL_DECRYPT to """{"keyId":"$HW_RSA","ciphertext":"${b64(ByteArray(256) { 5 })}"}""",
+        MethodNames.LOCAL_SYMMETRIC_ENCRYPT to """{"keyId":"$HW_AES","plaintext":"$data","aad":"$data"}""",
+        MethodNames.LOCAL_SYMMETRIC_ENCRYPT to """{"keyId":"$SW_AES","plaintext":"$data","aad":"$data"}""",
+        MethodNames.LOCAL_SYMMETRIC_DECRYPT to """{"keyId":"$HW_AES","ciphertext":"${b64(hwCiphertext)}","aad":"$data"}""",
+        MethodNames.LOCAL_SYMMETRIC_DECRYPT to """{"keyId":"$SW_AES","ciphertext":"${b64(swCiphertext(unb64(data)))}","aad":"$data"}""",
+        MethodNames.LOCAL_HMAC to """{"keyId":"$HW_HMAC","data":"$data"}""",
+        MethodNames.LOCAL_HMAC to """{"keyId":"$SW_HMAC_256","data":"$data"}""",
+        MethodNames.LOCAL_ECDH to """{"keyId":"$HW_EC","peerPublicKey":"$peerKey"}"""
+    )
+
+    /** [gatedRequests] and local.getPublicKey. */
+    private fun allRequests(): List<Pair<String, String>> =
+        gatedRequests() + (MethodNames.LOCAL_GET_PUBLIC_KEY to """{"keyId":"$HW_EC","format":"der"}""")
+
+    /** A software-key ciphertext of [plaintext] under [aesMaterial], bound to `data` as AAD. */
+    private fun swCiphertext(plaintext: ByteArray): ByteArray {
+        val iv = ByteArray(12) { 1 }
+        return Cipher.getInstance("AES/GCM/NoPadding").run {
+            init(Cipher.ENCRYPT_MODE, SecretKeySpec(aesMaterial, "AES"), GCMParameterSpec(128, iv))
+            updateAAD(unb64(data))
+            iv + doFinal(plaintext)
+        }
+    }
+
+    private fun withField(params: String, field: String, value: String): String =
+        JSONObject(params).apply { put(field, value) }.toString()
+
+    /** [response] is an error with [code], and its message carries no exception text. */
+    private fun assertCleanError(what: String, code: Int, response: JSONObject) {
+        assertEquals("$what: $response", code, errorCode(response))
+        val message = errorMessage(response)
+        listOf("Internal error", "Exception", "Illegal", "javax.", "java.").forEach { text ->
+            assertFalse("$what: the message carries exception text: $message", message.contains(text))
+        }
+    }
+
+    /** No Keystore or software key was touched and no key use was audited. */
+    private fun assertNoKeyOperation() {
+        io.mockk.coVerify(exactly = 0) { keystore.rsaDecryptWithAlgorithm(any(), any()) }
+        io.mockk.coVerify(exactly = 0) { keystore.symmetricEncrypt(any(), any(), any()) }
+        io.mockk.coVerify(exactly = 0) { keystore.symmetricDecrypt(any(), any(), any()) }
+        io.mockk.coVerify(exactly = 0) { keystore.computeHMACWithAlgorithm(any(), any()) }
+        io.mockk.coVerify(exactly = 0) { keystore.performECDH(any(), any()) }
+        io.mockk.verify(exactly = 0) { anyConstructed<SoftwareKeyStore>().get(any()) }
+        assertTrue("no key-use entry: $inserted", inserted.none { it.success && it.keyId != null })
+    }
 
     private fun b64(bytes: ByteArray): String = Base64.getEncoder().encodeToString(bytes)
 
