@@ -45,6 +45,7 @@ import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.crypto.MlDsaParameterSet
 import com.automatethethings.xkey.crypto.PqcBacking
 import com.automatethethings.xkey.crypto.PqcHardware
+import com.automatethethings.xkey.crypto.PqcSoftwareKeyStore
 import com.automatethethings.xkey.crypto.KeystoreUserVerificationKey
 import com.automatethethings.xkey.crypto.SigningException
 import com.automatethethings.xkey.crypto.StrongBoxUnavailableException
@@ -1894,12 +1895,19 @@ class RequestHandler(
 
         val data = signParams.getDataBytes()
 
-        // Check if biometric is needed
-        val biometricRequired = if (signParams.userVerificationRequired) {
+        // Check if biometric is needed. A software ML-DSA key sealed with a
+        // user-authentication policy needs this request's own prompt whatever
+        // the request asks: software enforces its policy, not the Keystore.
+        val keyRequiresUserAuth = keystoreManager.pqcSoftwareKeyRequiresUserAuth(signParams.keyId)
+        val biometricRequired = if (keyRequiresUserAuth) {
+            true
+        } else if (signParams.userVerificationRequired) {
             sessionAuthManager?.isBiometricRequired(currentSettings, requestSessionId()) ?: true
         } else {
             false
         }
+        // When the user authenticated for this request, for the software key check.
+        var userAuthenticatedAt: Long? = null
 
         // The stored key as it was before the approval, so the key signed
         // with is the one the owner approved. A key with no row is held to
@@ -1917,6 +1925,7 @@ class RequestHandler(
                     showOnLockScreen = keyguardManager.isKeyguardLocked,
                     onLaunch = notice.onLaunch
                 )
+                if (keyRequiresUserAuth) userAuthenticatedAt = PqcSoftwareKeyStore.userAuthenticationTime()
                 sessionAuthManager?.recordAuthentication(requestSessionId())
                 approved = true
             } finally {
@@ -1952,13 +1961,13 @@ class RequestHandler(
                 val startTime = System.currentTimeMillis()
                 val signature = try {
                     if (signingKey != null) {
-                        signingKey.signMlDsa(data, set)
+                        signingKey.signMlDsa(data, set, userAuthenticatedAt)
                     } else {
                         val approvedDer = unlistedDer ?: throw ProtocolException(
                             "Key not found: ${signParams.keyId}",
                             errorCode = ErrorCodes.KEY_NOT_FOUND
                         )
-                        keystoreManager.signApprovedMlDsa(signingAlias, approvedDer, data, set)
+                        keystoreManager.signApprovedMlDsa(signingAlias, approvedDer, data, set, userAuthenticatedAt)
                     }
                 } catch (e: com.automatethethings.xkey.crypto.ApprovedKeyChangedException) {
                     throw ProtocolException(
@@ -5340,17 +5349,19 @@ private class ApprovedKey(
 
     /**
      * Signs [data] (pure ML-DSA) with the [set] key under [alias], while it
-     * is the approved key.
+     * is the approved key. [userAuthenticatedAt] is when the user
+     * authenticated for this use, or null; a software key's sealed policy
+     * checks it ([KeystoreManager.signApprovedMlDsa]).
      *
      * @throws ProtocolException as [sign] does.
      */
-    suspend fun signMlDsa(data: ByteArray, set: MlDsaParameterSet): ByteArray {
+    suspend fun signMlDsa(data: ByteArray, set: MlDsaParameterSet, userAuthenticatedAt: Long?): ByteArray {
         val approvedDer = snapshot.publicKeyDer ?: throw ProtocolException(
             "Key ${row.keyId} had no public key when it was approved",
             errorCode = ErrorCodes.KEY_NOT_FOUND
         )
         return try {
-            keystore.signApprovedMlDsa(snapshot.alias, approvedDer, data, set)
+            keystore.signApprovedMlDsa(snapshot.alias, approvedDer, data, set, userAuthenticatedAt)
         } catch (e: com.automatethethings.xkey.crypto.ApprovedKeyChangedException) {
             throw ProtocolException(
                 "Key ${row.keyId} is not the key that was approved",

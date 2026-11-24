@@ -16,6 +16,7 @@
 package com.automatethethings.xkey.crypto
 
 import android.content.Context
+import android.os.SystemClock
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.DataInputStream
@@ -46,8 +47,10 @@ class PqcKeyRecordException(message: String) : GeneralSecurityException(message)
  * AES-256-GCM key ([KeystoreAeadCipher], alias [WRAP_KEY_ALIAS]) before it
  * reaches the disk. The sealed plaintext binds the key to its alias and
  * parameter set, so a record copied under another alias, or holding another
- * record's sealed blob, is refused. Every plaintext copy this class makes is
- * zeroed after use; no key byte is logged.
+ * record's sealed blob, is refused. The sealed plaintext also carries the
+ * key's user-authentication policy, which [sign] enforces for every caller.
+ * Every plaintext copy this class makes is zeroed after use; no key byte is
+ * logged.
  *
  * Signatures are pure ML-DSA (FIPS 204, empty context) over the message.
  */
@@ -68,13 +71,17 @@ class PqcSoftwareKeyStore(
      * its SubjectPublicKeyInfo DER.
      */
     @Synchronized
-    fun generate(alias: String, set: MlDsaParameterSet): ByteArray {
+    fun generate(
+        alias: String,
+        set: MlDsaParameterSet,
+        authDurationSeconds: Int = NO_USER_AUTHENTICATION
+    ): ByteArray {
         val generator = MLDSAKeyPairGenerator()
         generator.init(MLDSAKeyGenerationParameters(random, bcParameters(set)))
         val pair = generator.generateKeyPair()
         val spki = SubjectPublicKeyInfoFactory.createSubjectPublicKeyInfo(pair.public).encoded
         val pkcs8 = PrivateKeyInfoFactory.createPrivateKeyInfo(pair.private).encoded
-        val plaintext = sealedPlaintext(alias, set, pkcs8)
+        val plaintext = sealedPlaintext(alias, set, authDurationSeconds.coerceAtLeast(NO_USER_AUTHENTICATION), pkcs8)
         pkcs8.fill(0)
         val sealed = try {
             cipher.encrypt(plaintext)
@@ -98,23 +105,51 @@ class PqcSoftwareKeyStore(
     fun parameterSet(alias: String): MlDsaParameterSet? = record(alias)?.set
 
     /**
-     * Signs [data] with the key under [alias].
+     * The user-authentication policy sealed with the key under [alias]:
+     * [NO_USER_AUTHENTICATION], 0 (every use) or a window in seconds; null
+     * when there is no such key.
      *
+     * @throws PqcKeyRecordException when the record does not open for [alias].
+     */
+    @Synchronized
+    fun authDurationSeconds(alias: String): Int? {
+        val record = record(alias) ?: return null
+        var plaintext: ByteArray? = null
+        try {
+            plaintext = cipher.decrypt(record.sealed)
+            return readSealedHeader(ByteBuffer.wrap(plaintext), alias, record.set)
+        } catch (e: GeneralSecurityException) {
+            if (e is PqcKeyRecordException) throw e
+            throw PqcKeyRecordException("ML-DSA record does not open")
+        } catch (e: RuntimeException) {
+            throw PqcKeyRecordException("ML-DSA record is damaged")
+        } finally {
+            plaintext?.fill(0)
+        }
+    }
+
+    /**
+     * Signs [data] with the key under [alias], only when the key's sealed
+     * user-authentication policy is met: a key made with a policy signs only
+     * when [userAuthenticatedAt] (a [userAuthenticationTime] the caller took
+     * when the user authenticated) is recent enough. This is the one check
+     * for every software ML-DSA signature, whoever the caller is.
+     *
+     * @throws BiometricRequiredException when the key needs a user
+     *   authentication and [userAuthenticatedAt] is null, too old or ahead
+     *   of the clock.
      * @throws PqcKeyRecordException when there is no such key, or its record
      *   was sealed for another alias or set.
      */
     @Synchronized
-    fun sign(alias: String, data: ByteArray): ByteArray {
+    fun sign(alias: String, data: ByteArray, userAuthenticatedAt: Long? = null): ByteArray {
         val record = record(alias) ?: throw PqcKeyRecordException("No ML-DSA key under this alias")
         val plaintext = cipher.decrypt(record.sealed)
         var pkcs8: ByteArray? = null
         try {
             val buffer = ByteBuffer.wrap(plaintext)
-            val sealedAlias = readField(buffer)
-            val sealedSet = readField(buffer)
-            if (sealedAlias != alias || sealedSet != record.set.wireName) {
-                throw PqcKeyRecordException("ML-DSA record was sealed for another key")
-            }
+            val authDurationSeconds = readSealedHeader(buffer, alias, record.set)
+            requireUserAuthentication(authDurationSeconds, userAuthenticatedAt)
             pkcs8 = ByteArray(buffer.remaining()).also { buffer.get(it) }
             val key = PrivateKeyFactory.createKey(pkcs8) as? MLDSAPrivateKeyParameters
                 ?: throw PqcKeyRecordException("ML-DSA record holds another key type")
@@ -167,7 +202,7 @@ class PqcSoftwareKeyStore(
 
     /**
      * The on-disk record: the alias, set and public key in the clear, and the
-     * sealed `alias || set || PKCS#8`.
+     * sealed `alias || set || user-authentication policy || PKCS#8`.
      */
     @Suppress("ArrayInDataClass")
     internal data class Record(
@@ -241,9 +276,53 @@ class PqcSoftwareKeyStore(
         internal fun clearSharedForTest() {
             shared = null
         }
+
+        /** The policy of a key that signs with no user authentication. */
+        const val NO_USER_AUTHENTICATION = -1
+
+        /**
+         * How old the authentication passed for a per-use key (policy 0) may
+         * be: the prompt of the request that signs, not an earlier one.
+         */
+        internal const val PER_USE_WINDOW_MS = 30_000L
+
+        /** The clock [userAuthenticationTime] and [sign] read; a test sets its own. */
+        @Volatile
+        internal var clock: () -> Long = { SystemClock.elapsedRealtime() }
+
+        /** Now, as [sign] reads a caller's user authentication time. */
+        fun userAuthenticationTime(): Long = clock()
+
         private const val DIR = "pqc_keys"
         private const val MAX_FIELD = 64 * 1024
-        private val MAGIC = byteArrayOf('X'.code.toByte(), 'P'.code.toByte(), 'Q'.code.toByte(), '1'.code.toByte())
+        // Version 2 seals the user-authentication policy; version 1 records
+        // (never released) carry none and are refused, not migrated.
+        private val MAGIC = byteArrayOf('X'.code.toByte(), 'P'.code.toByte(), 'Q'.code.toByte(), '2'.code.toByte())
+
+        /** Throws unless [userAuthenticatedAt] meets [authDurationSeconds]. */
+        private fun requireUserAuthentication(authDurationSeconds: Int, userAuthenticatedAt: Long?) {
+            if (authDurationSeconds < 0) return
+            val at = userAuthenticatedAt ?: throw BiometricRequiredException()
+            val windowMs = if (authDurationSeconds == 0) PER_USE_WINDOW_MS else authDurationSeconds * 1000L
+            val age = clock() - at
+            if (age < 0 || age > windowMs) throw BiometricRequiredException()
+        }
+
+        /**
+         * Reads `alias || set || policy` off [buffer], leaving it at the
+         * PKCS#8, and returns the policy.
+         *
+         * @throws PqcKeyRecordException when the plaintext was sealed for
+         *   another alias or set.
+         */
+        private fun readSealedHeader(buffer: ByteBuffer, alias: String, set: MlDsaParameterSet): Int {
+            val sealedAlias = readField(buffer)
+            val sealedSet = readField(buffer)
+            if (sealedAlias != alias || sealedSet != set.wireName) {
+                throw PqcKeyRecordException("ML-DSA record was sealed for another key")
+            }
+            return buffer.int
+        }
 
         internal fun bcParameters(set: MlDsaParameterSet): MLDSAParameters = when (set) {
             MlDsaParameterSet.ML_DSA_44 -> MLDSAParameters.ml_dsa_44
@@ -251,13 +330,19 @@ class PqcSoftwareKeyStore(
             MlDsaParameterSet.ML_DSA_87 -> MLDSAParameters.ml_dsa_87
         }
 
-        /** `len || alias || len || set || pkcs8`, in one array the caller zeroes. */
-        private fun sealedPlaintext(alias: String, set: MlDsaParameterSet, pkcs8: ByteArray): ByteArray {
+        /** `len || alias || len || set || policy || pkcs8`, in one array the caller zeroes. */
+        private fun sealedPlaintext(
+            alias: String,
+            set: MlDsaParameterSet,
+            authDurationSeconds: Int,
+            pkcs8: ByteArray
+        ): ByteArray {
             val aliasBytes = alias.toByteArray(Charsets.UTF_8)
             val setBytes = set.wireName.toByteArray(Charsets.UTF_8)
-            val buffer = ByteBuffer.allocate(4 + aliasBytes.size + 4 + setBytes.size + pkcs8.size)
+            val buffer = ByteBuffer.allocate(4 + aliasBytes.size + 4 + setBytes.size + 4 + pkcs8.size)
             buffer.putInt(aliasBytes.size).put(aliasBytes)
             buffer.putInt(setBytes.size).put(setBytes)
+            buffer.putInt(authDurationSeconds)
             buffer.put(pkcs8)
             return buffer.array()
         }

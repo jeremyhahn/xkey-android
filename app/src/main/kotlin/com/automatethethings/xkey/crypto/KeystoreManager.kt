@@ -1446,6 +1446,10 @@ class KeystoreManager(
      * @throws ApprovedKeyChangedException if the key under [alias] is not the approved one.
      * @throws UnsupportedAlgorithmException if the key is not a [set] key, or
      *   no hardware backend can sign with it.
+     * @param userAuthenticatedAt When the user last authenticated for this
+     *   use ([PqcSoftwareKeyStore.userAuthenticationTime]), or null. A
+     *   software key checks it against its sealed policy; the Keystore
+     *   enforces a hardware key's own.
      * @throws BiometricRequiredException if the key requires user authentication.
      * @throws SigningException if signing fails.
      */
@@ -1453,7 +1457,8 @@ class KeystoreManager(
         alias: String,
         approvedPublicKeyDer: ByteArray,
         data: ByteArray,
-        set: MlDsaParameterSet
+        set: MlDsaParameterSet,
+        userAuthenticatedAt: Long? = null
     ): ByteArray = withAliasGate(alias) {
         val current = publicKeyDERAt(alias) ?: throw KeyNotFoundException(alias)
         if (!current.contentEquals(approvedPublicKeyDer)) throw ApprovedKeyChangedException(alias)
@@ -1462,7 +1467,7 @@ class KeystoreManager(
         }
         if (!keyStore.containsAlias(alias)) {
             try {
-                return@withAliasGate pqcStore.sign(alias, data)
+                return@withAliasGate pqcStore.sign(alias, data, userAuthenticatedAt)
             } catch (e: PqcKeyRecordException) {
                 throw SigningException("Signing with ${set.wireName} failed", e)
             }
@@ -1502,7 +1507,7 @@ class KeystoreManager(
             if (keyStore.containsAlias(alias)) keyStore.deleteEntry(alias)
             pqcStore.delete(alias)
             when (backing) {
-                PqcBacking.SOFTWARE -> pqcStore.generate(alias, set)
+                PqcBacking.SOFTWARE -> pqcStore.generate(alias, set, authDurationSeconds)
                 PqcBacking.HARDWARE -> {
                     val backend = PqcHardware.backend?.takeIf { set in it.supportedParameterSets() }
                         ?: throw UnsupportedAlgorithmException(set.wireName)
@@ -2029,6 +2034,17 @@ class KeystoreManager(
 
     /** Whether [keyId] is a software ML-DSA key ([PqcSoftwareKeyStore]). */
     fun pqcSoftwareKeyExists(keyId: String): Boolean = pqcStore.contains(buildGeneralAlias(keyId))
+
+    /**
+     * Whether [keyId] is a software ML-DSA key sealed with a user-authentication
+     * policy, so its signer must authenticate the user first whatever the
+     * request asks. A record that does not open counts as requiring it.
+     */
+    fun pqcSoftwareKeyRequiresUserAuth(keyId: String): Boolean = try {
+        (pqcStore.authDurationSeconds(buildGeneralAlias(keyId)) ?: PqcSoftwareKeyStore.NO_USER_AUTHENTICATION) >= 0
+    } catch (e: PqcKeyRecordException) {
+        true
+    }
 
     /**
      * Delete a general-purpose key from the keystore.
