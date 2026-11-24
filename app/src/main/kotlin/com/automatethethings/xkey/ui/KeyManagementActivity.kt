@@ -971,18 +971,11 @@ class KeyManagementActivity : AppCompatActivity() {
     private data class AlgorithmOption(val display: String, val internal: String)
     private data class PurposeOption(val display: String, val keyType: String, val algorithms: List<AlgorithmOption>)
 
-    private fun buildTlsAlgorithms(): List<AlgorithmOption> {
-        val list = mutableListOf(
-            AlgorithmOption("ECDSA P-256", "ES256"),
-            AlgorithmOption("ECDSA P-384", "ES384"),
-            AlgorithmOption("RSA 2048", "RS256"),
-            AlgorithmOption("RSA 4096", "RS512")
-        )
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            list.add(AlgorithmOption("Ed25519", "Ed25519"))
-        }
-        return list
-    }
+    private fun List<KeyCreationAlgorithms.Option>.asOptions(): List<AlgorithmOption> =
+        map { AlgorithmOption(it.display, it.internal) }
+
+    private fun buildTlsAlgorithms(): List<AlgorithmOption> =
+        KeyCreationAlgorithms.tls(Build.VERSION.SDK_INT).asOptions()
 
     private fun buildSshAlgorithms(): List<AlgorithmOption> = buildTlsAlgorithms()
 
@@ -1019,25 +1012,16 @@ class KeyManagementActivity : AppCompatActivity() {
         dialogLayout.addView(purposeLabel)
 
         val purposes = listOf(
-            PurposeOption(getString(R.string.key_create_purpose_signing), "signing", listOf(
-                AlgorithmOption("ECDSA P-256", "ES256"),
-                AlgorithmOption("ECDSA P-384", "ES384"),
-                AlgorithmOption("RSA 2048", "RS256")
-            )),
+            PurposeOption(getString(R.string.key_create_purpose_signing), "signing",
+                KeyCreationAlgorithms.signing(Build.VERSION.SDK_INT).asOptions()),
             PurposeOption(getString(R.string.key_create_purpose_tls), "tls", buildTlsAlgorithms()),
             PurposeOption(getString(R.string.key_create_purpose_ssh), "ssh", buildSshAlgorithms()),
-            PurposeOption(getString(R.string.key_create_purpose_encryption), "encryption", listOf(
-                AlgorithmOption("RSA-OAEP 2048", "RSA-OAEP-2048"),
-                AlgorithmOption("RSA-OAEP 4096", "RSA-OAEP-4096")
-            )),
-            PurposeOption(getString(R.string.key_create_purpose_secret), "secret", listOf(
-                AlgorithmOption("AES-128", "AES-128"),
-                AlgorithmOption("AES-256", "AES-256")
-            )),
-            PurposeOption(getString(R.string.key_create_purpose_hmac), "hmac", listOf(
-                AlgorithmOption("HMAC-SHA256", "HMAC-SHA256"),
-                AlgorithmOption("HMAC-SHA512", "HMAC-SHA512")
-            ))
+            PurposeOption(getString(R.string.key_create_purpose_encryption), "encryption",
+                KeyCreationAlgorithms.encryption().asOptions()),
+            PurposeOption(getString(R.string.key_create_purpose_secret), "secret",
+                KeyCreationAlgorithms.secret().asOptions()),
+            PurposeOption(getString(R.string.key_create_purpose_hmac), "hmac",
+                KeyCreationAlgorithms.hmac().asOptions())
         )
 
         val purposeSpinner = Spinner(this)
@@ -1137,7 +1121,7 @@ class KeyManagementActivity : AppCompatActivity() {
                         // Generated at the requested modulus size. The size is
                         // still read back off the key rather than assumed, so a
                         // row can never describe something that was not produced.
-                        val requestedBits = if (algorithm == "RSA-OAEP-4096") 4096 else 2048
+                        val requestedBits = KeyCreationAlgorithms.oaepModulusBits(algorithm)
                         publicKeyDer = keystoreManager.generateRSAEncryptionKey(
                             keyId,
                             requestedBits,
@@ -1146,15 +1130,11 @@ class KeyManagementActivity : AppCompatActivity() {
                         keySizeBits = actualKeySizeBits(publicKeyDer) ?: requestedBits
                     }
                     "secret" -> {
-                        keySizeBits = when (algorithm) {
-                            "AES-128" -> 128
-                            "AES-256" -> 256
-                            else -> 256
-                        }
+                        keySizeBits = KeyCreationAlgorithms.aesKeyBits(algorithm)
                         keystoreManager.generateSymmetricKey(keyId, keySizeBits, authDuration)
                     }
                     "hmac" -> {
-                        keySizeBits = if (algorithm.contains("512")) 512 else 256
+                        keySizeBits = KeyCreationAlgorithms.hmacKeyBits(algorithm)
                         keystoreManager.generateHMACKey(keyId, algorithm)
                     }
                 }

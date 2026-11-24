@@ -986,9 +986,11 @@ class KeystoreManager(
         alias: String,
         algorithm: String,
         authDurationSeconds: Int,
-        preferStrongBox: Boolean
+        preferStrongBoxForCurve: Boolean
     ): java.security.KeyPair {
         val curve = getECCurve(algorithm)
+        // StrongBox guarantees P-256 only: P-384 and P-521 go to the TEE.
+        val preferStrongBox = preferStrongBoxForCurve && curve == EC_CURVE_P256
         val digest = getDigestProperty(algorithm)
 
         // PURPOSE_AGREE_KEY (API 31+) is required for local.ecdh; Keystore
@@ -1239,8 +1241,8 @@ class KeystoreManager(
     ) {
         val alias = buildGeneralAlias(keyId)
 
-        if (keySizeBits != 128 && keySizeBits != 256) {
-            throw KeyGenerationException("AES key size must be 128 or 256 bits, got $keySizeBits")
+        if (keySizeBits != 128 && keySizeBits != 192 && keySizeBits != 256) {
+            throw KeyGenerationException("AES key size must be 128, 192 or 256 bits, got $keySizeBits")
         }
 
         // Delete existing key if present
@@ -1292,6 +1294,7 @@ class KeystoreManager(
 
         val jcaAlgorithm = when (algorithm) {
             "HMAC-SHA256" -> KeyProperties.KEY_ALGORITHM_HMAC_SHA256
+            "HMAC-SHA384" -> KeyProperties.KEY_ALGORITHM_HMAC_SHA384
             "HMAC-SHA512" -> KeyProperties.KEY_ALGORITHM_HMAC_SHA512
             else -> throw UnsupportedAlgorithmException(algorithm)
         }
@@ -1599,13 +1602,18 @@ class KeystoreManager(
             // Determine HMAC algorithm from key algorithm
             val macAlgorithm = when (secretKey.algorithm) {
                 KeyProperties.KEY_ALGORITHM_HMAC_SHA256, "HmacSHA256" -> "HmacSHA256"
+                KeyProperties.KEY_ALGORITHM_HMAC_SHA384, "HmacSHA384" -> "HmacSHA384"
                 KeyProperties.KEY_ALGORITHM_HMAC_SHA512, "HmacSHA512" -> "HmacSHA512"
                 else -> "HmacSHA256"
             }
 
             val mac = Mac.getInstance(macAlgorithm)
             mac.init(secretKey)
-            val name = if (macAlgorithm == "HmacSHA512") "HMAC-SHA512" else "HMAC-SHA256"
+            val name = when (macAlgorithm) {
+                "HmacSHA512" -> "HMAC-SHA512"
+                "HmacSHA384" -> "HMAC-SHA384"
+                else -> "HMAC-SHA256"
+            }
             return HmacResult(mac.doFinal(data), name)
         } catch (e: Exception) {
             throw HMACException("Failed to compute HMAC", e)
