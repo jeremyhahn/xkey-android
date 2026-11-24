@@ -121,7 +121,7 @@ audited here.
 
 | Exception | Meaning |
 |-----------|---------|
-| `PasswordStoreLockedException` | The store is locked. `local.syncPasswords` answers `ErrorCodes.PASSWORD_STORE_LOCKED` (-32040); `RemoteSyncClient.syncAll()` skips the password leg |
+| `PasswordStoreLockedException` | The store is locked. `local.syncPasswords` answers `ErrorCodes.PASSWORD_STORE_LOCKED` (-32057); `RemoteSyncClient.syncAll()` skips the password leg |
 | `PasswordVaultFactorsUnreadableException` | The factor file exists but cannot be read; never taken as "no factor", so every gate stays shut |
 | `VaultNotInitializedException` | `unlock` or `lock` with no factor enrolled |
 | `VaultCredentialRejectedException` | No enrolled factor matched; the failure is counted. Carries no detail |

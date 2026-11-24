@@ -471,33 +471,33 @@ object ErrorCodes {
     const val INTERNAL_ERROR = -32603
 
     // xKey-specific errors
-    const val KEY_NOT_FOUND = -32001
-    const val USER_CANCELLED = -32002
-    const val BIOMETRIC_FAILED = -32003
-    const val BIOMETRIC_NOT_ENROLLED = -32004
-    const val BIOMETRIC_LOCKOUT = -32005
-    const val KEY_GENERATION_FAILED = -32006
-    const val SIGNING_FAILED = -32007
-    const val ENCRYPTION_FAILED = -32008
-    const val DECRYPTION_FAILED = -32009
-    const val INVALID_ALGORITHM = -32010
-    const val STRONGBOX_UNAVAILABLE = -32011
-    const val SESSION_EXPIRED = -32012
-    const val RATE_LIMITED = -32013
+    const val KEY_NOT_FOUND = -32000
+    const val USER_CANCELLED = -32001
+    const val BIOMETRIC_FAILED = -32002
+    const val BIOMETRIC_NOT_ENROLLED = -32041
+    const val BIOMETRIC_LOCKOUT = -32042
+    const val KEY_GENERATION_FAILED = -32043
+    const val SIGNING_FAILED = -32044
+    const val ENCRYPTION_FAILED = -32045
+    const val DECRYPTION_FAILED = -32013
+    const val INVALID_ALGORITHM = -32004
+    const val STRONGBOX_UNAVAILABLE = -32046
+    const val SESSION_EXPIRED = -32047
+    const val RATE_LIMITED = -32048
     const val HMAC_FAILED = -32014
     const val ECDH_FAILED = -32015
-    const val EXPORT_FAILED = -32016
-    const val ATTESTATION_FAILED = -32023
-    const val BACKEND_DENIED = -32018
-    const val OPERATION_DENIED = -32019
-    const val STORAGE_FULL = -32020
-    const val KEY_EXISTS = -32021
-    const val UNSUPPORTED_FORMAT = -32022
+    const val EXPORT_FAILED = -32049
+    const val ATTESTATION_FAILED = -32009
+    const val BACKEND_DENIED = -32008
+    const val OPERATION_DENIED = -32011
+    const val STORAGE_FULL = -32006
+    const val KEY_EXISTS = -32003
+    const val UNSUPPORTED_FORMAT = -32016
     const val PAIRING_REJECTED = -32017
-    const val DEVICE_ATTESTATION_REQUIRED = -32024
+    const val DEVICE_ATTESTATION_REQUIRED = -32050
 
     /** A request arrived before the peer completed pairing.confirm. */
-    const val PAIRING_REQUIRED = -32025
+    const val PAIRING_REQUIRED = -32051
 
     /**
      * A method family exists but its collaborator was not supplied on this
@@ -506,7 +506,7 @@ object ErrorCodes {
      * Distinct from [INTERNAL_ERROR], which means a bug: a peer seeing this
      * knows the feature is unavailable rather than that the phone failed.
      *
-     * Numbered above the shared -32001..-32034 block. It originally reused
+     * Takes the desktop's number, past the PIV and PIN codes. It originally reused
      * -32026, which is [PIV_SLOT_NOT_FOUND] here and `ErrorCodePIVSlotNotFound`
      * on the desktop, so a PIV handler refusing for want of a key manager was
      * indistinguishable on the wire from one reporting an empty slot.
@@ -549,16 +549,16 @@ object ErrorCodes {
     // credential is INVALID_PARAMS and an unknown ID is KEY_NOT_FOUND.
 
     /** PasswordStoreUnlock arrived before any vault factor was enrolled. */
-    const val VAULT_NOT_INITIALIZED = -32038
+    const val VAULT_NOT_INITIALIZED = -32055
 
     /**
      * The credential unwrapped no enrolled factor. The message never says which
      * part was wrong, so a guesser learns nothing from the refusal.
      */
-    const val VAULT_CREDENTIAL_REJECTED = -32039
+    const val VAULT_CREDENTIAL_REJECTED = -32056
 
     /** The vault is initialized and locked; unlock it before using the store. */
-    const val PASSWORD_STORE_LOCKED = -32040
+    const val PASSWORD_STORE_LOCKED = -32057
 
     // PIV errors
     const val PIV_SLOT_NOT_FOUND = -32026
@@ -567,9 +567,9 @@ object ErrorCodes {
     const val PIV_INVALID_SLOT = -32029
 
     // PIN errors
-    const val PIN_REQUIRED = -32032
-    const val PIN_INCORRECT = -32033
-    const val PIN_LOCKED = -32034
+    const val PIN_REQUIRED = -32052
+    const val PIN_INCORRECT = -32053
+    const val PIN_LOCKED = -32054
 }
 
 /**

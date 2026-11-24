@@ -204,9 +204,9 @@ class PivHandlerTest {
 
     @Test
     fun `PIN error codes have expected values`() {
-        assertEquals(-32032, ErrorCodes.PIN_REQUIRED)
-        assertEquals(-32033, ErrorCodes.PIN_INCORRECT)
-        assertEquals(-32034, ErrorCodes.PIN_LOCKED)
+        assertEquals(-32052, ErrorCodes.PIN_REQUIRED)
+        assertEquals(-32053, ErrorCodes.PIN_INCORRECT)
+        assertEquals(-32054, ErrorCodes.PIN_LOCKED)
     }
 
     // -------------------------------------------------------------------------

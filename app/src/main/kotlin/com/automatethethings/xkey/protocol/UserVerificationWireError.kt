@@ -21,8 +21,8 @@ import com.automatethethings.xkey.credential.UserVerificationRequiredException
  * user verification, none took place, and strict user verification is on
  * (see `UserVerificationCompliance.enforce`).
  *
- * The code is [ErrorCodes.BIOMETRIC_FAILED] (-32003). SPEC.md names no code
- * for this case, and no new one is added. -32003 is what dispatch already
+ * The code is [ErrorCodes.BIOMETRIC_FAILED] (-32002). SPEC.md names no code
+ * for this case, and no new one is added. -32002 is what dispatch already
  * sends for `BiometricRequiredException` and `BiometricUnavailableException`,
  * the other "verification was required and did not happen" cases, so a peer
  * tells its user the same thing: verify, or enrol a biometric, on the phone.

@@ -181,7 +181,7 @@ the counts and the `remote` array.
 - A locked password vault throws `PasswordStoreLockedException` before anything
   is read or written. `syncAll()` catches it, logs it and still syncs the other
   stores. `handleSyncPasswords` answers `ErrorCodes.PASSWORD_STORE_LOCKED`
-  (-32040).
+  (-32057).
 - Any other failure in an inbound sync handler answers
   `ErrorCodes.INTERNAL_ERROR` with the method name in the message.
 - `markSynced()` logs and ignores a failure to record the sync time.
