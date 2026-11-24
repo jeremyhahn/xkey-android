@@ -37,13 +37,14 @@ renamed into place.
 The file is:
 
 ```
-"XPQ1" | UTF alias | UTF set name | int len | SPKI DER | int len | sealed
+"XPQ2" | UTF alias | UTF set name | int len | SPKI DER | int len | sealed
 ```
 
 `sealed` is `KeystoreAeadCipher("xkey_pqc_wrap").encrypt(plaintext)`
 (AES-256-GCM, IV prepended), where the plaintext is
-`int len | alias | int len | set name | PKCS#8 private key`. The wrap key is
-non-exportable and lives in AndroidKeyStore.
+`int len | alias | int len | set name | int auth policy | PKCS#8 private key`.
+The wrap key is non-exportable and lives in AndroidKeyStore. A record in the
+earlier `XPQ1` format, which had no auth policy, is refused, not migrated.
 
 - No private key byte is written unsealed or logged. Every plaintext copy the
   store makes (the PKCS#8 encoding, the sealed plaintext, the opened
@@ -54,6 +55,22 @@ non-exportable and lives in AndroidKeyStore.
   record and that the private key is an ML-DSA key of that set. A record that
   holds another record's sealed blob is refused with `PqcKeyRecordException`.
 - The fields are capped at 64 KiB, and trailing bytes are refused.
+
+The auth policy is the `authDurationSeconds` the key was made with, sealed
+with the private key so no caller can drop it: -1 is no user authentication,
+0 is per use, and a positive value is a window in seconds. `sign` takes the
+time of the caller's last user authentication
+(`PqcSoftwareKeyStore.userAuthenticationTime()`, elapsed-realtime) and
+refuses with `BiometricRequiredException` before it opens the private key
+when that time is missing, in the future, or older than the window (a
+per-use key allows 30 seconds, the time between the prompt and the
+signature). `local.sign` prompts for every software key whose policy is not
+-1, whatever the request's flags, and passes the prompt's time. One store
+serves the process: only `PqcSoftwareKeyStore.registerShared` builds one,
+and `KeystoreAeadCipher` creates the wrap key under a process-wide lock per
+alias, so two first uses never make two wrap keys and orphan a record. A
+full sync keeps a row whose record is live (`keyMaterialExists`), and
+deleting a row deletes its record.
 
 ## Backing rules
 
