@@ -557,6 +557,55 @@ class PasswordSyncTest {
         assertEquals(SyncEngine.ItemCounts(added = 1, updated = 0, skipped = 0), counts)
     }
 
+    // -------------------------------------------------------------------------
+    // Clock skew: a peer clock far ahead does not pin an entry
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun `a peer copy dated a year ahead is stored at the phone's time and does not override a later phone edit`() = runTest {
+        val yearAhead = iso(now + 365 * DAY)
+
+        val first = sync.mergeWithDetail(incoming(id = "remote-1", password = "desk", at = yearAhead))
+
+        assertEquals(SyncEngine.ItemCounts(added = 1, updated = 0, skipped = 0), first.counts)
+        assertEquals(1, first.clamped)
+        assertEquals(now, dao.rows.getValue("remote-1").updatedAt)
+
+        now += MINUTE
+        assertTrue(repository.updateFields("remote-1", PasswordPatch(password = "phone", updatedAt = now)))
+        now += MINUTE
+
+        val second = sync.mergeWithDetail(incoming(id = "remote-1", password = "desk", at = yearAhead))
+
+        assertEquals(SyncEngine.ItemCounts(added = 0, updated = 0, skipped = 1), second.counts)
+        assertEquals(1, second.clamped)
+        assertEquals("phone", repository.get("remote-1")!!.password)
+    }
+
+    @Test
+    fun `a peer copy dated a year ahead does not restore an entry the phone deleted`() = runTest {
+        storeLocal(id = "remote-1")
+        assertTrue(repository.delete("remote-1"))
+        now += MINUTE
+
+        val result = sync.mergeWithDetail(incoming(id = "remote-1", at = iso(now + 365 * DAY)))
+
+        assertEquals(SyncEngine.ItemCounts(added = 0, updated = 0, skipped = 1), result.counts)
+        assertEquals(1, result.clamped)
+        assertFalse(dao.rows.containsKey("remote-1"))
+    }
+
+    @Test
+    fun `a peer copy within the skew bound is compared as sent`() = runTest {
+        storeLocal(id = "remote-1")
+
+        val result = sync.mergeWithDetail(incoming(id = "remote-1", password = "desk", at = iso(now + 4 * MINUTE)))
+
+        assertEquals(SyncEngine.ItemCounts(added = 0, updated = 1, skipped = 0), result.counts)
+        assertEquals(0, result.clamped)
+        assertEquals(now + 4 * MINUTE, dao.rows.getValue("remote-1").updatedAt)
+    }
+
     private companion object {
         const val MINUTE = 60_000L
         const val DAY = 24 * 60 * MINUTE
