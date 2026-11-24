@@ -73,7 +73,7 @@ class OathRepositoryAuditTest {
         // A relaxed mock returns 0, which reads as a lost counter race.
         coEvery { dao.claimCounter(any(), any()) } returns 1
         // Likewise a delete count of 0 reads as a delete that removed nothing.
-        coEvery { dao.deleteByOathId(any()) } returns 1
+        coEvery { dao.deleteAndRecordDeletion(any(), any()) } returns 1
 
         val secretManager = mockk<OathSecretManager>()
         every { secretManager.encryptSecret(any()) } answers { firstArg() }
@@ -117,7 +117,7 @@ class OathRepositoryAuditTest {
         val deleted = repository.deleteCredential(HOTP_ID)
 
         assertTrue(deleted)
-        coVerify(exactly = 1) { dao.deleteByOathId(HOTP_ID) }
+        coVerify(exactly = 1) { dao.deleteAndRecordDeletion(HOTP_ID, any()) }
         verify(exactly = 1) { AuditLogger.logOathCredentialDeleted(HOTP_ID, ISSUER, ACCOUNT) }
         verify(exactly = 1) { AuditLogger.logOathCredentialDeleted(any(), any(), any()) }
     }
@@ -127,7 +127,7 @@ class OathRepositoryAuditTest {
         val deleted = repository.deleteCredential("nope")
 
         assertFalse(deleted)
-        coVerify(exactly = 0) { dao.deleteByOathId(any()) }
+        coVerify(exactly = 0) { dao.deleteAndRecordDeletion(any(), any()) }
         verify(exactly = 0) { AuditLogger.logOathCredentialDeleted(any(), any(), any()) }
     }
 
@@ -136,7 +136,7 @@ class OathRepositoryAuditTest {
         // Both calls read the stored credential before either deletes it (a
         // phone delete racing local.oathRemove); the row is removed once.
         var rowsLeft = 1
-        coEvery { dao.deleteByOathId(HOTP_ID) } coAnswers {
+        coEvery { dao.deleteAndRecordDeletion(HOTP_ID, any()) } coAnswers {
             yield()
             if (rowsLeft > 0) { rowsLeft--; 1 } else 0
         }
@@ -148,7 +148,7 @@ class OathRepositoryAuditTest {
         advanceUntilIdle()
 
         coVerify(exactly = 2) { dao.getByOathId(HOTP_ID) }
-        coVerify(exactly = 2) { dao.deleteByOathId(HOTP_ID) }
+        coVerify(exactly = 2) { dao.deleteAndRecordDeletion(HOTP_ID, any()) }
         assertEquals(true, first)
         assertEquals(false, second)
         verify(exactly = 1) { AuditLogger.logOathCredentialDeleted(HOTP_ID, ISSUER, ACCOUNT) }
@@ -211,7 +211,7 @@ class OathRepositoryAuditTest {
     fun `a delete cancelled after its commit is still audited`() = runTest {
         var committed = false
         lateinit var job: Job
-        coEvery { dao.deleteByOathId(HOTP_ID) } coAnswers {
+        coEvery { dao.deleteAndRecordDeletion(HOTP_ID, any()) } coAnswers {
             committed = true
             cancelAfterCommit { job }
             1

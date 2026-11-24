@@ -16,8 +16,10 @@
 package com.automatethethings.xkey.oath
 
 import android.net.Uri
+import com.automatethethings.xkey.audit.AuditLogger
 import io.mockk.every
 import io.mockk.mockk
+import io.mockk.mockkObject
 import io.mockk.mockkStatic
 import io.mockk.unmockkAll
 import kotlinx.coroutines.CancellationException
@@ -107,6 +109,7 @@ class OathHotpCounterRaceTest {
         every { secretManager.decryptSecret(any()) } answers { firstArg<ByteArray>().copyOf() }
         mockkStatic(Uri::class)
         every { Uri.parse(any()) } answers { jvmUri(firstArg()) }
+        stubAuditLogger()
         repository = OathRepository(dao, secretManager)
     }
 
@@ -158,6 +161,14 @@ class OathHotpCounterRaceTest {
         const val ID = "phone-1:hotp"
         const val SECRET = "JBSWY3DPEHPK3PXP"
     }
+}
+
+/** The repository audits every add, delete and generation; the logger is not initialized on the JVM. */
+private fun stubAuditLogger() {
+    mockkObject(AuditLogger)
+    every { AuditLogger.logOathCredentialCreated(any(), any(), any(), any()) } returns Unit
+    every { AuditLogger.logOathCredentialDeleted(any(), any(), any()) } returns Unit
+    every { AuditLogger.logOathCodeGenerated(any(), any(), any()) } returns Unit
 }
 
 /** An android [Uri] answering what the importer reads, from [URI]. */
@@ -223,9 +234,8 @@ class OathSyncDeletionRaceTest {
 
         override suspend fun isDeleted(oathId: String): Boolean = call { oathId in deletions }
 
-        override suspend fun deleteByOathId(oathId: String): Unit = call {
-            rows.remove(oathId)
-            Unit
+        override suspend fun deleteByOathId(oathId: String): Int = call {
+            if (rows.remove(oathId) != null) 1 else 0
         }
 
         override suspend fun recordDeletion(oathId: String, deletedAt: Long): Unit = call {
@@ -253,10 +263,9 @@ class OathSyncDeletionRaceTest {
         }
 
         /** One transaction: the record and the delete land together. */
-        override suspend fun deleteAndRecordDeletion(oathId: String, deletedAt: Long): Unit = call {
+        override suspend fun deleteAndRecordDeletion(oathId: String, deletedAt: Long): Int = call {
             deletions[oathId] = deletedAt
-            rows.remove(oathId)
-            Unit
+            if (rows.remove(oathId) != null) 1 else 0
         }
 
         /** What the phone's delete leaves, applied directly, outside any merge step. */
@@ -277,6 +286,7 @@ class OathSyncDeletionRaceTest {
         every { secretManager.decryptSecret(any()) } answers { firstArg<ByteArray>().copyOf() }
         mockkStatic(Uri::class)
         every { Uri.parse(any()) } answers { jvmUri(firstArg()) }
+        stubAuditLogger()
         repository = OathRepository(dao, secretManager)
     }
 

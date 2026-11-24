@@ -565,6 +565,9 @@ class RemoteSyncClientTest {
         every { anyConstructed<OathSecretManager>().encryptSecret(any()) } answers { firstArg() }
         mockkStatic(Uri::class)
         every { Uri.parse(any()) } answers { jvmUri(firstArg()) }
+        // A synced add writes a created row; the logger is not initialized on the JVM.
+        mockkObject(AuditLogger)
+        every { AuditLogger.logOathCredentialCreated(any(), any(), any(), any()) } returns Unit
 
         val oathReply = JSONArray()
             .put(JSONObject().put("id", "good").put("account_name", "alice").put("secret", "JBSWY3DPEHPK3PXP"))
