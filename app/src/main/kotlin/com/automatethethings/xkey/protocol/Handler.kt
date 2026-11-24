@@ -1937,8 +1937,17 @@ class RequestHandler(
         // Software-backed keys are operated on outside the Keystore.
         com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(symParams.keyId)?.let { sw ->
             requireSoftwareKeyType(sw, otherType = "HMAC", operation = "AES-GCM")
+            val swStart = System.currentTimeMillis()
             val ct = com.automatethethings.xkey.crypto.SoftwareKeyOps.aesGcmEncrypt(sw.material, plaintext, aad)
+            val swDurationMs = System.currentTimeMillis() - swStart
             keyDao.recordUsage(symParams.keyId)
+            logKeyUse(
+                KeyUse.ENCRYPT, symParams.keyId,
+                executedAlgorithm = KeystoreManager.EXECUTED_AES_GCM,
+                durationMs = swDurationMs,
+                caller = caller,
+                softwareKey = sw
+            )
             return Response.success(
                 request.id,
                 LocalSymmetricResult(data = Base64.getEncoder().encodeToString(ct), payloadField = LocalSymmetricResult.FIELD_CIPHERTEXT).toJson()
@@ -1990,6 +1999,7 @@ class RequestHandler(
         // Software-backed keys are operated on outside the Keystore.
         com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(symParams.keyId)?.let { sw ->
             requireSoftwareKeyType(sw, otherType = "HMAC", operation = "AES-GCM")
+            val swStart = System.currentTimeMillis()
             // A tag mismatch or a short input answers as the Keystore path does.
             val pt = try {
                 com.automatethethings.xkey.crypto.SoftwareKeyOps.aesGcmDecrypt(sw.material, ciphertext, aad)
@@ -1998,7 +2008,15 @@ class RequestHandler(
             } catch (e: IllegalArgumentException) {
                 throw DecryptionException("ciphertext too short", e)
             }
+            val swDurationMs = System.currentTimeMillis() - swStart
             keyDao.recordUsage(symParams.keyId)
+            logKeyUse(
+                KeyUse.DECRYPT, symParams.keyId,
+                executedAlgorithm = KeystoreManager.EXECUTED_AES_GCM,
+                durationMs = swDurationMs,
+                caller = caller,
+                softwareKey = sw
+            )
             return Response.success(
                 request.id,
                 LocalSymmetricResult(data = Base64.getEncoder().encodeToString(pt), payloadField = LocalSymmetricResult.FIELD_PLAINTEXT).toJson()
