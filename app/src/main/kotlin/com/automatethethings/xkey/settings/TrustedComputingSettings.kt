@@ -193,12 +193,15 @@ private val Context.trustedComputingDataStore: DataStore<Preferences> by prefere
  * )
  * ```
  *
- * @param context The Android context used to access DataStore.
+ * @param dataStore The DataStore holding the settings.
  */
-class TrustedComputingSettingsRepository(
-    private val context: Context
+class TrustedComputingSettingsRepository internal constructor(
+    private val dataStore: DataStore<Preferences>
 ) {
-    private val dataStore: DataStore<Preferences> = context.trustedComputingDataStore
+    /**
+     * @param context The Android context used to access DataStore.
+     */
+    constructor(context: Context) : this(context.trustedComputingDataStore)
 
     /**
      * Flow of Trusted Computing settings that emits whenever settings change.

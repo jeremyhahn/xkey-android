@@ -336,12 +336,15 @@ private val Context.biometricSettingsDataStore: DataStore<Preferences> by prefer
  * )
  * ```
  *
- * @param context The Android context used to access DataStore.
+ * @param dataStore The DataStore holding the settings.
  */
-public class BiometricSettingsRepository(
-    private val context: Context
+public class BiometricSettingsRepository internal constructor(
+    private val dataStore: DataStore<Preferences>
 ) {
-    private val dataStore: DataStore<Preferences> = context.biometricSettingsDataStore
+    /**
+     * @param context The Android context used to access DataStore.
+     */
+    public constructor(context: Context) : this(context.biometricSettingsDataStore)
 
     /**
      * Flow of biometric settings that emits whenever settings change.

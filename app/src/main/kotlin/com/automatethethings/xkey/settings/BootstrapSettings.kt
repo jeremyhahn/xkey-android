@@ -510,12 +510,15 @@ private val Context.bootstrapSettingsDataStore: DataStore<Preferences> by prefer
  * )
  * ```
  *
- * @param context The Android context used to access DataStore.
+ * @param dataStore The DataStore holding the settings.
  */
-public class BootstrapSettingsRepository(
-    private val context: Context
+public class BootstrapSettingsRepository internal constructor(
+    private val dataStore: DataStore<Preferences>
 ) {
-    private val dataStore: DataStore<Preferences> = context.bootstrapSettingsDataStore
+    /**
+     * @param context The Android context used to access DataStore.
+     */
+    public constructor(context: Context) : this(context.bootstrapSettingsDataStore)
 
     /**
      * Flow of bootstrap settings that emits whenever settings change.
