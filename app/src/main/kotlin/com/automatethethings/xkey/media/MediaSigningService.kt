@@ -293,7 +293,10 @@ class MediaSigningService : Service() {
                     signatures = listOf(entry)
                 )
 
-                // Without a path the signature has nowhere to go: leave the URI for a later retry, unrecorded.
+                // The signature lives in the file's own metadata, so without a
+                // path there is nowhere to put it. Leaving the URI unprocessed
+                // lets a later event retry it; recording it as auto-signed would
+                // put a claim in the audit log that nothing backs.
                 val filePath = getFilePathFromUri(uri) ?: run {
                     Log.w(TAG, "No file path for $uri; cannot persist a signature")
                     return@launch

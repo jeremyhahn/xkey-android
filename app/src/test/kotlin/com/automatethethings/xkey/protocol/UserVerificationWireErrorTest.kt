@@ -47,7 +47,7 @@ import org.junit.Test
 
 /**
  * Pins the wire error a FIDO2 request answers with when the peer required
- * user verification that did not happen.
+ * user verification that did not happen (#135).
  *
  * Both wire FIDO2 methods go through the real [RequestHandler.handleRequest],
  * so the test exercises the catch in `RequestHandler.dispatch`. The refusal

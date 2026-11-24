@@ -307,8 +307,12 @@ class PivActivityUiTest {
     /**
      * Every supported algorithm must be selectable.
      *
-     * `AlertController.setupContent` attaches a choice list only when the
-     * message is null, so the dialog must not call `setMessage(...)`.
+     * The dialog previously called both `setMessage(...)` and
+     * `setSingleChoiceItems(...)`. `AlertController.setupContent` only swaps
+     * its scroll view for the choice list when the message is null, so the
+     * list was built but never attached: the user saw a prompt with nothing
+     * to choose, `selectedIndex` stayed 0, and every PIV key was silently
+     * generated as ES256 with ES384 and RS2048 unreachable.
      */
     @Test
     fun generateKeyDialog_offersEverySupportedAlgorithm() {

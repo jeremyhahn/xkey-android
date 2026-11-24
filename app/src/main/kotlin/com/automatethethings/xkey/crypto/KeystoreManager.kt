@@ -516,7 +516,14 @@ class KeystoreManager(
             signature.update(dataHash)
             return signature.sign()
         } catch (e: Exception) {
-            // Fresh authentication required: prompt. Anything else, including a non-EC key, is a SigningException.
+            // The key requires fresh user authentication: proceed with the
+            // prompt. Devices refuse at initSign (UserNotAuthenticatedException)
+            // or only at sign() (SignatureException over a Keystore error).
+            // Anything else here is a real failure, not a reason to prompt. The
+            // algorithm is fixed to ECDSA, so a non-EC key resolved by
+            // resolveKeystoreAlias throws InvalidKeyException — which used to
+            // escape past this function's documented SigningException contract
+            // and surface to the desktop as INTERNAL_ERROR.
             if (!requiresUserAuthentication(e)) throw SigningException("Signing operation failed", e)
         }
 
@@ -635,7 +642,9 @@ class KeystoreManager(
         credentialId: String,
         dataHash: ByteArray
     ): ByteArray {
-        // Resolve across both alias namespaces, so a passkey made through the general key path can be signed.
+        // Resolve across BOTH alias namespaces, as the DER/PEM/SSH/COSE exports do.
+        // The FIDO2-only alias alone means a passkey created through the general
+        // key path — which is how the desktop creates one — can never be signed.
         val alias = resolveKeystoreAlias(credentialId) ?: throw KeyNotFoundException(credentialId)
 
         val privateKey = keyStore.getKey(alias, null) as? PrivateKey
@@ -740,7 +749,9 @@ class KeystoreManager(
      * @return COSE-encoded public key bytes, or null if not found.
      */
     fun getCOSEPublicKey(credentialId: String): ByteArray? {
-        // Resolve across both alias namespaces, as the DER/PEM/SSH exports do.
+        // Resolve across BOTH alias namespaces, as the DER/PEM/SSH exports do.
+        // Using the FIDO2-only alias here made `local.getPublicKey` with
+        // format=cose fail for every key created through local.generateKey.
         val alias = resolveKeystoreAlias(credentialId) ?: return null
         val publicKey = runCatching { keyStore.getCertificate(alias)?.publicKey }.getOrNull()
             ?: return null

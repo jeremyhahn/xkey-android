@@ -37,7 +37,7 @@ import org.junit.Test
  * (XKeyDatabase.buildDatabase), so a device on an older version needs a
  * migration path to 12, or the open throws "A migration from x to 12 was
  * required but not found". Both are checked here against the jars CI builds
- * with, at the current version: v13 adds the keys table's policy
+ * with, at the current version: v13 (#178) adds the keys table's policy
  * revision and v14 the password and OATH delete records, so the compiled hash is now the
  * committed 14.json's, and every stored version from 1 to 13 needs a path to 14. The type converter is covered by [AuditOperationTypeConverterTest];
  * the migrations' SQL is covered on a device by the instrumented

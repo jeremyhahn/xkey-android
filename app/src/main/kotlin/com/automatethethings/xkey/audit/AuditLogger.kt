@@ -706,8 +706,8 @@ object AuditLogger {
 
     /**
      * Log the per-key sharing grants dropped because a device stopped being
-     * paired: unpaired, cleared, or replaced by a re-pairing under a new key.
-     * Separate from [logDeviceUnpaired], which fires before the grants
+     * paired: unpaired, cleared, or replaced by a re-pairing under a new key
+     * (#174). Separate from [logDeviceUnpaired], which fires before the grants
      * are deleted and not at all for an eviction or a clear.
      *
      * @param deviceId The removed device's public key hex.
@@ -1356,7 +1356,9 @@ object AuditLogger {
         )
     }
 
-    // OATH/TOTP operations
+    // -------------------------------------------------------------------------
+    // OATH/TOTP Operations
+    // -------------------------------------------------------------------------
 
     fun logOathCredentialCreated(oathId: String, issuer: String?, accountName: String, oathType: String) {
         val details = JSONObject().apply {
@@ -1644,7 +1646,11 @@ object AuditLogger {
         log(AuditLogEntity(operationType = AuditOperationType.PIV_KEY_DELETED, keyId = "piv_$slotId", keyType = "piv", success = true, details = details.toString()))
     }
 
-    // Password vault operations: only the entry id and display name are recorded.
+    // -------------------------------------------------------------------------
+    // Password Vault Operations
+    // -------------------------------------------------------------------------
+    // Only the entry id and its display name are recorded: never the
+    // password, username, URL or notes.
 
     fun logPasswordCreated(passwordId: String, name: String) =
         logPasswordEdit(AuditOperationType.PASSWORD_CREATED, passwordId, name)

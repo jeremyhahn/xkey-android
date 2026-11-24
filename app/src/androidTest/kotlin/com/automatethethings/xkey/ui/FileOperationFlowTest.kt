@@ -232,7 +232,7 @@ class FileOperationFlowTest {
     }
 
     /**
-     * The same flow on [jpegFile] given `0xFF` fill
+     * #47, Codex review 6661: the same flow on [jpegFile] given `0xFF` fill
      * bytes before an added EXIF APP1 (or before the encoder's first marker)
      * and before a kept table. The written file must still hash to what was
      * signed and the signature must verify. Device only: CI runs no
@@ -262,7 +262,9 @@ class FileOperationFlowTest {
 
     /** Signs [jpegFile] through the screen and checks the result against the public key. */
     private fun assertSignOperationVerifies() {
-        // Canonical hash, excluding the APPn/COM segments the embedded signature lives in.
+        // Canonical, not whole-file: signing embeds the signature into the JPEG,
+        // so a hash over every byte could never match afterwards. The canonical
+        // form excludes the APPn/COM segments that carry the signature.
         val originalHash = MediaHasher.hashCanonical(jpegFile.readBytes(), "image/jpeg")
         val scenario = launch(jpegFile)
         selectSpinnerEntry(scenario, keyEntry)

@@ -1118,7 +1118,11 @@ class KeyManagementActivity : AppCompatActivity() {
         lifecycleScope.launch {
             try {
                 val keyId = UUID.randomUUID().toString()
-                // -1 means no authentication required; 0 means authenticate on every use.
+                // -1 is the "no authentication required" sentinel; 0 means
+                // "authenticate on every use". Passing 0 for an unchecked switch
+                // still produced an auth-bound key, so the toggle could not be
+                // turned off — and on a device with nothing enrolled, Keystore
+                // refuses such a key and creation failed outright.
                 val authDuration = if (biometric) 5 else -1
                 var publicKeyDer: ByteArray? = null
                 var keySizeBits = 0
@@ -1191,7 +1195,9 @@ class KeyManagementActivity : AppCompatActivity() {
     private fun actualKeySizeBits(der: ByteArray?): Int? {
         if (der == null) return null
         val spec = X509EncodedKeySpec(der)
-        // SPKI does not name the algorithm, so try both families this screen generates.
+        // A KeyFactory is selected by key algorithm and SPKI does not name it without
+        // decoding the AlgorithmIdentifier, so try the two families this screen can
+        // generate and let the other one reject the encoding.
         val publicKey = KEY_FACTORY_ALGORITHMS.firstNotNullOfOrNull { name ->
             runCatching { KeyFactory.getInstance(name).generatePublic(spec) }.getOrNull()
         }

@@ -198,7 +198,11 @@ class AndroidFidoCredentialBackend(
         authenticatorData: (signCount: Long) -> ByteArray,
         clientDataHash: ByteArray
     ): SignedAssertion {
-        // The passkey as listed: only it signs, by its stored key ID, never one re-encoded from the wire ID.
+        // The passkey as it was listed, before the account chooser and the
+        // user check: only this key signs, and only while it is still this
+        // passkey (signSelected). Its stored key ID, never one re-encoded from
+        // the wire ID: stored IDs come padded, in standard base64 or not in
+        // base64 at all.
         val selected = (credential.selection as? SelectedPasskey)
             ?.takeIf { it.rpId == credential.rpId && wireId(it.row.keyId).contentEquals(credential.id) }
             ?: throw FidoRefusedException(Ctap2.ERR_NO_CREDENTIALS, "Passkey is gone or no longer shared")
@@ -207,7 +211,10 @@ class AndroidFidoCredentialBackend(
         if (entity == null || !usable(entity, credential.rpId) || !shared(entity)) {
             throw FidoRefusedException(Ctap2.ERR_NO_CREDENTIALS, "Passkey is gone or no longer shared")
         }
-        // Read the counter only on this assertion's signing turn, so counts never go backwards.
+        // The counter is read and authenticatorData built only once this
+        // assertion's signing turn has come, so no other assertion for the
+        // passkey, over BLE or from the credential provider, signs a later
+        // count before this one.
         var count = 0L
         var authData = ByteArray(0)
         val signature = signInKeystore(selected) {
@@ -239,7 +246,10 @@ class AndroidFidoCredentialBackend(
         retryPendingKeyDeletions()
         val rawId = ByteArray(CREDENTIAL_ID_BYTES).also { SecureRandom().nextBytes(it) }
         val keyId = encodeId(rawId)
-        // Recorded before the key is made so a stopped registration's orphan key is deleted on retry.
+        // Recorded before its key is made, and forgotten once the passkey is
+        // whole: a registration that stops before then, a process death
+        // included, leaves a Keystore key no row owns, which a later retry
+        // deletes. Without the record nothing is made.
         pendingKeyDeletions.addRegistration(keyId)
         // Not auth-bound: the phone's prompt gates every use, as on the
         // JSON-RPC path, and an auth-bound key could not sign after it.
@@ -255,7 +265,10 @@ class AndroidFidoCredentialBackend(
             forget(keyId)
             throw e
         }
-        // StrongBox first, else TEE; the row records the level read from KeyInfo, never guessed.
+        // StrongBox is preferred, with the TEE as the fallback; the row
+        // records the level the key was really made at, read from its
+        // KeyInfo. A level that cannot be read fails the registration and
+        // drops the new key: it is never guessed.
         val securityLevel = try {
             withStoredKey(keyId) { keystoreManager.credentialSecurityLevel(keyId) } ?: throw KeyNotFoundException(keyId)
         } catch (e: Throwable) {
@@ -264,7 +277,10 @@ class AndroidFidoCredentialBackend(
         }
         val userId = encodeId(request.userHandle)
         val rpName = request.rpName ?: request.rpId
-        // Read the passkeys this replaces; any failure or cancellation removes the new key and keeps the old ones.
+        // The passkeys this one replaces, read and read again before anything
+        // is written. Any failure here, a cancellation (the client
+        // disconnected or sent CANCEL) included, removes the new key and
+        // leaves the old passkeys untouched.
         val replaced = try {
             // The discoverable passkeys this client could see for the same
             // account. One the sharing policy hides from BLE clients is never
@@ -274,7 +290,11 @@ class AndroidFidoCredentialBackend(
             } else {
                 emptyList()
             }
-            // Re-read right before deleting: a passkey whose policy changed stays.
+            // Read again right before they go: a passkey made private, shared
+            // with selected peers only, or changed since the lookup is no
+            // longer this client's to replace, and stays. The rows as read
+            // here are what the delete matches, so a policy change after this
+            // read keeps the passkey too.
             val stillReplaceable = old.mapNotNull { candidate ->
                 keyDao.getByKeyId(candidate.keyId)?.takeIf { replaceable(it, request, keyId) }
             }
@@ -289,7 +309,13 @@ class AndroidFidoCredentialBackend(
             withContext(NonCancellable) { dropNewKey(keyId) }
             throw e
         }
-        // One transaction writes the new passkey and deletes the old rows; once begun it runs to the end.
+        // The one point the new passkey becomes whole: its key row and the
+        // metadata the credential provider lists are written, and the old
+        // passkeys' rows deleted (each only while its sharing policy is still
+        // the one read above), in one transaction. Until it commits no reader
+        // anywhere sees the new passkey; when it throws nothing was written
+        // and the old passkeys stay. It runs to its end once begun, and a
+        // cancellation that comes meanwhile never undoes a committed passkey.
         var committed: List<String>? = null
         try {
             withContext(NonCancellable) {
@@ -336,7 +362,13 @@ class AndroidFidoCredentialBackend(
             }
         }
         val removed = committed.orEmpty()
-        // Delete replaced keys only while no row owns their ID, under the stored-key lock.
+        // Whole: its row owns its key now. The old passkeys whose rows went
+        // lose their keys; one whose policy changed since the read keeps its
+        // rows, and they own its key. None of this fails the registration,
+        // and a cancellation that came during the commit does not stop it.
+        // Each key goes only while no row owns its ID, checked under its
+        // stored-key lock: a passkey made again under the ID over JSON-RPC
+        // since the commit keeps its key.
         forget(keyId)
         (replaced.map { it.keyId } - removed.toSet()).forEach { forget(it) }
         withContext(NonCancellable) {
@@ -495,12 +527,16 @@ class AndroidFidoCredentialBackend(
         val prompt = userPrompt?.takeIf { it.available }
             ?: throw FidoRefusedException(Ctap2.ERR_OPERATION_DENIED, "This passkey needs a prompt bound to its key")
         return try {
-            // Pass the selected alias (xkey_key_<id> or xkey_credential_<id>) to the signing activity.
+            // The signing activity is told the selected alias, the one whose
+            // public key was read: a passkey local.generateKey made lives under
+            // xkey_key_<id>, one the credential provider made under
+            // xkey_credential_<id>.
             signSelected(selected, signedData) { checkedData ->
                 prompt.signWithKey(selected.row.keyId, selected.alias, selected.rpId, checkedData)
             }
         } catch (e: CancellationException) {
-            // Client gone or CANCEL: never a refusal (CancellationException is an IllegalStateException).
+            // The client went away or sent CANCEL: never a refusal (a
+            // CancellationException is an IllegalStateException).
             throw e
         } catch (e: UserCancelledException) {
             throw FidoRefusedException(Ctap2.ERR_OPERATION_DENIED, "The user declined the passkey's prompt")

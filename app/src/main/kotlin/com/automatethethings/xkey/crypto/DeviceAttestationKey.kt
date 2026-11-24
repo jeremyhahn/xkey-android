@@ -40,7 +40,8 @@ import java.security.spec.ECGenParameterSpec
  * with?" — and a key that rotates cannot answer it at all. Keystore seals the
  * attestation challenge at key **generation** and offers no way to re-attest an
  * existing key, so a challenge drawn per pairing would force a new key per
- * pairing and the fingerprint would move every time.
+ * pairing and the fingerprint would move every time. That measured impossibility
+ * is why the owner replaced the embedded-challenge model on 2026-08-24.
  *
  * So this key is generated once, under the fixed
  * [AttestTranscript.GENESIS_CHALLENGE], and kept. Its attestation chain proves

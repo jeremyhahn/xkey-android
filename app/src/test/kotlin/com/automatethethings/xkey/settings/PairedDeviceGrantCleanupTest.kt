@@ -72,7 +72,7 @@ import org.junit.Before
 import org.junit.Test
 
 /**
- * A desktop that stops being paired loses its per-key sharing grants:
+ * A desktop that stops being paired loses its per-key sharing grants (#174):
  * [PairedDeviceGrantCleanup], registered as a removal listener, deletes the
  * peer's `key_sharing_policies` rows for every removal path of
  * [PairedDeviceRepository] (unpair, eviction by a re-pairing under a new key,

@@ -55,7 +55,7 @@ import org.junit.Test
 
 /**
  * Every key attestation `local.attestKey` answers, or fails to answer,
- * leaves one `KEY_ATTESTED` audit entry; a request refused before
+ * leaves one `KEY_ATTESTED` audit entry (#219); a request refused before
  * the keystore is asked leaves none.
  *
  * Drives the real handler with its Android edges mocked, as

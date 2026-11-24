@@ -41,7 +41,7 @@ import java.util.Collections
  * A PIV slot key (`xkey_piv_*`) belongs to [com.automatethethings.xkey.piv.PivKeyManager]
  * and its `piv_slots` row. If the sync listed it as a general key, the key
  * management screen could delete it behind `piv_slots`, leaving a row that
- * claims a key the Keystore no longer holds.
+ * claims a key the Keystore no longer holds (#173).
  */
 class KeyStoreSyncManagerTest {
 

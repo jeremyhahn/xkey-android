@@ -330,7 +330,8 @@ class OathRepository(
             source = "local",
             createdAt = System.currentTimeMillis()
         )
-        // Never REPLACE, which loses usage statistics; the deletion check and insert are one transaction.
+        // Never REPLACE: that deletes the row and inserts a new one, losing its usage statistics.
+        // The deletion check and the insert are one transaction: a delete cannot land between them.
         insertedUnlessDeleted(entity)?.let { return it }
         val stored = dao.getByOathId(oathId)
         if (stored != null && !sameKeyMaterial(stored, entity, parsed.secret)) {
@@ -460,12 +461,18 @@ class OathRepository(
             "Unsupported algorithm: expected SHA1, SHA256 or SHA512"
         }
         require(digits in SUPPORTED_DIGITS) { "Unsupported digits: $digits, expected 6 to 8" }
-        // HOTP ignores the period; TOTP needs a positive one.
+        // HOTP ignores the period; TOTP needs a positive one, as
+        // OathEngine.generateTotpCode requires.
         require(type != "TOTP" || periodSeconds > 0) {
             "Unsupported period: $periodSeconds seconds, expected a positive number of seconds"
         }
 
-        // The HOTP counter is stored with the credential; an unparseable or negative counter is ignored.
+        // The HOTP counter is part of the credential, not an update applied
+        // after it: a credential inserted at counter 0 and only afterwards
+        // advanced is permanently out of step with the server if anything goes
+        // wrong in between.
+        // An unparseable or negative counter is ignored, as with the other
+        // optional numeric parameters above.
         val counter = if (type == "HOTP") {
             parsed.getQueryParameter("counter")?.toLongOrNull()?.takeIf { it >= 0L } ?: 0L
         } else {
@@ -518,7 +525,15 @@ class OathRepository(
                 periodSeconds = credential.periodSeconds
             )
             "HOTP" -> {
-                // Hand out a code only after claiming its counter by compare-and-set; compute first so a failure never burns a value.
+                // A code is handed out only once its counter value is claimed
+                // (compare-and-set, one statement): two callers that read the
+                // same counter (a desktop generate and a phone tap) cannot
+                // both claim it, and a sync that raised the counter makes the
+                // claim fail, so the loser re-reads and takes the current
+                // value. The code is computed before the claim, so a decrypt
+                // or engine failure never burns a counter value. A retry
+                // happens only when the counter moved on; otherwise the claim
+                // could fail forever on the same value.
                 if (credential.counter == HOTP_COUNTER_MAX) {
                     throw OathCounterExhaustedException(oathId)
                 }

@@ -86,7 +86,7 @@ import kotlin.coroutines.EmptyCoroutineContext
  * Framing is delegated to [StreamMessageFraming] (2-byte big-endian length
  * prefix, one Noise message per frame).
  *
- * Unpairing the connected desktop revokes its connection: the request
+ * Unpairing the connected desktop revokes its connection (#59): the request
  * it is running is cancelled, its streams are closed, and its keys are
  * zeroed once no frame is mid-send. Every phone-initiated frame revalidates
  * the peer against the paired-device store first.
@@ -125,7 +125,7 @@ class StreamPairingSession(
 
         /**
          * How long a peer has, from the start of [serve], to finish the
-         * identity exchange and the Noise XX handshake. One deadline
+         * identity exchange and the Noise XX handshake (#64). One deadline
          * for the whole handshake, not one per read, so a peer that drips
          * bytes cannot extend it. A desktop on loopback or USB finishes in
          * milliseconds; nothing before the handshake waits on the user.
@@ -328,7 +328,7 @@ class StreamPairingSession(
         /**
          * The peer will send nothing more. The connection stays live so the
          * frames already read are still delivered -- a response the peer sent
-         * before it closed settles its request -- but the request
+         * before it closed settles its request (Codex 7380) -- but the request
          * the peer is waiting on, perhaps on a prompt, is cancelled: nobody
          * will read its answer. A drain that has not finished by
          * [DRAIN_TIMEOUT_MS], such as one stuck behind a write the peer no
@@ -414,12 +414,12 @@ class StreamPairingSession(
      * Runs the full responder protocol over [input]/[output] until the peer
      * disconnects, [isActive] returns false, or the peer is unpaired. A peer
      * that has not finished the handshake within [handshakeTimeoutMs] has its
-     * streams closed, and this returns.
+     * streams closed, and this returns (#64).
      *
      * @param noiseSession a session with its static key already loaded.
      * @param connectionId the id the transport assigned this connection when it
      *   connected; every request on it carries this id to the handler, which
-     *   keys PER_SESSION approval on it.
+     *   keys PER_SESSION approval on it (#134).
      * @param isActive returns false to stop the message loop (e.g., on shutdown).
      * @param onConnected invoked once the encrypted session is established.
      */
@@ -433,7 +433,9 @@ class StreamPairingSession(
     ) {
         val connection = Connection(input, output, noiseSession, connectionId)
         PairedDeviceRepository.addRemovalListener(connection)
-        // The deadline closes the streams under a blocking read; it stops applying once the handshake is installed.
+        // A blocking read cannot be cancelled, so the deadline closes the
+        // streams under it. Once the handshake is installed it no longer
+        // applies: a paired desktop may stay quiet for as long as it likes.
         val deadline = teardownScope.launch {
             delay(handshakeTimeoutMs)
             connection.expireHandshake()
@@ -453,7 +455,11 @@ class StreamPairingSession(
                 deadline.cancel()
             }
 
-            // An approved device need not re-confirm: the handshake proves it holds the same static key.
+            // A device the user already approved does not have to re-confirm on
+            // every reconnect: the Noise handshake cryptographically proves it
+            // holds that same static key. Requiring pairing.confirm each time
+            // would also break the desktop, which only sends it during
+            // `xkey device pair`.
             adoptExistingPairing(connection)
             Log.i(TAG, "[$transportLabel] Noise handshake complete")
             onConnected()
@@ -527,7 +533,8 @@ class StreamPairingSession(
         // Named before the lookup, so a removal from here on revokes the handshake.
         connection.claimedPeerKeyHex = publicKeyHex
         val paired = pairedDeviceRepository?.getDevice(publicKeyHex)
-        // The phone's own attested-key SPKI fingerprint, mixed into the prologue by the desktop.
+        // The phone's OWN attested-key SPKI fingerprint, captured at pairing
+        // (#93). The desktop byte-compares it and mixes it into the prologue.
         val fingerprint = paired?.deviceFingerprint
 
         if (paired != null && fingerprint != null && fingerprint.length == FINGERPRINT_SIZE * 2) {
@@ -555,9 +562,9 @@ class StreamPairingSession(
      * Answers the peer's frames in order, one request at a time, while
      * [readFrames] watches the stream: a peer that goes away while a request
      * waits -- on a prompt nobody will answer -- cancels the request and its
-     * prompt at once. The frames it sent before it
+     * prompt at once (Codex 7369, finding 2). The frames it sent before it
      * went away are still drained, so a response among them settles its
-     * request; then the loop returns and the connection ends.
+     * request (Codex 7380); then the loop returns and the connection ends.
      */
     private suspend fun messageLoop(connection: Connection, isActive: () -> Boolean) {
         val frames = Channel<ByteArray>(FRAME_BUFFER)
@@ -579,7 +586,7 @@ class StreamPairingSession(
      * [FRAME_BUFFER] frames ahead of the request being answered has broken
      * request-response, and its connection ends at once. A reader parked on
      * a full buffer would stop watching the stream, and a disconnect while a
-     * prompt waits would never cancel it.
+     * prompt waits would never cancel it (Codex 7374).
      *
      * A blocking read cannot be cancelled, so this runs apart from [serve],
      * which returns without waiting for it; ending the connection closes the
@@ -606,8 +613,8 @@ class StreamPairingSession(
     /**
      * Decrypts and dispatches the frames in the order they were read. Once
      * the peer's stream has ended, the frames it sent before are drained: a
-     * response still settles the phone's request with the peer's own result,
-     * but a request is not run and nothing more is written,
+     * response still settles the phone's request with the peer's own result
+     * (Codex 7380), but a request is not run and nothing more is written,
      * since nobody will read it.
      */
     private suspend fun answerFrames(
@@ -721,7 +728,13 @@ class StreamPairingSession(
         interceptOrRoute(plaintext, activeConnection)
 
     private suspend fun interceptOrRoute(plaintext: ByteArray, connection: Connection?): ByteArray? {
-        // Until pairing is confirmed only pairing.confirm may run; a handshake proves a key, not the user's approval.
+        // A completed Noise XX handshake proves only that the peer holds *a*
+        // key, not that the user approved it. Until pairing is confirmed, the
+        // only request that may run is pairing.confirm itself; everything else
+        // is refused. Without this, any peer that can reach the transport
+        // could sign, list keys, or export shared material unapproved.
+        // A session without a paired-device store cannot approve anyone, so it
+        // is gated like any other: nothing it serves runs unpaired.
         if (connection?.confirmed != true) {
             // One pairing.confirm per connection: one that does not confirm
             // ends it once answered, so a peer cannot repeat the prompt
@@ -744,7 +757,12 @@ class StreamPairingSession(
             return rejectUnpaired(plaintext)
         }
 
-        // A trusted peer re-pairing sends pairing.confirm; confirming again succeeds as a no-op.
+        // A peer that is already trusted still sends pairing.confirm when it
+        // re-pairs, and adoptExistingPairing has already confirmed the session
+        // by then. Letting it fall through answers METHOD_NOT_FOUND, which
+        // reads as a protocol mismatch rather than "you are already paired" --
+        // so re-running `xkey device pair` against a known phone failed with a
+        // confusing error. Confirming again is a no-op, so it simply succeeds.
         confirmAlreadyPaired(plaintext)?.let { return it }
 
         return routeConfirmed(plaintext, connection)
@@ -763,7 +781,11 @@ class StreamPairingSession(
     private suspend fun routeConfirmed(plaintext: ByteArray, connection: Connection?): ByteArray? {
         routeTransportMethod(plaintext)?.let { return it }
 
-        // Attach the connection's binding and peer per request; the handler is shared across transports.
+        // The router calls the handler in this coroutine, so the elements
+        // reach it per request and never outlive it. The connection's own
+        // binding and peer ride along: the handler is shared with BLE and the
+        // other stream transport, so nothing handler-wide can say which
+        // session this request arrived on (Codex 7346).
         val router = messageRouter
         val caller = if (connection == null) EmptyCoroutineContext else RequestHandler.servedConnection(
             SessionBindingProvider { connection.binding?.takeIf { connection.isCurrent }?.copyOf() },

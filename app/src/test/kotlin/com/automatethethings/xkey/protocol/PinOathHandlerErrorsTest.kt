@@ -56,7 +56,7 @@ import org.junit.Test
 
 /**
  * The local.* PIN and OATH handlers return the error code or result the
- * request deserves: a locked SO PIN is PIN_LOCKED, a new PIN of the
+ * request deserves (#133): a locked SO PIN is PIN_LOCKED, a new PIN of the
  * wrong length is INVALID_PARAMS, and removing an unknown OATH id does not
  * claim a deletion. Only the handler's Android edges and the [PinManager]
  * are mocked, as in [GenerationEchoTest].
@@ -252,7 +252,9 @@ class PinOathHandlerErrorsTest {
         }
     }
 
-    // A PIN that is not set or not supplied is PIN_REQUIRED
+    // -----------------------------------------------------------------
+    // A PIN that is not set or not supplied is PIN_REQUIRED (#190)
+    // -----------------------------------------------------------------
 
     @Test
     fun `pinVerify of the User PIN before it is set returns PIN_REQUIRED`() = runTest {

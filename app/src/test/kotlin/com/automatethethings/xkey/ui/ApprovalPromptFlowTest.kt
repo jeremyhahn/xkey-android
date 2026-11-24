@@ -82,7 +82,7 @@ import java.util.concurrent.atomic.AtomicLong
 
 /**
  * `local.setKeyPolicy` approvals on a locked phone, end to end through the
- * real pieces: [RequestHandler], [BiometricActivityLauncher], the
+ * real pieces (#178): [RequestHandler], [BiometricActivityLauncher], the
  * lock-screen notification its `onLaunch` posts, and
  * [TransparentBiometricActivity] driven through its lifecycle. Only the key
  * store and the audit log are stand-ins.

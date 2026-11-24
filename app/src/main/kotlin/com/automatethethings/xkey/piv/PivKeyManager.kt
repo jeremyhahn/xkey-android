@@ -88,7 +88,10 @@ data class PivSlotInfo(
 private fun ByteArray?.contentEquals(other: ByteArray?): Boolean {
     if (this === other) return true
     if (this == null || other == null) return false
-    // Arrays.equals: this extension shadows contentEquals for ByteArray, which would recurse.
+    // Arrays.equals, not contentEquals: this extension shadows the stdlib one
+    // for a ByteArray receiver, so `this.contentEquals(other)` resolved back to
+    // here and recursed until the stack ran out. Comparing any two PivSlotInfo
+    // values that both carry a public key threw StackOverflowError.
     return java.util.Arrays.equals(this, other)
 }
 

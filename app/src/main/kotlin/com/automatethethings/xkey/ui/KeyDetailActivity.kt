@@ -1818,7 +1818,10 @@ class KeyDetailActivity : AppCompatActivity() {
                         // Actually origin is tag [702] = BF 85 3E
                         // Let's handle it below in the multi-byte section
                     }
-                    // Multi-byte context tags: [303] noAuthRequired, [503] allApplications, [505] creationDateTime.
+                    // Tag [303] - noAuthRequired (primitive, context [303])
+                    // Tag [503] - allApplications
+                    // Tag [505] - creationDateTime
+                    // Multi-byte context-specific tags
                     tag == 0xBF && pos + 1 < data.size -> {
                         val secondByte = data[pos + 1].toInt() and 0xFF
                         val thirdByte = if (pos + 2 < data.size) data[pos + 2].toInt() and 0xFF else 0

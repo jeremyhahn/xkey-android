@@ -66,7 +66,7 @@ Release-readiness checklist for [Dev complete](../../milestone/23), done; none o
 ## Now
 
 - **fido2-phone-backend** — CTAP2 over BLE for `xkey fido2 --backend phone`; `local.listFido2Credentials` and `local.signFido2Assertion` over the paired Noise session ship today — [#281](../../issues/281) — in progress: CTAP2 over BLE built and unit tested, device verification left
-- **maintenance** — standing row for dependency updates and CI configuration; never gates a release — [#317](../../issues/317)
+- **maintenance** — standing row for dependency updates and CI configuration; never gates a release (owner decision 1234) — [#317](../../issues/317)
 
 ## Next
 

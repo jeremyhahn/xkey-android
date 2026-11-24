@@ -951,7 +951,10 @@ class PivActivity : AppCompatActivity() {
         val algorithmNames = algorithms.map { it.displayName }.toTypedArray()
         var selectedIndex = 0
 
-        // AlertController drops a choice list when a message is set, so the prompt goes in the title.
+        // AlertController only attaches a choice list when the message is
+        // null, so setting both silently drops the list and pins the
+        // selection to the first algorithm. The prompt therefore lives in the
+        // title rather than as a message.
         MaterialAlertDialogBuilder(this)
             .setTitle(getString(R.string.piv_generate_title, slot.hexId))
             .setSingleChoiceItems(algorithmNames, selectedIndex) { _, which ->

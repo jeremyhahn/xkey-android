@@ -112,7 +112,7 @@ class KeySharingPolicyDaoTest {
         insertKey("k-private", SharingPolicyType.PRIVATE)
         dao.setPolicy(KeySharingPolicy("k-private", peer, allowed = true))
 
-        // Even an explicit grant must not override a private key.
+        // Even an explicit grant must not override a PRIVATE key.
         assertFalse(dao.isKeySharedWithPeer("k-private", peer))
     }
 
@@ -217,7 +217,9 @@ class KeySharingPolicyDaoTest {
         assertEquals(1, dao.countKeysSharedWithPeer(otherPeer))
     }
 
+    // -------------------------------------------------------------------------
     // Policy CRUD
+    // -------------------------------------------------------------------------
 
     @Test
     fun setPolicy_roundTripsTheRow() = runBlocking {

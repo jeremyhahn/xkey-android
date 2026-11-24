@@ -132,7 +132,8 @@ class PasskeySignCounterHandlerTest {
             signed += secondArg<ByteArray>()
             SIGNATURE
         }
-        // The backend signs the approved passkey under the alias its approval read.
+        // The phone backend signs the passkey the owner approved, under the
+        // alias its approval read (#177): the same faked signer records it.
         every { keystoreManager.resolveKeystoreAlias(ID) } returns ALIAS
         every { keystoreManager.publicKeyDERAt(ALIAS) } returns APPROVED_DER
         coEvery { keystoreManager.signApproved(ALIAS, APPROVED_DER, any(), any()) } answers {

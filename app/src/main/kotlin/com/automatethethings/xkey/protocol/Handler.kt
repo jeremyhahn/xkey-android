@@ -218,7 +218,7 @@ class RequestHandler(
 
     /**
      * Where biometric prompts are raised: the app-wide record of the resumed
-     * screen. Tests may pin it with [setActivity].
+     * screen (#320). Tests may pin it with [setActivity].
      */
     @VisibleForTesting
     internal var promptHost: PromptHost = PromptActivityTracker
@@ -389,7 +389,7 @@ class RequestHandler(
      *
      * A non-null id changes nothing: approval keys on the connection id each
      * request carries ([servedConnection]), never on handler-wide state that
-     * another transport's connect would overwrite.
+     * another transport's connect would overwrite (#134).
      *
      * @param sessionId null when the session ended.
      */
@@ -559,7 +559,7 @@ class RequestHandler(
     /**
      * The connection id a request arrived with, captured once when it
      * reaches [handleRequest] and carried in the coroutine context for the
-     * rest of the request.
+     * rest of the request (#134).
      *
      * One handler serves BLE, TCP and USB, so the id comes from the request's
      * own [CallerSession], which its transport set to the id it assigned the
@@ -620,7 +620,10 @@ class RequestHandler(
             Log.e(TAG, "Biometric error: ${e.message}")
             Response.error(request.id, ErrorCodes.BIOMETRIC_FAILED, e.message ?: "Biometric authentication failed")
         } catch (e: BiometricUnavailableException) {
-            // No biometric enrolled gets its own error, so the desktop can tell it from a broken phone.
+            // Its own type, not a BiometricException, so it fell through to the
+            // generic handler: a phone with nothing enrolled answered
+            // INTERNAL_ERROR and the desktop could not tell "enrol a biometric"
+            // from "the phone is broken". This is the commonest real failure.
             Log.e(TAG, "Biometric unavailable: ${e.message}")
             Response.error(
                 request.id,
@@ -646,7 +649,9 @@ class RequestHandler(
             Log.e(TAG, "Unsupported algorithm: ${e.message}")
             Response.error(request.id, ErrorCodes.INVALID_ALGORITHM, e.message ?: "Unsupported algorithm")
         } catch (e: UserVerificationRequiredException) {
-            // A ceremony refused for required user verification; see UserVerificationWireError.
+            // local.signFido2Assertion refused a ceremony the peer required
+            // user verification for. Explicit mapping (#135): the code and
+            // why it was chosen are documented at UserVerificationWireError.
             Log.e(TAG, "User verification required: ${e.message}")
             UserVerificationWireError.response(request.id, e)
         } catch (e: Exception) {
@@ -708,7 +713,8 @@ class RequestHandler(
 
     /** Asks the owner to approve a `generateKey` registration when verification applies. */
     private suspend fun approveRegistration(generateParams: GenerateKeyParams) {
-        // With user verification required, prompt before generating the key.
+        // If user verification required (not DISABLED), prompt for biometric BEFORE generating the key
+        // This ensures user explicitly approves credential creation
         if (generateParams.requireUserVerification && currentSettings.uvPolicy != UserVerificationPolicy.DISABLED) {
             // Try BiometricActivityLauncher first (for service context)
             if (biometricLauncher != null) {
@@ -919,9 +925,18 @@ class RequestHandler(
                     Log.i(TAG, "Signed data for credential: ${signParams.credentialId} (via crypto-bound launcher)")
                     return Response.success(request.id, result.toJson())
                 } else {
-                    // TIME_WINDOW/PER_SESSION: try signWithoutBiometric first; it works inside the auth window.
+                    // TIME_WINDOW/PER_SESSION modes: Try signWithoutBiometric first (optimistic)
+                    // If the key has an auth duration and we're within the window, this will work
+                    // without prompting for biometric again.
+                    //
+                    // IMPORTANT: TIME_WINDOW keys (authDuration > 0) do NOT support CryptoObject-bound
                     // biometric auth. They require a GENERIC biometric prompt to authenticate the user,
-                    // Only PER_OPERATION keys support CryptoObject-bound signing; an unapproved PER_SESSION session always prompts.
+                    // and then signWithoutBiometric() will work within the auth duration window.
+                    // Only PER_OPERATION keys (authDuration = 0) support CryptoObject-bound signing.
+                    //
+                    // A PER_SESSION session that has not been approved yet always prompts: the
+                    // Keystore window may still be open from an earlier session (a USB detach and
+                    // reattach, #134), and that approval does not carry over.
                     val sessionUnapproved = currentSettings.authMode == BiometricAuthMode.PER_SESSION &&
                         sessionAuthManager?.isBiometricRequired(currentSettings, requestSessionId()) != false
                     if (!sessionUnapproved) try {
@@ -1243,7 +1258,10 @@ class RequestHandler(
         // Keystore entry, so it is <id> that is revoked and whose row goes.
         val keyId = canonicalKeyId(deleteParams.credentialId)
 
-        // Delete the key and its row as one revoke opened before Keystore is touched; pending shares are refused.
+        // Delete the key and its metadata row as one revoke, opened before the
+        // Keystore is touched, like every other key delete: a share of the key
+        // pending at a transport is refused at admission. The ID as given is
+        // revoked too when it differs.
         val deleted = SharePermissionLedger.revoking(keyId) {
             SharePermissionLedger.revoking(deleteParams.credentialId) {
                 keystoreManager.deleteKey(deleteParams.credentialId).also { removed ->
@@ -1378,7 +1396,11 @@ class RequestHandler(
             // The approval waited: recheck under the id's lock, since every
             // generator replaces an existing alias, destroying that key.
             keyIds.withKeyLock(reservation) {
-                // Generate inside a revoke of the ID after rechecking existence, so a key that appeared during the prompt is refused.
+                // Generated inside a revoke of the ID, opened before any key
+                // material is touched, after existence is checked again: a
+                // key that appeared during the prompt is refused, and a share
+                // of the ID waiting at admission is refused from the revoke's
+                // start.
                 SharePermissionLedger.revoking(keyId) {
                     refuseExistingKey(keyId)
                     createLocalKey(request, genParams, algorithmName, authDurationSeconds)
@@ -1685,7 +1707,13 @@ class RequestHandler(
                 authDurationSeconds = authDurationSeconds,
                 exportable = true,
                 shareable = genParams.shareable,
-                // shareable and sharingPolicy must agree: a shareable key needs a policy that admits a peer; otherwise PRIVATE.
+                // KeyEntity requires shareable and sharingPolicy to agree; a key
+                // created shareable needs a policy that admits a peer or sharing
+                // would be refused despite the caller asking for it.
+                // KeyEntity requires these two to agree: a key created
+                // shareable must carry a policy that actually admits a peer,
+                // or sharing would be refused despite the caller asking for
+                // it. Not shareable stays PRIVATE.
                 sharingPolicy = if (genParams.shareable) {
                     SharingPolicyType.ALL_PEERS
                 } else {
@@ -1744,7 +1772,9 @@ class RequestHandler(
             false
         }
 
-        // The stored key as before the approval, so the key signed with is the one approved.
+        // The stored key as it was before the approval, so the key signed
+        // with is the one the owner approved. A key with no row is held to
+        // the public key under its alias as it was before the approval.
         val signingAlias = KeystoreManager.generalKeyAlias(signParams.keyId)
         val selected = keyDao.getByKeyId(signParams.keyId)?.let { approvalSnapshot(it, signingAlias) }
         val unlistedDer = if (selected == null) keystoreManager.publicKeyDERAt(signingAlias) else null
@@ -2301,7 +2331,24 @@ class RequestHandler(
         val keyId = params.optString("keyId").ifEmpty { params.optString("credentialId") }
             .ifEmpty { throw ProtocolException("Missing 'keyId' parameter", errorCode = ErrorCodes.INVALID_PARAMS) }
 
-        // One revoke of the canonical ID: only the key the ID names loses its material, under the key's lock.
+        // One revoke of the canonical ID from the first removal: the Android
+        // Keystore and the software key store (only one of the two holds the
+        // key), then the unified key store's row. An ID with a row or a
+        // software key of its own is that key; only an ID with neither is read
+        // as a raw Keystore alias. Software key `xkey_key_a` and hardware key
+        // `a` (alias `xkey_key_a`) can both exist, and deleting the first must
+        // never delete the second.
+        //
+        // Only the one key the ID names loses its material. A raw alias
+        // (`xkey_credential_k`, `xkey_key_k`) is that Keystore entry itself;
+        // a canonical ID is its software key if the store holds one, else its
+        // general key `xkey_key_<id>`, else the other Keystore entry discovery
+        // maps to it, by the rules `KeyDao.deleteKeyRow` uses. A credential `xkey_credential_k` and a
+        // general key `xkey_key_k` can both exist, and deleting one must leave
+        // the other.
+        //
+        // Under the key's lock, so an approved use already rechecking the key
+        // finishes with it before it goes.
         val softwareKeys = com.automatethethings.xkey.crypto.SoftwareKeyStore(context)
         val canonicalId = if (keyDao.exists(keyId) || softwareKeys.contains(keyId)) keyId else canonicalKeyId(keyId)
         var materialRemoved = false
@@ -2376,7 +2423,15 @@ class RequestHandler(
             false -> SharingPolicyType.PRIVATE
         }
 
-        // Compare-and-set bound to the row id and policy revision read; the write and its audit are one non-cancellable step.
+        // The compare-and-set, like updateSharingPolicy, keeps `shareable` and
+        // `sharing_policy` in step, which KeyEntity requires. It is bound to
+        // the row read above (its immutable id), so a key deleted and
+        // re-created under the same key id is never written, and to the
+        // policy revision [from] was read at, so a policy that changed and
+        // changed back since is not written either. It returns true only
+        // when it changed the row, and audits exactly that change. The write
+        // and the audit are one non-cancellable step: a request cancelled
+        // after the commit and before its result arrives still audits it.
         suspend fun setPolicyFrom(from: KeyEntity, policy: SharingPolicyType): Boolean {
             val expected = from.sharingPolicy
             return persistAudited(
@@ -2448,7 +2503,10 @@ class RequestHandler(
                     notice.close()
                 }
             }
-            // The approval covers only the policy revision read; any write since voids it.
+            // The owner approved widening from the policy revision read
+            // above. If any policy write landed while the prompt was up, even
+            // one that changed the policy back, the approval does not cover
+            // the new state: write nothing unless the key is already open.
             if (!setPolicyFrom(entity, SharingPolicyType.ALL_PEERS) &&
                 storedRow().sharingPolicy != SharingPolicyType.ALL_PEERS
             ) {
@@ -2681,7 +2739,9 @@ class RequestHandler(
                 )
             }
 
-            // Enrollment binds this device's identity to a CA, so it is gated on the user like key attestation.
+            // Enrollment binds this device's identity to a CA, so it is gated on
+            // the user the same way key attestation is. A silent enrollment is
+            // one the owner never agreed to.
             requireUserPresenceForAttestation(
                 request = request,
                 operationType = "deviceEnrollment",
@@ -2822,7 +2882,9 @@ class RequestHandler(
         val attestParams = LocalAttestDeviceParams.fromJson(params)
         val nonce = attestParams.getNonceBytes()
 
-        // Derived from this device's own session; a session it cannot bind to is refused.
+        // Derived from THIS device's own session. The request carries no channel
+        // binding to copy, by design -- a session we cannot bind to is a refusal,
+        // not an unbound signature.
         val channelBinding = deriveChannelBinding()
 
         requireUserPresenceForAttestation(
@@ -2882,7 +2944,9 @@ class RequestHandler(
             "securityLevel=$securityLevel, bootState=${rootOfTrust.bootState}, " +
             "deviceLocked=${rootOfTrust.deviceLocked}")
 
-        // The phone stores only its own fingerprint, to echo on reconnect; the laptop keeps the result.
+        // The phone stores no record of the LAPTOP here: this handler is the
+        // phone attesting itself, and the laptop keeps the result. What it does
+        // store is its OWN fingerprint, above, so it can echo it on reconnect.
         Response.success(request.id, result.toJson())
     }
 
@@ -3219,7 +3283,12 @@ class RequestHandler(
                 val tag = stream.readUnsignedByte()
                 val length = readDerLength(stream)
 
-                // A context-specific constructed tag (0xA0-0xBF): mask with 0xE0.
+                // Look for a context-specific CONSTRUCTED tag (0xA0-0xBF).
+                // The class bits are 0xC0 and the constructed bit is 0x20, so the
+                // mask must be 0xE0. Masking with 0xC0 clears the constructed bit
+                // and can only ever yield 0x00/0x40/0x80/0xC0 — never 0xA0 — so
+                // this branch never ran and every device reported the hardcoded
+                // defaults, including deviceLocked = true for an unlocked one.
                 if ((tag and 0xE0) == 0xA0) {
                     // Context-specific tag - check if this is RootOfTrust
                     val content = ByteArray(length)
@@ -3411,7 +3480,8 @@ class RequestHandler(
             false
         }
 
-        // Whether verification actually happened, which the UV bit must report.
+        // Tracks whether verification ACTUALLY happened, which is what the UV bit
+        // must report. The request asking for it is not evidence that it occurred.
         var userVerified = false
 
         // The passkey as the owner approves it, rechecked under the lock. Its
@@ -3438,7 +3508,10 @@ class RequestHandler(
             }
         }
 
-        // Refuse when the peer required verification that did not happen, unless strict UV is off: UV is signed.
+        // The UV bit is signed inside authenticator data, so a response that
+        // overstates it cannot be corrected afterwards. Refuse the ceremony
+        // outright when the peer required verification that did not happen,
+        // unless the owner has turned strict user verification off.
         UserVerificationCompliance.enforce(
             requirement = if (assertionParams.userVerificationRequired) {
                 UvRequirement.REQUIRED
@@ -3450,7 +3523,12 @@ class RequestHandler(
             ceremony = "Passkey assertion for ${assertionParams.rpId}"
         )
 
-        // Reload the credential under its lock and hold it across counter, signature and write, so counts increase.
+        // Other assertions with this passkey may have signed while this one
+        // waited for its approval. Reload the credential under its lock and
+        // hold the lock across the counter increment, the signature and the
+        // counter write, so each assertion signs a distinct, increasing count.
+        // Still the passkey the owner approved (its row was read by this id);
+        // its counter may have moved.
         val (newSignCount, authData, signature) = useApprovedKey(asApproved) { current ->
             if (!canShareKeyWithPeer(current.row, peerPublicKeyHex)) {
                 throw ProtocolException(
@@ -3484,7 +3562,9 @@ class RequestHandler(
             authData[35] = ((newSignCount shr 8) and 0xFF).toByte()
             authData[36] = (newSignCount and 0xFF).toByte()
 
-            // Sign authenticatorData || clientDataHash with the approved credential's alias.
+            // Sign authenticatorData || clientDataHash, unhashed, with the
+            // credential key the owner approved, under the alias its
+            // approval read.
             val signature = current.signWebAuthn(authData, assertionParams.getClientDataHashBytes())
 
             Triple(newSignCount, authData, signature)
@@ -3528,7 +3608,8 @@ class RequestHandler(
             ?: return if (keystoreManager.isStrongBoxAvailable()) "strongbox" else "tee"
 
         return try {
-            // Unwrap the outer OCTET STRING: tag 0x04, length, content.
+            // The extension value is an OCTET STRING wrapping the actual DER data.
+            // Unwrap the outer OCTET STRING: tag(0x04) + length + content.
             val outerStream = java.io.DataInputStream(extensionBytes.inputStream())
             val outerTag = outerStream.readUnsignedByte()
             if (outerTag != 0x04) {
@@ -3617,7 +3698,9 @@ class RequestHandler(
                 BiometricManager.BIOMETRIC_SUCCESS
     }
 
-    // OATH handlers
+    // -------------------------------------------------------------------------
+    // OATH Handlers
+    // -------------------------------------------------------------------------
 
     /**
      * Lists all local OATH credentials (without secrets).
@@ -3718,7 +3801,11 @@ class RequestHandler(
 
             val type = credential.optString("type", "totp").lowercase()
             val issuer = credential.optString("issuer", null)
-            // Issuer and account arrive separately, so a ':' inside either is kept; returns the stored credential id.
+            // The issuer and account arrive as separate fields: the structured
+            // import keeps a ':' inside either where it is (#152), as
+            // SyncEngine.mergeOath does. The id it returns is the one the
+            // credential is stored under: the `name` local.oathList reports
+            // and the credential_id oathGenerate/oathRemove accept.
             val credentialId = oathRepository.importStructured(
                 type = type,
                 issuer = issuer,
@@ -4024,7 +4111,30 @@ class RequestHandler(
         }
     }
 
-    // Key sharing: a confirmed peer, a policy that admits it, hardware keys public half only, software keys private material only when exportable and shareable; inbound material is stored non-exportable.
+    // -------------------------------------------------------------------------
+    // Key-Sharing Handlers
+    //
+    // Policy model, enforced for every key that leaves or enters the device:
+    //
+    //  1. The session must carry a confirmed peer identity (the Noise static
+    //     public key recorded at pairing). Sharing with an anonymous peer is
+    //     never authorized.
+    //  2. The key's recorded sharing policy must admit that peer
+    //     ([canShareKeyWithPeer], which asks [SharePermission], the decision
+    //     every outbound share also takes): PRIVATE never, ALL_PEERS always,
+    //     SELECTED_PEERS only when key_sharing_policies lists the peer and
+    //     the peer's grant revocation is not pending.
+    //  3. A HARDWARE-backed key can only ever share its public half (Android
+    //     Keystore private/symmetric material is non-exportable).
+    //  4. A SOFTWARE-backed key may additionally share its private/symmetric
+    //     material, and only when both the unified key store and the software
+    //     key store mark it exportable AND shareable.
+    //
+    // Material inbound from a peer is stored non-exportable and non-shareable:
+    // receiving a key is not consent to hand it back out. Material crosses the
+    // already Noise-encrypted pairing channel as-is (no extra wrapping layer),
+    // matching the go-xkms software backend's KeyMaterial semantics.
+    // -------------------------------------------------------------------------
 
     /**
      * Returns the confirmed peer identity of the connection this request
@@ -4088,7 +4198,9 @@ class RequestHandler(
             "Key ${approved.keyId} was deleted while its approval waited",
             errorCode = ErrorCodes.KEY_NOT_FOUND
         )
-        // The row and material from the alias the approval read.
+        // The row and the key material signed with, read from the one alias
+        // the approval read and the signer signs with: a key put under that
+        // alias while the prompt waited is not the key the owner approved.
         val material = keystoreManager.publicKeyDERAt(snapshot.alias)
         if (!current.isSameKeyAs(approved) || !material.contentEquals(snapshot.publicKeyDer)) {
             throw ProtocolException(
@@ -4507,7 +4619,9 @@ class RequestHandler(
                 ?: return Response.error(request.id, ErrorCodes.KEY_NOT_FOUND, "No signing key available")
         }
 
-        // Every co-signature is approved on the phone through the prompt queue.
+        // The owner approves every co-signature on the phone. The prompt
+        // takes its turn in the one prompt queue and is settled only by its
+        // own answer; a locked phone's notification opens that same prompt.
         val approvals = cosignApprovals
             ?: return Response.error(
                 request.id,
@@ -4520,7 +4634,9 @@ class RequestHandler(
             ?: return Response.error(request.id, ErrorCodes.KEY_NOT_FOUND, "Could not retrieve public key")
         val title = "Co-sign request"
         val subtitle = "Approve co-signing hash ${contentHash.take(8)}"
-        // A per-use key signs inside the prompt via a CryptoObject bound to this hash.
+        // A key that needs the owner for every use signs in the prompt itself:
+        // the owner's authentication unlocks a CryptoObject that signs exactly
+        // this hash, so the approval cannot be spent on another payload.
         val perOperation = signingKey.authDurationSeconds == 0
         val jcaAlgorithm = runCatching { KeystoreManager.jcaSignatureAlgorithm(signingKey.algorithm) }.getOrNull()
         if (perOperation && jcaAlgorithm == null) {
@@ -4566,7 +4682,8 @@ class RequestHandler(
             notice.close()
         }
 
-        // The approved key is rechecked and used under its lock.
+        // The owner approved the key as it was when the prompt went up; it is
+        // rechecked and used under its lock, so nothing replaces it meanwhile.
         return useApprovedKey(asApproved) { approvedKey ->
             val signatureBytes = if (promptSignature != null) {
                 // The prompt signed with whatever key its alias held by then:

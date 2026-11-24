@@ -42,8 +42,8 @@ class XKeyApplication : Application() {
     }
 
     /**
-     * A device that stops being paired loses its per-key sharing grants.
-     * Registered here, once per process, because the Activity that
+     * A device that stops being paired loses its per-key sharing grants
+     * (#174). Registered here, once per process, because the Activity that
      * unpairs and the services that evict each build their own repository;
      * its removal listeners are process-wide. Revocations a previous process
      * left pending (it died, or the delete failed) are replayed here.

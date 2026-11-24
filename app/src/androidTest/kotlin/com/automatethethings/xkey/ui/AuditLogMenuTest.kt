@@ -61,8 +61,11 @@ import java.io.File
  *
  * `AuditLogActivityUiTest` and `AuditLogFlowTest` between them drive the chips,
  * the search box, the hero summary and the expandable rows, but both explicitly
- * skip the toolbar's overflow. The activity installs it through
- * `onCreateOptionsMenu`/`onOptionsItemSelected`; this suite covers:
+ * skip the toolbar's overflow: the menu used to be inflated straight onto the
+ * `Toolbar` *before* `setSupportActionBar`, which made AppCompat throw it away
+ * and left export, clear-filters and both delete actions unreachable. The
+ * activity now overrides `onCreateOptionsMenu`/`onOptionsItemSelected`, so this
+ * suite covers the block that unlocked:
  *
  * - the menu itself: every documented action is inflated with the right id
  * - `exportToJson` / `exportToCsv` / `shareFile`, driven all the way to a real

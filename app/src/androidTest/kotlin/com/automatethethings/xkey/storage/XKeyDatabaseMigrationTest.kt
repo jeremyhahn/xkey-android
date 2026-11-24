@@ -278,7 +278,7 @@ class XKeyDatabaseMigrationTest {
             keys.updateSharingPolicy("shared-key", SharingPolicyType.ALL_PEERS)
             assertEquals(2L, keys.getByKeyId("shared-key")?.policyRevision)
 
-            // An approval taken at revision 0 does not write.
+            // An approval taken at revision 0 no longer writes.
             assertEquals(
                 0,
                 keys.compareAndSetSharingPolicy(

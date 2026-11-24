@@ -46,7 +46,7 @@ class CosignOperation(
 }
 
 /**
- * Asks the owner to approve co-signatures, each as one entry in the
+ * Asks the owner to approve co-signatures (#177), each as one entry in the
  * process-wide [PromptOwnership] queue that every other prompt (FIDO2,
  * attestation, signing) takes its turn in.
  *
@@ -132,7 +132,8 @@ class CosignApprovalPrompts(
             return coroutineScope {
                 val answer = request { key, prompt ->
                     onLaunch(key, prompt)
-                    // The answer window starts with the prompt; running out withdraws the request.
+                    // The owner's time to answer starts with the prompt. Running
+                    // out withdraws the request, which settles its queue entry.
                     launch {
                         delay(timeoutMs)
                         timedOut.set(true)

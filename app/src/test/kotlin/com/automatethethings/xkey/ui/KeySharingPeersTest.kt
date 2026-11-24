@@ -49,7 +49,7 @@ import org.junit.Test
 
 /**
  * The key-sharing sheet's peer list while a re-paired peer's grant
- * revocation is still pending: the peer is shown unselected and not
+ * revocation is still pending (#174): the peer is shown unselected and not
  * selectable, a grant for it is refused, and once the revocation completes
  * the list updates on its own and the peer can be granted again.
  */

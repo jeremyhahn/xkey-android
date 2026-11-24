@@ -67,7 +67,7 @@ import org.junit.Before
 import org.junit.Test
 
 /**
- * Pins the approval rule for `local.setKeyPolicy`.
+ * Pins the approval rule for `local.setKeyPolicy` (#178).
  *
  * Widening a key to every peer needs a confirmed peer and the owner's
  * approval on the phone; a refused or impossible prompt leaves the stored

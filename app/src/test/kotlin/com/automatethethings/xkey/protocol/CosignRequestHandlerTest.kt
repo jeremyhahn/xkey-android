@@ -78,7 +78,7 @@ import java.util.Base64
 
 /**
  * `cosign.request` signs a peer's content hash only after the owner approves
- * it on the phone. The request goes through the real
+ * it on the phone (#177). The request goes through the real
  * [RequestHandler.handleRequest], so the dispatch error mapping is exercised,
  * and its prompt through a real [BiometricActivityLauncher], so it takes its
  * turn in the one [PromptOwnership] queue with every other prompt; the

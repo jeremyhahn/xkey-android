@@ -115,7 +115,7 @@ import kotlin.coroutines.CoroutineContext
  * Thread safety: All state mutations are protected by mutex locks.
  * The GATT callbacks run on the Binder thread pool and return at once: each
  * connection's events are queued and handled in order by one coroutine, so a
- * disconnect is handled after the writes that arrived before it.
+ * disconnect is handled after the writes that arrived before it (#63).
  */
 class GattServer(
     private val context: Context,
@@ -129,7 +129,7 @@ class GattServer(
     trustStoreRepository: TrustStoreRepository? = null,
     /**
      * Checks the EK certificate in TPM enrollment, the one place enrollment
-     * decides whether to trust it. Without one, enrollment refuses.
+     * decides whether to trust it (#280). Without one, enrollment refuses.
      */
     private val idevidVerifier: IDevIDVerifier? = trustStoreRepository?.let { IDevIDVerifier(it) },
     /** How long a send waits for the peer to write the CCCD before giving up. */
@@ -177,14 +177,17 @@ class GattServer(
         // matches the digest size the desktop's attestation key works in.
         private const val ENROLLMENT_NONCE_SIZE = 32
 
-        // PCRs 0-7 are the SRTM measurements a baseline covers.
+        // PCRs 0-7 are the SRTM measurements: firmware, option ROMs, boot
+        // configuration and the boot manager. They are what a baseline is for.
         private val ENROLLMENT_PCR_INDICES = listOf(0, 1, 2, 3, 4, 5, 6, 7)
 
         // Recorded only after credential activation and a verified quote have
         // both passed, which is what separates it from a bare CA signature.
         private const val TRUST_LEVEL_FULL_ATTESTATION = "full-attestation"
 
-        // CCCD enable values (Core Vol 3 Part G 3.3.3.3); android.jar on the JVM leaves the constants null.
+        // The CCCD values that enable notifications and indications (Core
+        // Vol 3 Part G 3.3.3.3), the same bytes as BluetoothGattDescriptor's
+        // constants, which the JVM's android.jar leaves null.
         private val CCCD_ENABLE_NOTIFICATION = byteArrayOf(0x01, 0x00)
         private val CCCD_ENABLE_INDICATION = byteArrayOf(0x02, 0x00)
         private val CCCD_DISABLE = byteArrayOf(0x00, 0x00)
@@ -192,10 +195,15 @@ class GattServer(
         // How long a send waits for the peer to write the CCCD before giving up.
         private const val NOTIFICATION_READY_TIMEOUT_MS = 5_000L
 
-        // GATT events one connection may queue; more than a whole message is a flood and ends the connection.
+        // GATT events one connection may queue ahead of the one being handled.
+        // A whole message is at most FragmentReassembler's 1000 fragments, so
+        // a peer that sends one while an event waits on a lock still fits;
+        // more is a flood, and the connection ends (#63).
         private const val EVENT_QUEUE_CAPACITY = 1024
 
-        // How long a disconnect waits for queued events to be handled before ending the connection.
+        // How long a disconnect waits for the events queued before it to be
+        // handled, as StreamPairingSession's drain, before it ends the
+        // connection anyway (#63).
         private const val DRAIN_DEADLINE_MS = 5_000L
     }
 
@@ -229,8 +237,8 @@ class GattServer(
     /**
      * The id assigned each connection's Noise session when the device
      * connected. Every request on it carries this id to the handler, which
-     * keys PER_SESSION approval on it rather than on anything handler-wide.
-     * Weak, so an ended session's entry goes with it.
+     * keys PER_SESSION approval on it rather than on anything handler-wide
+     * (#134). Weak, so an ended session's entry goes with it.
      */
     private val connectionIds: MutableMap<NoiseSession, String> =
         java.util.Collections.synchronizedMap(java.util.WeakHashMap())
@@ -249,7 +257,9 @@ class GattServer(
     // Fragment reassembly per device
     private val fragmentBuffer = ConcurrentHashMap<String, FragmentReassembler>()
 
-    // Each device's latest CCCD write, read by waiting sends; see notificationsWritten.
+    // The latest CCCD write of each device's published connection, where a
+    // waiting send reads it (see notificationsWritten). A descriptor read
+    // takes the open connection's own, from its link.
     private val notificationEnabled = ConcurrentHashMap<String, Boolean>()
 
     // Completed while each device's latest CCCD write is an enable; a disable re-arms it
@@ -294,8 +304,8 @@ class GattServer(
      * Serialises every step that touches the Noise state: the identity
      * prologue, the handshake, decryption, encryption, the binding read and
      * the reset that zeroes the keys. A teardown therefore never interleaves
-     * with a handshake that is splitting or installing its transport keys.
-     * Taken after [stateMutex] and [sendMutex], never before.
+     * with a handshake that is splitting or installing its transport keys
+     * (#59). Taken after [stateMutex] and [sendMutex], never before.
      */
     private val noiseMutex = Mutex()
 
@@ -342,7 +352,7 @@ class GattServer(
 
     private val eventQueuesLock = Any()
 
-    /** Revokes the live session when its desktop is unpaired. */
+    /** Revokes the live session when its desktop is unpaired (#59). */
     private val removalListener = PairedDeviceRemovalListener { revoke(it) }
 
     init {
@@ -464,7 +474,8 @@ class GattServer(
             Thread.sleep(100)
         }
 
-        // A stop during service registration closed the published server; this start reports nothing running.
+        // A stop that ran while the service was added closed the server it
+        // published; this start reports nothing running.
         if (!startGeneration.publish(token) { isRunning = true }) {
             Log.w(TAG, "GATT server stopped while it started")
             isStarting = false
@@ -552,7 +563,11 @@ class GattServer(
         )
         Log.i(TAG, "BluetoothGattService created with UUID: ${flexKeyService?.uuid}")
 
-        // Control Point: plain PERMISSION_WRITE, since Noise XX encrypts at the application layer and OS bonding is fragile.
+        // Control Point characteristic - client writes requests here
+        // Note: We use PERMISSION_WRITE (not PERMISSION_WRITE_ENCRYPTED) because
+        // encryption is handled at the application layer via the Noise XX protocol.
+        // BLE link encryption requires OS-level bonding which is fragile across
+        // app reinstalls and Android RPA rotation.
         controlPointCharacteristic = BluetoothGattCharacteristic(
             CONTROL_POINT_UUID,
             BluetoothGattCharacteristic.PROPERTY_WRITE or
@@ -627,7 +642,10 @@ class GattServer(
                         Log.w(TAG, "Ignoring a connect from $deviceAddress: the server is stopped")
                     }
                 }
-                // Never queued behind writes: it ends the queue, which still hands over what arrived first.
+                // Never queued behind the writes, so a full queue cannot
+                // refuse it: it ends the queue, which still hands over what
+                // arrived before it. A connection already ended has no queue
+                // to end.
                 BluetoothProfile.STATE_DISCONNECTED -> synchronized(eventQueuesLock) {
                     openQueueOf(device)?.let { endInput(it) }
                 }
@@ -751,7 +769,10 @@ class GattServer(
         ) {
             Log.d(TAG, "Descriptor read request: device=${device.address}, descriptor=${descriptor.uuid}")
 
-            // The open connection's latest CCCD write, from its link; null when no connection is open.
+            // The latest CCCD write of the open connection, from its link,
+            // which takes each write before the consumer publishes it. The
+            // published map can still hold the connection a reconnect
+            // replaced. Null when no connection is open.
             val enabled = synchronized(eventQueuesLock) { openLink(device)?.let { it.notifications == true } }
             if (enabled == null) {
                 Log.w(TAG, "Refusing a descriptor read from ${device.address}: its connection is not open")
@@ -793,7 +814,10 @@ class GattServer(
             if (descriptor.uuid == CCCD_UUID && value != null) {
                 val enable = value.contentEquals(CCCD_ENABLE_NOTIFICATION) ||
                         value.contentEquals(CCCD_ENABLE_INDICATION)
-                // Recorded here, not by the consumer, whose wait the latest write decides; refused outside an open connection.
+                // Recorded here, not by the consumer: a frame written before
+                // this write has the consumer waiting on it, and
+                // the latest write decides that wait. One
+                // outside an open connection is refused.
                 val recorded = notificationsWritten(device, enable)
                 if (recorded) {
                     Log.d(TAG, "Notifications ${if (enable) "enabled" else "disabled"} for ${device.address}")
@@ -881,7 +905,7 @@ class GattServer(
 
     /**
      * One connection's GATT events, in the order the stack delivered them,
-     * and the one coroutine that handles them.
+     * and the one coroutine that handles them (#63).
      *
      * A coroutine launched per callback does not run in order: a disconnect
      * could settle the phone's pending requests as "Connection lost" before
@@ -1310,7 +1334,8 @@ class GattServer(
             return
         }
 
-        // After the disconnect, only an application frame (possibly the desktop's answer) is drained.
+        // Once the disconnect is seen, only an application frame is drained:
+        // it may carry the desktop's answer to the phone's request (#63).
         val ended = draining()
 
         // Handle pre-handshake identity exchange
@@ -1443,7 +1468,10 @@ class GattServer(
         val session = noiseSession ?: return
 
         try {
-            // Process and publish under one hold of the Noise lock, so a concurrent removal is seen before keys are installed.
+            // The message is processed and its outcome published under one
+            // hold of the Noise lock. A removal landing inside processing,
+            // even after the transport keys are split, is seen here before
+            // the keys are installed or the connection is reported.
             val (response, established) = noiseMutex.withLock {
                 if (!isCurrent(session)) return
                 val response = session.processHandshakeMessage(message)
@@ -1500,7 +1528,10 @@ class GattServer(
             return
         }
 
-        // Decrypt outside the block: a Noise decryption failure is fatal to the session.
+        // Decryption is handled outside the block below because a failure is
+        // fatal in Noise: the receive nonce has already advanced, so every later
+        // frame on this session would fail too. Answering with an error and
+        // keeping the session alive leaves a connection that can never recover.
         val plaintext = try {
             noiseMutex.withLock {
                 // A frame for a revoked or replaced session is dropped unread.
@@ -1516,10 +1547,15 @@ class GattServer(
             return
         }
 
-        // The plaintext can carry secrets, so it is never logged.
+        // The plaintext is a full JSON-RPC request and can carry key
+        // material, passwords and OATH secrets, so it is never logged.
         Log.d(TAG, "Decrypted message: ${plaintext.size} bytes")
 
-        // While draining, only a response to the phone's own request is handled in place; requests run on their own.
+        // Draining a connection's queue (#63), only a response to the phone's
+        // own request is handled in place, so it settles before a disconnect
+        // queued behind it. A request can wait on the user, and the queue must
+        // not wait with it: it runs on its own, as each write did before. One
+        // read after the disconnect was seen is not run and answers nothing.
         val queue = currentCoroutineContext()[EventQueue]
         if (queue != null && !isResponse(plaintext)) {
             if (queue.inputEnded) {
@@ -1615,14 +1651,24 @@ class GattServer(
         // Nothing runs for a request whose session was revoked or replaced.
         if (!isCurrent(session)) return null
 
-        // Until pairing is confirmed only pairing.confirm may run; a handshake proves a key, not the user's approval.
+        // A completed Noise XX handshake proves only that the peer holds *a*
+        // key, not that the user approved it. Until pairing is confirmed, the
+        // only request that may run is pairing.confirm itself; everything else
+        // is refused. Without this, any peer that can reach the transport
+        // could sign, list keys, or export shared material unapproved.
+        // A server without a paired-device store cannot approve anyone, so it
+        // is gated like any other: nothing it serves runs unpaired.
         if (!pairingConfirmed) {
             handlePairingConfirmIfNeeded(plaintext, session)?.let { return it }
             if (!isCurrent(session)) return null
             return rejectUnpaired(plaintext)
         }
 
-        // A confirmed session answers pairing.confirm itself, with no prompt and no store change.
+        // A confirmed session (a known peer adopted at handshake completion,
+        // or one confirmed earlier) answers pairing.confirm itself, as
+        // StreamPairingSession does: RequestHandler has no handler for it, and
+        // rerunning `xkey device pair` must still succeed. No prompt, no store
+        // change; a session revoked or replaced meanwhile answers nothing.
         confirmAlreadyPaired(plaintext)?.let { response ->
             return synchronized(revocationLock) {
                 response.takeIf { isCurrent(session) && pairingConfirmed }
@@ -1630,7 +1676,11 @@ class GattServer(
         }
 
         Log.d(TAG, "Processing request...")
-        // Attach this session's binding and peer, read under the Noise lock, for the shared handler.
+        // The request carries this session's binding and peer, read once under
+        // the Noise lock as the SAS reads them. The handler is shared with the
+        // stream transports, so nothing handler-wide can say which session a
+        // request arrived on; the router calls the handler in
+        // this coroutine, so the element reaches it.
         val binding = noiseMutex.withLock { session?.takeIf { isCurrent(it) }?.sessionBinding() }
         val caller = RequestHandler.servedConnection(
             SessionBindingProvider { binding?.takeIf { isCurrent(session) }?.copyOf() },
@@ -1981,7 +2031,10 @@ class GattServer(
             try {
                 csr.verifySelfSignature()
             } catch (e: TcgCsrException) {
-                // The CSR's self-signature must verify before anything is asked of the device.
+                // The self-signature covers the CSR's own body: when it does not
+                // verify, the package disagrees with itself. Nothing has been
+                // asked of the device yet, so this says nothing about what it
+                // holds.
                 refuseEnrollment(
                     publicKeyHex, deviceName,
                     EnrollmentRefusal.MalformedPackage("CSR verification failed: ${e.message}")
@@ -1997,7 +2050,11 @@ class GattServer(
             val iak = csr.iak
             val idevid = csr.idevid
 
-            // Step 3: credential activation; an EK this side cannot wrap to is an interoperability error, not a failed proof.
+            // Step 3: credential activation. Only a TPM holding both this
+            // endorsement key and this attestation key can recover the secret.
+            // An EK this side cannot wrap a secret to is an interoperability
+            // problem, not a device that failed to prove anything: no challenge
+            // was ever put to it.
             val ekPublicKey = ekCertificate.publicKey as? RSAPublicKey
                 ?: refuseEnrollment(
                     publicKeyHex, deviceName,
@@ -2103,7 +2160,20 @@ class GattServer(
                     "in the ${quote.pcrBank} bank"
             )
 
-            // Step 5: the IAK must certify the IDevID, or a software key could get a device certificate; freshness comes from activation and the quote.
+            // Step 5: the signing key must be certified by the attestation key.
+            //
+            // Everything up to here is about the IAK: activation proved it sits
+            // in the TPM holding the endorsement key, and the quote proved it
+            // signs that TPM's current state. None of it says anything about the
+            // IDevID. The CSR's self-signature proves only possession of the
+            // IDevID private key, which is equally true of a key generated in
+            // software -- so without this a device with a genuine TPM could be
+            // issued a device identity certificate over a software key.
+            //
+            // The nonce is not checked here: this certification is produced when
+            // the IDevID is created, long before this CA chose a challenge.
+            // Freshness for the ceremony comes from activation and the quote,
+            // both of which are bound to values this CA picked in this session.
             try {
                 TpmCertifyVerifier.verify(
                     attester = iak,
@@ -2245,7 +2315,7 @@ class GattServer(
      * The certificate is then checked by [IDevIDVerifier] against the trust
      * store's TPM vendor roots. Only [IDevIDVerificationResult.Trusted] lets
      * enrollment continue; every other result, a store with no anchors among
-     * them, and a server with no verifier end enrollment.
+     * them, and a server with no verifier end enrollment (#280).
      */
     private suspend fun verifyEndorsementKey(
         csr: TcgCsrIDevID,
@@ -2519,7 +2589,9 @@ class GattServer(
                     synchronized(revocationLock) {
                         val peerKeyHex = session.getRemoteStaticKey()?.toHexString()
                         if (session === revokedSession) throw PeerNotPairedException(peerKeyHex)
-                        // A scoped send on a replaced or ended connection fails as changed, so the caller re-decides.
+                        // A scoped send whose connection was replaced or ended
+                        // fails as a changed connection, so the caller decides
+                        // again on whatever session is current now.
                         if (expected != null &&
                             (expected.connection !== session || !expected.sameAs(confirmedConnection()))
                         ) {
@@ -2565,7 +2637,10 @@ class GattServer(
     private fun abandon(session: NoiseSession) {
         synchronized(revocationLock) {
             if (noiseSession !== session || endedSession === session) return
-            // A refused frame during the drain ends nothing until the drain ends.
+            // A frame the stack refused while its connection drains ends nothing yet:
+            // nothing more is sent on the session, and the replies queued
+            // before the disconnect still decrypt on it. It ends with the
+            // drain.
             if (sessionQueue?.inputEnded == true) return
             endedSession = session
         }
@@ -2617,7 +2692,12 @@ class GattServer(
         val characteristic = responseCharacteristic ?: return null
         val server = gattServer ?: return null
 
-        // Wait up to 5s for a CCCD enable; a cancelled readiness is caught here, not propagated.
+        // Wait, up to 5s, until the latest CCCD write enables notifications.
+        // stop() and handleDeviceDisconnected *cancel* the readiness, and an
+        // await on a cancelled deferred throws CancellationException rather
+        // than returning null. Letting it propagate would reach
+        // handleApplicationMessage's catch, which would try to answer over the
+        // connection that just went away and throw again.
         val awaited = runCatching {
             withTimeoutOrNull(notificationReadyTimeoutMs) { awaitNotifications(device.address) }
         }
@@ -2851,7 +2931,8 @@ class GattServer(
             override val binding: Any = session
 
             override suspend fun sendEncryptedMessage(data: ByteArray) {
-                // sendOnSession refuses a session that is not current.
+                // sendOnSession refuses a session that is no longer current,
+                // under the lock that installs a replacing one.
                 sendOnSession(session, device, data, revalidatePeer = true)
             }
 

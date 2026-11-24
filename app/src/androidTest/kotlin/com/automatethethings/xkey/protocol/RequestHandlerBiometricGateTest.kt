@@ -167,7 +167,9 @@ class RequestHandlerBiometricGateTest {
         )
     }
 
-    // Attestation policy: always
+    // ------------------------------------------------------------------
+    // Attestation policy: ALWAYS
+    // ------------------------------------------------------------------
 
     @Test
     fun attestKeyUnderTheAlwaysPolicyRefusesWhenItCannotPrompt() {

@@ -156,7 +156,9 @@ class XKeyGattServicePairingPromptTest {
         assertFalse(probe.service.onPairingConfirmationRequired("Orphaned Laptop", "abcd1234"))
     }
 
-    // The prompt's host: whichever screen is in front
+    // -----------------------------------------------------------------
+    // The prompt's host: whichever screen is in front (#320)
+    // -----------------------------------------------------------------
 
     /**
      * Nothing registers the activity: the screen in front hosts the prompt

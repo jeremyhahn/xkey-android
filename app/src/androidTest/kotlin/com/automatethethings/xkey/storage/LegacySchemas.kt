@@ -304,7 +304,8 @@ object LegacySchemas {
             "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
             "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '14aec21fe86e3f39f29d271ea3c80b4d')"
         ),
-        // Schema 12 as exported in 12.json: v11 plus the passwords table's expires_at, shared and tenant_id columns.
+        // Schema 12 as exported in 12.json (#42): the v11 tables plus the
+        // passwords table's expires_at, shared and tenant_id columns.
         12 to listOf(
             "CREATE TABLE IF NOT EXISTS `credential_metadata` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `credential_id` TEXT NOT NULL, `rp_id` TEXT NOT NULL, `rp_name` TEXT NOT NULL, `user_id` TEXT NOT NULL, `user_name` TEXT NOT NULL, `user_display_name` TEXT NOT NULL, `public_key_cose` BLOB NOT NULL, `sign_count` INTEGER NOT NULL, `created_at` INTEGER NOT NULL, `last_used_at` INTEGER NOT NULL, `is_discoverable` INTEGER NOT NULL)",
             "CREATE UNIQUE INDEX IF NOT EXISTS `index_credential_metadata_credential_id` ON `credential_metadata` (`credential_id`)",

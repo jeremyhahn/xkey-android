@@ -296,7 +296,7 @@ class RemoteSyncClientTest {
         coVerify(exactly = 0) { anyConstructed<SyncEngine>().gatherPasswords() }
     }
 
-    // --- Audit -------------------------------------------------
+    // --- Audit (issue #221) -------------------------------------------------
 
     private fun auditedClient() =
         RemoteSyncClient(context, desktopOf(sender, router), requestTimeoutMs = 5_000L, peerDeviceId = DESK_PEER, peerDeviceName = DESK_NAME)
