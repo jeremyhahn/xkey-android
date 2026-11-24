@@ -14,7 +14,10 @@
  */
 package com.automatethethings.xkey.password
 
+import com.automatethethings.xkey.pin.LockoutClock
+import com.automatethethings.xkey.pin.LockoutState
 import com.automatethethings.xkey.pin.PinLockout
+import com.automatethethings.xkey.pin.SystemLockoutClock
 import com.automatethethings.xkey.settings.PinSettingsRepository
 import com.automatethethings.xkey.settings.VaultUnlockAttempts
 import kotlinx.coroutines.Dispatchers
@@ -71,8 +74,12 @@ class VaultUnlockLockedOutException : PasswordVaultException("password vault unl
 class PasswordVaultFactorsUnreadableException(cause: Throwable) :
     PasswordVaultException("password vault factors cannot be read", cause)
 
-/** The PIN lockout thresholds the vault is held to. */
-class VaultUnlockLimits(val maxAttempts: Int, val lockoutDurationSeconds: Int)
+/** The PIN lockout thresholds the vault is held to, the PIN's backoff included. */
+class VaultUnlockLimits(
+    val maxAttempts: Int,
+    val lockoutDurationSeconds: Int,
+    val backoffEnabled: Boolean = false
+)
 
 /**
  * Persistence for the vault's failed-unlock counter, and the thresholds that
@@ -102,7 +109,7 @@ class PinSettingsVaultUnlockAttemptStore(
 
     override suspend fun limits(): VaultUnlockLimits {
         val settings = repository.getSettings()
-        return VaultUnlockLimits(settings.maxPinAttempts, settings.lockoutDurationSeconds)
+        return VaultUnlockLimits(settings.maxPinAttempts, settings.lockoutDurationSeconds, settings.backoffEnabled)
     }
 
     override suspend fun read(): VaultUnlockAttempts = repository.getVaultUnlockAttempts()
@@ -277,17 +284,20 @@ suspend fun requirePasswordStoreUnlocked(factors: PasswordVaultFactorStore) {
  * Unlock attempts are limited by the PIN's lockout rule ([PinLockout]) with
  * the PIN's thresholds, through [attempts]: once the consecutive failures
  * reach the limit, unlocks are refused for the lockout duration without
- * hashing anything. The counter is persisted and only a successful unlock
- * clears it.
+ * hashing anything, measured on the monotonic clock so a wall-clock change
+ * neither ends nor extends it. With the PIN's backoff each later lockout
+ * doubles (capped at [PinLockout.MAX_LOCKOUT_MS]); the vault is never blocked
+ * for good, since nothing could reset it without losing its contents. The
+ * counter is persisted and only a successful unlock clears it.
  *
- * @param clock Epoch milliseconds, the PIN lockout's time base.
+ * @param clock The PIN lockout's monotonic time base.
  */
 class PasswordVault(
     private val factors: PasswordVaultFactorStore,
     private val attempts: VaultUnlockAttemptStore,
     private val hasher: PassphraseHasher = Argon2PassphraseHasher,
     private val random: SecureRandom = SecureRandom(),
-    private val clock: () -> Long = System::currentTimeMillis
+    private val clock: LockoutClock = SystemLockoutClock()
 ) {
     companion object {
         private const val SALT_LENGTH = 16
@@ -332,7 +342,28 @@ class PasswordVault(
     suspend fun unlock(credential: PasswordVaultCredential) = mutex.withLock {
         attemptsMutex.withLock {
             val counter = attempts.read()
-            if (PinLockout.isLocked(counter.lockedUntil, clock())) throw VaultUnlockLockedOutException()
+            val limits = attempts.limits()
+            val policy = PinLockout.Policy(
+                maxAttempts = limits.maxAttempts,
+                lockoutDurationSeconds = limits.lockoutDurationSeconds,
+                backoff = limits.backoffEnabled,
+                // A permanent block would lose the vault's contents for good:
+                // no other credential can reset it.
+                permanentBlock = false
+            )
+            val state = PinLockout.fromStored(
+                failedAttempts = counter.failedAttempts,
+                remainingMs = counter.remainingMs,
+                anchorElapsedMs = counter.anchorElapsedMs,
+                anchorBootId = counter.anchorBootId,
+                legacyLockedUntil = counter.lockedUntil,
+                wallNow = clock.currentTimeMillis()
+            )
+            if (PinLockout.isLocked(state, policy, clock)) {
+                val reanchored = PinLockout.reanchor(state, clock)
+                if (reanchored != state) attempts.write(counterOf(reanchored, policy))
+                throw VaultUnlockLockedOutException()
+            }
             val enrolled = factors.list()
             if (enrolled.isEmpty()) throw VaultNotInitializedException()
             val matched = when (credential) {
@@ -344,22 +375,22 @@ class PasswordVault(
                 is PasswordVaultCredential.Key -> false
             }
             if (!matched) {
-                val limits = attempts.limits()
-                val failed = counter.failedAttempts + 1
-                attempts.write(
-                    VaultUnlockAttempts(
-                        failedAttempts = failed,
-                        lockedUntil = PinLockout.lockedUntil(
-                            failed, limits.maxAttempts, limits.lockoutDurationSeconds, clock()
-                        )
-                    )
-                )
+                attempts.write(counterOf(PinLockout.recordFailure(state, policy, clock), policy))
                 throw VaultCredentialRejectedException()
             }
             if (counter != VaultUnlockAttempts()) attempts.write(VaultUnlockAttempts())
             unlocked = true
         }
     }
+
+    /** The persisted counter of [state], with its informational wall-clock deadline. */
+    private fun counterOf(state: LockoutState, policy: PinLockout.Policy) = VaultUnlockAttempts(
+        failedAttempts = state.failedAttempts,
+        lockedUntil = PinLockout.displayDeadline(state, policy, clock),
+        remainingMs = state.remainingMs,
+        anchorElapsedMs = state.anchorElapsedMs,
+        anchorBootId = state.anchorBootId
+    )
 
     /**
      * Locks the vault.
