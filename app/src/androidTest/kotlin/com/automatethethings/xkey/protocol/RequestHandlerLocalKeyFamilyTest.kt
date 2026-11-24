@@ -859,7 +859,7 @@ class RequestHandlerLocalKeyFamilyTest {
                 .put("preferStrongBox", false)
         ).ok()
 
-        val der = java.util.Base64.getDecoder().decode(result.getString("publicKey"))
+        val der = java.util.Base64.getDecoder().decode(result.getString("publicKeyDer"))
         val publicKey = java.security.KeyFactory.getInstance("RSA")
             .generatePublic(java.security.spec.X509EncodedKeySpec(der)) as java.security.interfaces.RSAPublicKey
         assertEquals(bits, publicKey.modulus.bitLength())
