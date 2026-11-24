@@ -155,7 +155,7 @@ class BidirectionalMessageRouterTest {
         router.registerPendingResponse(43L, deferred)
 
         val out = router.processMessage(
-            bytes("""{"id":43,"error\":{\"code\":-32000,\"message\":\"key not found\"}}""")
+            bytes("""{"id":43,"error":{"code":-32000,"message":"key not found"}}""")
         )
 
         assertNull(out)

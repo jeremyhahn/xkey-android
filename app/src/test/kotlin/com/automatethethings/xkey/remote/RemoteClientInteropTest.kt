@@ -233,7 +233,7 @@ class RemoteClientInteropTest {
         runCurrent()
 
         router.processMessage(
-            bytes("""{"id":${holding.sent[0].id},"error\":{\"code\":-32000,\"message\":\"no such key\"}}""")
+            bytes("""{"id":${holding.sent[0].id},"error":{"code":-32000,"message":"no such key"}}""")
         )
         router.processMessage(holding.replyFor(1, """{"backends":[]}"""))
 
