@@ -269,7 +269,7 @@ class KeySharingBottomSheetDesktopSendTest {
         waitUntil("the failure was never shown") { status(sheet).text.startsWith(prefix) }
         val text = status(sheet).text.toString()
         assertTrue("status is ${text.length} chars", text.length <= prefix.length + DESKTOP_TEXT_BOUND)
-        assertFalse("status holds a control character", text.any { it.isISOControl() })
+        assertFalse("status breaks a line: $text", text.any { breaksLine(it) })
         assertTrue(text.contains("line one line two"))
     }
 
@@ -282,7 +282,30 @@ class KeySharingBottomSheetDesktopSendTest {
         waitUntil("the import was never shown") { status(sheet).text.contains("yyyy") }
         val text = status(sheet).text.toString()
         assertTrue("status is ${text.length} chars", text.length <= base.length + DESKTOP_TEXT_BOUND)
-        assertFalse("status holds a control character", text.any { it.isISOControl() })
+        assertFalse("status breaks a line: $text", text.any { breaksLine(it) })
+    }
+
+    @Test
+    fun `a desktop error with Unicode line and paragraph separators is shown on one line`() {
+        sender.failWith(-32000, "one\\u2028two\\u2029three\\u2028\\u2029\\u2028four")
+        val sheet = openReady()
+        button(sheet).performClick()
+        val prefix = app.getString(R.string.sharing_desktop_failed, "")
+        waitUntil("the failure was never shown") { status(sheet).text.startsWith(prefix) }
+        val text = status(sheet).text.toString()
+        assertFalse("status breaks a line: $text", text.any { breaksLine(it) })
+        assertTrue(text, text.contains("one two three   four"))
+    }
+
+    @Test
+    fun `an import id with Unicode line and paragraph separators is shown on one line`() {
+        sender.succeedWith("""{"accepted":true,"import_id":"zz a b  qq","backend":"software"}""")
+        val sheet = openReady()
+        button(sheet).performClick()
+        waitUntil("the import was never shown") { status(sheet).text.contains("qq") }
+        val text = status(sheet).text.toString()
+        assertFalse("status breaks a line: $text", text.any { breaksLine(it) })
+        assertTrue(text, text.contains("zz a b  qq"))
     }
 
     @Test
@@ -423,6 +446,11 @@ class KeySharingBottomSheetDesktopSendTest {
         const val PEER = "0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9"
         /** The most desktop-supplied text a status line may carry, the ellipsis included. */
         const val DESKTOP_TEXT_BOUND = 201
+
+        /** True for a character that starts a new line in a TextView. */
+        fun breaksLine(c: Char): Boolean = c.isISOControl() ||
+            Character.getType(c) == Character.LINE_SEPARATOR.toInt() ||
+            Character.getType(c) == Character.PARAGRAPH_SEPARATOR.toInt()
         const val PEM = "-----BEGIN PUBLIC KEY-----\nAAAA\n-----END PUBLIC KEY-----\n"
 
         fun entityWith(policy: EntitySharingPolicyType) = KeyEntity(
