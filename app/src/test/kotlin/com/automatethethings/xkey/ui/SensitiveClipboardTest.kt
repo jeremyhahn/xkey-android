@@ -57,7 +57,13 @@ class SensitiveClipboardTest {
     @After
     fun tearDown() {
         unmockkAll()
+        SensitiveClipboard.clock = MonotonicClock.SYSTEM
         readable()
+    }
+
+    @Test
+    fun `the deadline clock is the sleep-inclusive one`() {
+        assertTrue(SensitiveClipboard.clock === MonotonicClock.SYSTEM)
     }
 
     @Test

@@ -147,7 +147,8 @@ screen shows one generic "code unavailable" message. The code shown in the
 list and on the details screen comes from `OathCurrentCode`, which never
 advances a counter and returns "unavailable" instead of throwing; the details
 screen then still shows the metadata, with Copy off. `SensitiveClipboard` takes the
-code off the clipboard 45 seconds later, but only once it can read the
+code off the clipboard 45 seconds later (counted on `MonotonicClock.SYSTEM`,
+so time the device spends asleep counts), but only once it can read the
 clipboard and finds the token it tagged the clip with: a clip set by anyone
 else stays. Android 10 and later hide the clipboard from an app without window
 focus, and an unreadable clipboard is never cleared; the clear waits until a

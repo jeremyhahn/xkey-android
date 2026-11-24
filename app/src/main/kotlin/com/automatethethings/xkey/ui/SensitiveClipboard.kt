@@ -21,13 +21,16 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.PersistableBundle
-import android.os.SystemClock
 import java.util.UUID
 
 /**
  * Puts a secret (a password, an OATH code) on the clipboard and takes it off
  * again [CLEAR_AFTER_MS] later.
  *
+ * - The time is counted on [clock], which keeps counting while the device
+ *   sleeps: a copy left on the clipboard through a deep sleep is due as soon
+ *   as the device wakes. The handler timer only wakes the check; whether a
+ *   copy is due is always decided by [clock].
  * - The clip is marked sensitive ([ClipDescription.EXTRA_IS_SENSITIVE], API
  *   33+), so the system clipboard preview does not show it.
  * - Each clip carries a random token in its description's extras. When the
@@ -53,7 +56,10 @@ internal object SensitiveClipboard {
 
     private val mainHandler by lazy { Handler(Looper.getMainLooper()) }
 
-    /** A copy whose clip is to be cleared once [dueAt] (uptime) has passed. */
+    /** The deadline clock; counts time asleep. Replaced in tests. */
+    internal var clock: MonotonicClock = MonotonicClock.SYSTEM
+
+    /** A copy whose clip is to be cleared once [clock] reaches [dueAt] (milliseconds, time asleep included). */
     private class PendingClear(val token: String, val dueAt: Long)
 
     /** Copies not yet cleared or given up; at most the latest copy, since a new copy replaces the clip. */
@@ -79,7 +85,7 @@ internal object SensitiveClipboard {
         handler: Handler = mainHandler
     ) {
         val token = newToken()
-        val entry = PendingClear(token, SystemClock.uptimeMillis() + clearAfterMs)
+        val entry = PendingClear(token, clock.nowMillis() + clearAfterMs)
         val listener = ClipboardManager.OnPrimaryClipChangedListener {
             val seen = tokenReader(clipboard)
             if (seen is TokenRead.Readable && seen.token != token) pending.remove(entry)
@@ -91,7 +97,7 @@ internal object SensitiveClipboard {
         clipboard.addPrimaryClipChangedListener(listener)
         handler.postDelayed({
             clipboard.removePrimaryClipChangedListener(listener)
-            if (entry in pending) clearIfOwned(clipboard, entry)
+            if (entry in pending && entry.dueAt <= clock.nowMillis()) clearIfOwned(clipboard, entry)
         }, clearAfterMs)
     }
 
@@ -101,7 +107,7 @@ internal object SensitiveClipboard {
      * that is when the app can read the clipboard again.
      */
     fun retryPendingClears(clipboard: ClipboardManager) {
-        val now = SystemClock.uptimeMillis()
+        val now = clock.nowMillis()
         pending.filter { it.dueAt <= now }.forEach { entry ->
             if (entry in pending) clearIfOwned(clipboard, entry)
         }
