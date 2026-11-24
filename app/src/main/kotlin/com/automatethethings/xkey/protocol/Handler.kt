@@ -1951,6 +1951,7 @@ class RequestHandler(
         // Software-backed keys are operated on outside the Keystore.
         com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(symParams.keyId)?.useAndZero { sw ->
             requireSoftwareKeyType(sw, otherType = "HMAC", operation = "AES-GCM")
+            requireKnownSoftwareAlgorithm(sw, operation = "AES-GCM")
             val swStart = System.currentTimeMillis()
             val ct = com.automatethethings.xkey.crypto.SoftwareKeyOps.aesGcmEncrypt(sw.material, plaintext, aad)
             val swDurationMs = System.currentTimeMillis() - swStart
@@ -2013,6 +2014,7 @@ class RequestHandler(
         // Software-backed keys are operated on outside the Keystore.
         com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(symParams.keyId)?.useAndZero { sw ->
             requireSoftwareKeyType(sw, otherType = "HMAC", operation = "AES-GCM")
+            requireKnownSoftwareAlgorithm(sw, operation = "AES-GCM")
             val swStart = System.currentTimeMillis()
             // A tag mismatch or a short input answers as the Keystore path does.
             val pt = try {
@@ -2159,6 +2161,7 @@ class RequestHandler(
         // Software-backed keys are operated on outside the Keystore.
         com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(hmacParams.keyId)?.useAndZero { sw ->
             requireSoftwareKeyType(sw, otherType = "AES", operation = "HMAC")
+            requireKnownSoftwareAlgorithm(sw, operation = "HMAC")
             val swStart = System.currentTimeMillis()
             val swMac = com.automatethethings.xkey.crypto.SoftwareKeyOps.hmac(
                 sw.material, hmacData, sw.algorithm
@@ -2276,6 +2279,31 @@ class RequestHandler(
             throw ProtocolException(
                 "Key ${sw.keyId} cannot be used for $operation",
                 errorCode = ErrorCodes.KEY_NOT_FOUND
+            )
+        }
+    }
+
+    /**
+     * Refuses software key [sw] for [operation] ("AES-GCM" or "HMAC") unless
+     * its stored algorithm is one this handler runs for that operation: "AES"
+     * or an AES-128/192/256 name for AES-GCM, an HMAC-SHA256/384/512 name for
+     * HMAC. Any other name is never mapped to a default algorithm.
+     */
+    private fun requireKnownSoftwareAlgorithm(
+        sw: com.automatethethings.xkey.crypto.SoftwareKey,
+        operation: String
+    ) {
+        val cose = runCatching { CoseAlgorithms.fromName(sw.algorithm) }.getOrNull()
+        val known = when (operation) {
+            "AES-GCM" -> sw.algorithm.trim().equals("AES", ignoreCase = true) || cose in setOf(
+                CoseAlgorithms.A128GCM, CoseAlgorithms.A192GCM, CoseAlgorithms.A256GCM
+            )
+            else -> cose in setOf(CoseAlgorithms.HMAC_256, CoseAlgorithms.HMAC_384, CoseAlgorithms.HMAC_512)
+        }
+        if (!known) {
+            throw ProtocolException(
+                "Key ${sw.keyId} has algorithm ${sw.algorithm}, which $operation does not support",
+                errorCode = ErrorCodes.INVALID_PARAMS
             )
         }
     }

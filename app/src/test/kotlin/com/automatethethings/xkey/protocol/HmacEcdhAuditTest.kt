@@ -156,11 +156,11 @@ class HmacEcdhAuditTest {
                 material = swMaterial.copyOf()
             )
         }
-        // Unvalidated stored name: SoftwareKeyOps runs SHA-256 for it.
+        // A stored alias: SoftwareKeyOps runs HMAC-SHA256 for it.
         every { anyConstructed<SoftwareKeyStore>().get("sw-odd") } answers {
             SoftwareKey(
                 keyId = "sw-odd",
-                algorithm = "HMAC-SHA224",
+                algorithm = "HS256",
                 keyType = "symmetric",
                 keySize = 256,
                 exportable = true,
