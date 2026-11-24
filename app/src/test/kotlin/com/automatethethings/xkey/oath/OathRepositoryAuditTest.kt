@@ -26,9 +26,13 @@ import io.mockk.mockkObject
 import io.mockk.mockkStatic
 import io.mockk.unmockkAll
 import io.mockk.verify
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.yield
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -141,6 +145,73 @@ class OathRepositoryAuditTest {
         assertEquals(2, repository.observeAll().first().size)
 
         verify(exactly = 0) { AuditLogger.logOathCodeGenerated(any(), any(), any()) }
+    }
+
+    // -----------------------------------------------------------------------
+    // Cancellation between the commit and the audit
+    // -----------------------------------------------------------------------
+
+    /**
+     * Cancels the caller once the DAO has committed, then suspends the way
+     * Room does when it resumes the caller after a write, so a cancellable
+     * caller sees the cancellation before its next line runs.
+     */
+    private suspend fun cancelAfterCommit(caller: () -> Job) {
+        caller().cancel()
+        yield()
+    }
+
+    @Test
+    fun `an add cancelled after its commit is still audited`() = runTest {
+        lateinit var job: Job
+        coEvery { dao.insert(any()) } coAnswers {
+            inserted += firstArg<OathCredentialEntity>()
+            cancelAfterCommit { job }
+            1L
+        }
+
+        job = launch {
+            repository.addCredential(issuer = "Acme", accountName = "alice", secret = SECRET_BYTES, type = "hotp")
+        }
+        advanceUntilIdle()
+
+        assertEquals("the add must have committed", 1, inserted.size)
+        val id = inserted.single().oathId
+        verify(exactly = 1) { AuditLogger.logOathCredentialCreated(id, "Acme", "alice", "HOTP") }
+        verify(exactly = 1) { AuditLogger.logOathCredentialCreated(any(), any(), any(), any()) }
+    }
+
+    @Test
+    fun `a delete cancelled after its commit is still audited`() = runTest {
+        var committed = false
+        lateinit var job: Job
+        coEvery { dao.deleteByOathId(HOTP_ID) } coAnswers {
+            committed = true
+            cancelAfterCommit { job }
+        }
+
+        job = launch { repository.deleteCredential(HOTP_ID) }
+        advanceUntilIdle()
+
+        assertTrue("the delete must have committed", committed)
+        verify(exactly = 1) { AuditLogger.logOathCredentialDeleted(HOTP_ID, ISSUER, ACCOUNT) }
+        verify(exactly = 1) { AuditLogger.logOathCredentialDeleted(any(), any(), any()) }
+    }
+
+    @Test
+    fun `an HOTP generation cancelled after its counter commit is still audited`() = runTest {
+        lateinit var job: Job
+        coEvery { dao.advanceCounter(HOTP_ID, 5L, 6L) } coAnswers {
+            cancelAfterCommit { job }
+            1
+        }
+
+        job = launch { repository.generateCode(HOTP_ID) }
+        advanceUntilIdle()
+
+        coVerify(exactly = 1) { dao.advanceCounter(HOTP_ID, 5L, 6L) }
+        verify(exactly = 1) { AuditLogger.logOathCodeGenerated(HOTP_ID, ISSUER, ACCOUNT) }
+        verify(exactly = 1) { AuditLogger.logOathCodeGenerated(any(), any(), any()) }
     }
 
     private fun stored(id: String, type: String) = OathCredentialEntity(
