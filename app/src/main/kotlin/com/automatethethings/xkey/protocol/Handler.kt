@@ -1484,12 +1484,12 @@ class RequestHandler(
         if (isSymmetric) {
             // Symmetric or HMAC key
             if (algorithmName.startsWith("AES")) {
-                val bits = if (algorithmName.contains("128")) 128 else 256
+                val bits = genParams.resolvedKeySizeBits() ?: 256
                 keystoreManager.generateSymmetricKey(genParams.keyId, bits, authDurationSeconds)
                 keySizeBits = bits
             } else {
                 keystoreManager.generateHMACKey(genParams.keyId, algorithmName)
-                keySizeBits = if (algorithmName.contains("512")) 512 else 256
+                keySizeBits = genParams.resolvedKeySizeBits() ?: 256
             }
             publicKeyDer = ByteArray(0) // No public key for symmetric/HMAC
             // The exact alias just generated (xkey_key_<id>), never a
@@ -1540,9 +1540,12 @@ class RequestHandler(
             keyId = genParams.keyId,
             algorithm = algorithmName,
             authDurationSeconds = authDurationSeconds,
-            preferStrongBox = genParams.preferStrongBox
+            preferStrongBox = genParams.preferStrongBox,
+            keySizeBits = if (CoseAlgorithms.isRsa(genParams.algorithm)) genParams.keySizeBits else null
         )
-        keySizeBits = CoseAlgorithms.getKeySizeBits(genParams.algorithm)
+        // The size asked for (an RSA modulus from keySizeBits), else the
+        // algorithm's own: a size the Keystore cannot make never gets here.
+        keySizeBits = genParams.resolvedKeySizeBits() ?: CoseAlgorithms.getKeySizeBits(genParams.algorithm)
         val level = generatedKeyLevel(
             genParams.keyId,
             read = { keystoreManager.generalKeySecurityLevel(genParams.keyId) },
@@ -1667,11 +1670,7 @@ class RequestHandler(
             )
         }
 
-        val keySizeBits = when {
-            algorithmName.startsWith("AES") -> if (algorithmName.contains("128")) 128 else 256
-            algorithmName.contains("512") -> 512
-            else -> 256
-        }
+        val keySizeBits = genParams.resolvedKeySizeBits() ?: 256
         val material = ByteArray(keySizeBits / 8).also { java.security.SecureRandom().nextBytes(it) }
 
         com.automatethethings.xkey.crypto.SoftwareKeyStore(context).put(

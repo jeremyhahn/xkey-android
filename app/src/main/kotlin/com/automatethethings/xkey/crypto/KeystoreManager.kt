@@ -914,17 +914,24 @@ class KeystoreManager(
      * @param algorithm One of "ES256", "ES384", "ES512", "RS256", "RS384", "RS512".
      * @param authDurationSeconds Authentication validity: -1 = no auth, 0 = per-op, >0 = seconds.
      * @param preferStrongBox Whether to prefer StrongBox hardware.
+     * @param keySizeBits RSA modulus (2048, 3072 or 4096); null takes the
+     *   size the hash implies. Ignored for EC and Ed25519.
      * @return DER-encoded public key bytes.
-     * @throws KeyGenerationException if key generation fails.
+     * @throws KeyGenerationException if key generation fails or [keySizeBits]
+     *   is not a size the Keystore makes.
      * @throws UnsupportedAlgorithmException if the algorithm is not supported.
      */
     suspend fun generateKeyForAlgorithm(
         keyId: String,
         algorithm: String,
         authDurationSeconds: Int = 5,
-        preferStrongBox: Boolean = true
+        preferStrongBox: Boolean = true,
+        keySizeBits: Int? = null
     ): ByteArray {
         val alias = buildGeneralAlias(keyId)
+        if (algorithm.startsWith("RS") && keySizeBits != null && keySizeBits !in setOf(2048, 3072, 4096)) {
+            throw KeyGenerationException("Unsupported RSA modulus size: $keySizeBits")
+        }
 
         // Delete existing key if present
         if (keyStore.containsAlias(alias)) {
@@ -947,7 +954,7 @@ class KeystoreManager(
                     generateEd25519KeyPair(alias, authDurationSeconds)
                 }
                 isEC -> generateECKeyPair(alias, algorithm, authDurationSeconds, preferStrongBox)
-                else -> generateRSAKeyPair(alias, algorithm, authDurationSeconds, preferStrongBox)
+                else -> generateRSAKeyPair(alias, algorithm, authDurationSeconds, preferStrongBox, keySizeBits)
             }
 
             // Log key creation. The audit line only; callers read the level
@@ -1092,9 +1099,12 @@ class KeystoreManager(
         alias: String,
         algorithm: String,
         authDurationSeconds: Int,
-        preferStrongBox: Boolean
+        preferStrongBoxForSize: Boolean,
+        requestedKeySize: Int? = null
     ): java.security.KeyPair {
-        val keySize = getRSAKeySize(algorithm)
+        val keySize = requestedKeySize ?: getRSAKeySize(algorithm)
+        // StrongBox guarantees RSA 2048 only: larger moduli go to the TEE.
+        val preferStrongBox = preferStrongBoxForSize && keySize == 2048
         val digest = getDigestProperty(algorithm)
 
         val specBuilder = KeyGenParameterSpec.Builder(
