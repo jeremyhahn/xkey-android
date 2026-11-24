@@ -122,42 +122,70 @@ class NoiseSession {
          * Loads the static key pair from encrypted storage.
          * This is useful for BleClient which needs the same key for initiator mode.
          *
+         * Null means only that no key is stored (neither half present). A store
+         * that cannot be opened, holds only one half, or holds a key that does
+         * not decode to the right size is a corrupt store and throws.
+         *
          * @param context Android context
          * @return The stored key pair, or null if no keys are stored
+         * @throws NoiseException when the store cannot be read or holds a corrupt key
          */
         suspend fun getStoredStaticKeyPair(context: Context): StaticKeyPair? {
-            return try {
-                val prefs = keyStoreOpener(context)
-
-                val privateKeyBase64 = prefs.getString(KEY_STATIC_PRIVATE, null)
-                val publicKeyBase64 = prefs.getString(KEY_STATIC_PUBLIC, null)
-
-                if (privateKeyBase64 != null && publicKeyBase64 != null) {
-                    var decodedPrivKey = Base64.getDecoder().decode(privateKeyBase64)
-                    var decodedPubKey = Base64.getDecoder().decode(publicKeyBase64)
-
-                    // Handle PKCS#8 encoded private key (48 bytes)
-                    if (decodedPrivKey.size == 48 &&
-                        decodedPrivKey[0] == 0x30.toByte() && decodedPrivKey[1] == 0x2e.toByte()) {
-                        val encoded = decodedPrivKey
-                        decodedPrivKey = encoded.copyOfRange(16, 48)
-                        encoded.fill(0)
-                    }
-
-                    // Handle X.509 encoded public key (44 bytes)
-                    if (decodedPubKey.size == 44 &&
-                        decodedPubKey[0] == 0x30.toByte() && decodedPubKey[1] == 0x2a.toByte()) {
-                        decodedPubKey = decodedPubKey.copyOfRange(12, 44)
-                    }
-
-                    StaticKeyPair(decodedPrivKey, decodedPubKey)
-                } else {
-                    null
-                }
+            val prefs = try {
+                keyStoreOpener(context)
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to load static key pair", e)
+                Log.e(TAG, "Failed to open the static key store", e)
+                throw NoiseException("Static key store cannot be opened", e)
+            }
+
+            val privateKeyBase64 = prefs.getString(KEY_STATIC_PRIVATE, null)
+            val publicKeyBase64 = prefs.getString(KEY_STATIC_PUBLIC, null)
+
+            if (privateKeyBase64 == null && publicKeyBase64 == null) return null
+            if (privateKeyBase64 == null || publicKeyBase64 == null) {
+                throw NoiseException("Stored static key pair is incomplete")
+            }
+
+            // The decoder's message quotes a character of the stored secret:
+            // neither it nor the exception is carried.
+            var decodedPrivKey = try {
+                Base64.getDecoder().decode(privateKeyBase64)
+            } catch (e: IllegalArgumentException) {
+                null
+            } ?: throw NoiseException("Stored static private key does not decode")
+            var decodedPubKey = try {
+                Base64.getDecoder().decode(publicKeyBase64)
+            } catch (e: IllegalArgumentException) {
                 null
             }
+            if (decodedPubKey == null) {
+                decodedPrivKey.fill(0)
+                throw NoiseException("Stored static public key does not decode")
+            }
+
+            // Handle PKCS#8 encoded private key (48 bytes)
+            if (decodedPrivKey.size == 48 &&
+                decodedPrivKey[0] == 0x30.toByte() && decodedPrivKey[1] == 0x2e.toByte()) {
+                val encoded = decodedPrivKey
+                decodedPrivKey = encoded.copyOfRange(16, 48)
+                encoded.fill(0)
+            }
+
+            // Handle X.509 encoded public key (44 bytes)
+            if (decodedPubKey.size == 44 &&
+                decodedPubKey[0] == 0x30.toByte() && decodedPubKey[1] == 0x2a.toByte()) {
+                decodedPubKey = decodedPubKey.copyOfRange(12, 44)
+            }
+
+            if (decodedPrivKey.size != KEY_SIZE || decodedPubKey.size != KEY_SIZE) {
+                val sizes = "privkey: ${decodedPrivKey.size}, pubkey: ${decodedPubKey.size}"
+                decodedPrivKey.fill(0)
+                throw NoiseException("Stored static key has the wrong size ($sizes)")
+            }
+
+            return StaticKeyPair(decodedPrivKey, decodedPubKey)
         }
     }
 

@@ -23,6 +23,7 @@ import android.content.ServiceConnection
 import android.graphics.Typeface
 import android.os.Bundle
 import android.os.IBinder
+import android.util.Log
 import android.view.Gravity
 import android.view.MenuItem
 import android.view.View
@@ -47,6 +48,7 @@ import com.google.android.material.materialswitch.MaterialSwitch
 import com.google.android.material.snackbar.Snackbar
 import com.automatethethings.xkey.R
 import com.automatethethings.xkey.ble.BleClient
+import com.automatethethings.xkey.ble.NoiseException
 import com.automatethethings.xkey.ble.NoiseSession
 import com.automatethethings.xkey.ble.PairingConfirmationCallback
 import com.automatethethings.xkey.protocol.AttestationHelper
@@ -1415,7 +1417,14 @@ class DeviceDetailActivity : AppCompatActivity() {
         snackbar.show()
 
         launchPhoneInitiatedReattest(snackbar) step@{
-                val keyPair = NoiseSession.getStoredStaticKeyPair(this@DeviceDetailActivity)
+                // A corrupt or unreadable key store is logged as such and gets
+                // the same re-pair instruction as a missing key.
+                val keyPair = try {
+                    NoiseSession.getStoredStaticKeyPair(this@DeviceDetailActivity)
+                } catch (e: NoiseException) {
+                    Log.e("DeviceDetailActivity", "Stored static key cannot be read", e)
+                    null
+                }
                 if (keyPair == null) {
                     snackbar.dismiss()
                     Snackbar.make(
