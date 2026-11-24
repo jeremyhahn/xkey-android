@@ -794,22 +794,26 @@ class RequestHandlerErrorPathTest {
         )
     }
 
-    /** With no connected identity there is no device policy to apply. */
+    /** Key use needs a paired peer; an anonymous session is refused. */
     @Test
-    fun anAnonymousSessionIsNotGated() {
-        requireAttestation(forKeyUse = true, forKeyAttestation = true, graceMinutes = 60)
+    fun anAnonymousSessionIsRefusedKeyUse() {
         servedPeer = null
 
-        assertEquals(ErrorCodes.KEY_NOT_FOUND, signMissingKey().errorCode())
+        assertEquals(
+            expectedCode("local.sign", ErrorCodes.DEVICE_ATTESTATION_REQUIRED),
+            signMissingKey().errorCode()
+        )
     }
 
-    /** A peer with no record in the repository has no policy either. */
+    /** Key use needs a paired peer; a peer with no stored record is refused. */
     @Test
-    fun aPeerWithNoStoredRecordIsNotGated() {
-        requireAttestation(forKeyUse = true, forKeyAttestation = true, graceMinutes = 60)
+    fun aPeerWithNoStoredRecordIsRefusedKeyUse() {
         servedPeer = UNKNOWN_PEER_HEX
 
-        assertEquals(ErrorCodes.KEY_NOT_FOUND, signMissingKey().errorCode())
+        assertEquals(
+            expectedCode("local.sign", ErrorCodes.DEVICE_ATTESTATION_REQUIRED),
+            signMissingKey().errorCode()
+        )
     }
 
     // ------------------------------------------------------------------
