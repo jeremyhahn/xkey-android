@@ -241,7 +241,7 @@ class LocalGenerateKeyMlDsaHandlerTest {
         val uses = Regex("""(?<!fun )generateMlDsaMaterial\(""").findAll(source).map { it.range.first }.toList()
         assertEquals("one generateMlDsaMaterial call", 1, uses.size)
         val use = uses[0]
-        val unit = source.lastIndexOf("withContext(NonCancellable)", use)
+        val unit = source.lastIndexOf("persistAudited(write = {", use)
         val owner = source.lastIndexOf("private suspend fun createMlDsaKey(", use)
         assertTrue("the call is not in createMlDsaKey", owner >= 0)
         assertTrue("the call is outside the NonCancellable unit", unit > owner)

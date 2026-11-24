@@ -1686,8 +1686,8 @@ class RequestHandler(
     ): Response {
         val backing = mlDsaBacking(genParams, set)
         val keySizeBits = set.publicKeyBytes * 8
-        // Generation and its row commit as one unit: a cancelled caller cannot leave a key without its row.
-        val (publicKeyDer, level) = withContext(NonCancellable) {
+        // Generation and its row commit as one non-cancellable unit: a cancelled caller cannot leave a key without its row.
+        val (publicKeyDer, level) = persistAudited(write = {
             val publicKeyDer = generateMlDsaMaterial(genParams, set, backing, authDurationSeconds)
             try {
                 val level = generatedKeyLevel(
@@ -1720,7 +1720,9 @@ class RequestHandler(
                 discardUnrecordedMlDsaKey(genParams.keyId)
                 throw e
             }
-        }
+        }, record = {
+            Log.i(TAG, "Generated key: ${genParams.keyId}, algo=${set.wireName}, backing=${backing.wire}")
+        })
         val result = LocalGenerateKeyResult.withLevel(
             keyId = genParams.keyId,
             publicKey = Base64.getEncoder().encodeToString(publicKeyDer),
@@ -1729,7 +1731,6 @@ class RequestHandler(
             keySizeBits = keySizeBits,
             level = level
         )
-        Log.i(TAG, "Generated key: ${genParams.keyId}, algo=${set.wireName}, backing=${backing.wire}")
         return Response.success(request.id, result.toJson())
     }
 
@@ -4541,7 +4542,7 @@ class RequestHandler(
      * write: entering [NonCancellable] checks nothing, so without that check a
      * cancelled request with no suspension point since its cancellation would
      * still store. Every path that writes and records something, the share
-     * paths and the sharing-policy change, goes through here.
+     * paths, the sharing-policy change and ML-DSA key generation, goes through here.
      *
      * @param write stores the shared material and returns its result
      * @param record writes the audit entry for what [write] stored
