@@ -372,6 +372,77 @@ class OathHandlerWireTest {
         assertEquals("Acme:alice", entry.keyLabel)
     }
 
+
+    // -------------------------------------------------------------------------
+    // local.oathAdd
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun `oathAdd stores a valid credential and a generate gives its RFC code`() = runTest {
+        totpAtSeconds = 59L
+        val response = add(credential(secret = RFC6238_SHA1_BASE32).put("digits", 8))
+
+        val id = result(response).getString("credential_id")
+        val stored = inserted.single()
+        assertEquals(id, stored.oathId)
+        assertEquals("TOTP", stored.oathType)
+        assertTrue(stored.secretEncrypted.contentEquals(RFC6238_SHA1_SECRET))
+        assertEquals("94287082", code(generate(id)))
+    }
+
+    @Test
+    fun `oathAdd without a credential or its fields answers INVALID_PARAMS`() = runTest {
+        assertEquals(ErrorCodes.INVALID_PARAMS, errorCode(call(MethodNames.LOCAL_OATH_ADD, null)))
+        assertEquals(ErrorCodes.INVALID_PARAMS, errorCode(call(MethodNames.LOCAL_OATH_ADD, JSONObject())))
+        assertEquals(ErrorCodes.INVALID_PARAMS, errorCode(add(credential().put("secret", ""))))
+        assertEquals(ErrorCodes.INVALID_PARAMS, errorCode(add(credential().put("account_name", ""))))
+        assertTrue(inserted.isEmpty())
+    }
+
+    // -------------------------------------------------------------------------
+    // local.oathRemove
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun `oathRemove removes only the requested credential and audits its id`() = runTest {
+        store(totp(ID_TOTP, issuer = "Acme", account = "alice"))
+        store(hotp(ID_HOTP, issuer = "Other", account = "bob"))
+
+        val result = result(remove(ID_TOTP))
+
+        assertTrue(result.getBoolean("deleted"))
+        assertEquals(listOf(ID_TOTP), deleted)
+        coVerify(exactly = 1) { dao.deleteAndRecordDeletion(ID_TOTP, any()) }
+        assertEquals(listOf(ID_HOTP), rows.keys.toList())
+        val entry = audit.single { it.operationType == AuditOperationType.OATH_CREDENTIAL_DELETED }
+        assertEquals(ID_TOTP, entry.keyId)
+        assertEquals("Acme:alice", entry.keyLabel)
+    }
+
+    @Test
+    fun `oathRemove of an unknown or missing credential_id deletes nothing`() = runTest {
+        store(hotp(ID_HOTP))
+
+        assertFalse(result(remove("no-such-credential")).getBoolean("deleted"))
+        assertEquals(ErrorCodes.INVALID_PARAMS, errorCode(call(MethodNames.LOCAL_OATH_REMOVE, JSONObject())))
+        assertEquals(ErrorCodes.INVALID_PARAMS, errorCode(call(MethodNames.LOCAL_OATH_REMOVE, null)))
+
+        coVerify(exactly = 0) { dao.deleteAndRecordDeletion(any(), any()) }
+        assertEquals(listOf(ID_HOTP), rows.keys.toList())
+        assertTrue(audit.isEmpty())
+    }
+
+    @Test
+    fun `oathRemove answers INTERNAL_ERROR when the store fails`() = runTest {
+        store(hotp(ID_HOTP))
+        coEvery { dao.deleteAndRecordDeletion(any(), any()) } throws IllegalStateException("disk I/O error")
+
+        val response = remove(ID_HOTP)
+
+        assertEquals(ErrorCodes.INTERNAL_ERROR, errorCode(response))
+        assertTrue(audit.isEmpty())
+    }
+
     // -------------------------------------------------------------------------
     // Harness
     // -------------------------------------------------------------------------
@@ -434,6 +505,21 @@ class OathHandlerWireTest {
     private suspend fun generate(credentialId: String): JSONObject =
         call(MethodNames.LOCAL_OATH_GENERATE, JSONObject().put("credential_id", credentialId))
 
+
+    private suspend fun remove(credentialId: String): JSONObject =
+        call(MethodNames.LOCAL_OATH_REMOVE, JSONObject().put("credential_id", credentialId))
+
+    private suspend fun add(credential: JSONObject): JSONObject =
+        call(MethodNames.LOCAL_OATH_ADD, JSONObject().put("credential", credential))
+
+    /** A local.oathAdd credential, valid unless a test changes a field. */
+    private fun credential(secret: String = BASE32_SECRET): JSONObject =
+        JSONObject()
+            .put("name", CALLER_NAME)
+            .put("issuer", "Acme")
+            .put("account_name", "alice")
+            .put("secret", secret)
+
     /** [method] with [params] on a connection served for [peer]. */
     private suspend fun call(method: String, params: JSONObject? = JSONObject(), peer: String? = PEER): JSONObject {
         val request = JSONObject().put("id", 1).put("method", method)
@@ -467,6 +553,13 @@ class OathHandlerWireTest {
         const val PEER_NAME = "Test desktop"
         const val ID_TOTP = "totp-credential"
         const val ID_HOTP = "hotp-credential"
+        const val CALLER_NAME = "caller-chosen-name"
+
+        /** A 10-byte secret, the shortest the importer accepts. */
+        const val BASE32_SECRET = "JBSWY3DPEHPK3PXP"
+
+        /** Base32 of the RFC 6238 SHA1 seed. */
+        const val RFC6238_SHA1_BASE32 = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
 
         /** RFC 4226 appendix D: secret "12345678901234567890", counters 0 to 9. */
         val RFC4226_CODES = listOf(
