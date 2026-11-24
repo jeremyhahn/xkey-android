@@ -17,6 +17,7 @@ package com.automatethethings.xkey.storage
 import android.util.Log
 import androidx.annotation.VisibleForTesting
 import com.automatethethings.xkey.crypto.FileEncryptor
+import com.automatethethings.xkey.crypto.KeystoreAeadCipher
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.crypto.SoftwareKeyStore
 import com.automatethethings.xkey.piv.PIV_KEYSTORE_ALIAS_PREFIX
@@ -169,6 +170,7 @@ class KeyStoreSyncManager(
         for (alias in keyStore.aliases()) {
             if (alias.startsWith(PIV_KEYSTORE_ALIAS_PREFIX)) continue
             if (alias.startsWith(EPHEMERAL_ALIAS_PREFIX)) continue
+            if (KeystoreAeadCipher.isInternalAlias(alias)) continue
             val (keyId, isFido2, isCA) = when {
                 alias in CA_ALIASES -> {
                     Triple(alias, false, true)

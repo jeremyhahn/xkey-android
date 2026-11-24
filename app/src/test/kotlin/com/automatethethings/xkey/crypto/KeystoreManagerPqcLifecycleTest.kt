@@ -40,7 +40,6 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
-import org.junit.Assert.fail
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
@@ -223,8 +222,8 @@ class KeystoreManagerPqcLifecycleTest {
             for (match in call.findAll(text)) {
                 val name = match.groupValues[1]
                 val declaration = Regex("""val $name\s*=\s*KeystoreAeadCipher\.(\w+)""").find(text)
-                    ?: fail("${file.name}: $name is not taken from KeystoreAeadCipher's internal aliases")
-                val alias = KeystoreAeadCipher::class.java.getField(declaration!!.groupValues[1]).get(null) as String
+                    ?: throw AssertionError("${file.name}: $name is not taken from KeystoreAeadCipher's internal aliases")
+                val alias = KeystoreAeadCipher::class.java.getField(declaration.groupValues[1]).get(null) as String
                 assertTrue("${file.name}: $alias", KeystoreAeadCipher.isInternalAlias(alias))
                 seen += alias
             }

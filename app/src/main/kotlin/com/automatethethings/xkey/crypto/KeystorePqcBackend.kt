@@ -156,7 +156,7 @@ class KeystorePqcBackend(
         /** Equal to `KeyProperties.KEY_ALGORITHM_ML_DSA`, inlined to need no API guard. */
         private const val ML_DSA = "ML-DSA"
 
-        private const val PROBE_ALIAS_PREFIX = "xkey_pqc_probe_"
+        private const val PROBE_ALIAS_PREFIX = KeystoreAeadCipher.PQC_PROBE_ALIAS_PREFIX
 
         private val HARDWARE_LEVELS = setOf(
             KeyProperties.SECURITY_LEVEL_TRUSTED_ENVIRONMENT,

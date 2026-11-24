@@ -251,7 +251,7 @@ class PqcSoftwareKeyStore(
 
     companion object {
         /** The Keystore AES-GCM key that seals every software ML-DSA private key. */
-        const val WRAP_KEY_ALIAS = "xkey_pqc_wrap"
+        const val WRAP_KEY_ALIAS = KeystoreAeadCipher.PQC_WRAP_ALIAS
 
         /**
          * The app's one store, once [registerShared] has built it; null

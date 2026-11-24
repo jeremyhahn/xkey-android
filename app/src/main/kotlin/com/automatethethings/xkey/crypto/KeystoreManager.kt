@@ -1959,6 +1959,8 @@ class KeystoreManager(
 
         // A PIV slot key is reached only through PivKeyManager, which keeps
         // its piv_slots row in step; a raw alias must not resolve to it.
+        // An internal wrap key is never a user key's raw alias.
+        if (KeystoreAeadCipher.isInternalAlias(keyId)) return null
         if (!keyId.startsWith(PIV_KEYSTORE_ALIAS_PREFIX) && keyStore.containsAlias(keyId)) return keyId
 
         // Check Ed25519 software-backed keys. Callers use the result as a
@@ -2017,6 +2019,8 @@ class KeystoreManager(
     fun deleteByAlias(alias: String): Boolean {
         // PIV slot keys are deleted through PivKeyManager with their row.
         if (alias.startsWith(PIV_KEYSTORE_ALIAS_PREFIX)) return false
+        // The app's wrap keys seal other keys and are never a user's to delete.
+        if (KeystoreAeadCipher.isInternalAlias(alias)) return false
         if (!keyStore.containsAlias(alias)) return false
         withAliasGate(alias) { keyStore.deleteEntry(alias) }
         return true
