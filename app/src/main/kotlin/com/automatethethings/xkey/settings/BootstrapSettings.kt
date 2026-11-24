@@ -22,6 +22,7 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.automatethethings.xkey.audit.AuditLogger
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -346,6 +347,10 @@ public data class BootstrapSettingsData(
             return this
         }
 
+        // Every derived server is https; only an http(s) URL names one.
+        val scheme = parsed.scheme?.lowercase()
+        if (scheme != "https" && scheme != "http") return this
+
         val host = parsed.host ?: return this
         val port = if (parsed.port > 0) parsed.port else DEFAULT_HTTPS_PORT
         val noisePort = if (port == DEFAULT_HTTPS_PORT) DEFAULT_NOISE_PORT else port + 2
@@ -633,12 +638,14 @@ public class BootstrapSettingsRepository internal constructor(
         dnsOverTls: Boolean? = null,
         requireDnssec: Boolean? = null
     ) {
-        dataStore.edit { preferences ->
+        AuditLogger.editAuditedSetting(dataStore, "daneRequireDnssec") { preferences ->
+            val oldValue = mapPreferencesToSettings(preferences).daneRequireDnssec
             enabled?.let { preferences[KEY_DANE_ENABLED] = it }
             serverUrl?.let { preferences[KEY_DANE_SERVER_URL] = it }
             dnsServer?.let { preferences[KEY_DANE_DNS_SERVER] = it }
             dnsOverTls?.let { preferences[KEY_DANE_DNS_OVER_TLS] = it }
             requireDnssec?.let { preferences[KEY_DANE_REQUIRE_DNSSEC] = it }
+            auditedChange(oldValue.toString(), requireDnssec?.toString())
         }
     }
 
@@ -647,18 +654,29 @@ public class BootstrapSettingsRepository internal constructor(
      *
      * @param enabled Whether Noise bootstrap is enabled.
      * @param serverAddr Noise server address (host:port).
-     * @param serverStaticKey Hex-encoded 32-byte Curve25519 server public key.
+     * @param serverStaticKey Hex-encoded 32-byte Curve25519 server public key,
+     *   or empty to clear it.
+     * @return false, writing nothing, if [serverStaticKey] is not empty and
+     *   not 64 hex characters; true once the settings are written.
      */
     public suspend fun updateNoiseSettings(
         enabled: Boolean? = null,
         serverAddr: String? = null,
         serverStaticKey: String? = null
-    ) {
-        dataStore.edit { preferences ->
+    ): Boolean {
+        if (serverStaticKey != null &&
+            !BootstrapSettingsData(noiseServerStaticKey = serverStaticKey).isNoiseKeyValid()
+        ) {
+            return false
+        }
+        AuditLogger.editAuditedSetting(dataStore, "noiseServerStaticKey") { preferences ->
+            val oldValue = mapPreferencesToSettings(preferences).noiseServerStaticKey
             enabled?.let { preferences[KEY_NOISE_ENABLED] = it }
             serverAddr?.let { preferences[KEY_NOISE_SERVER_ADDR] = it }
             serverStaticKey?.let { preferences[KEY_NOISE_SERVER_STATIC_KEY] = it }
+            auditedChange(oldValue, serverStaticKey)
         }
+        return true
     }
 
     /**
@@ -666,19 +684,37 @@ public class BootstrapSettingsRepository internal constructor(
      *
      * @param enabled Whether SPKI bootstrap is enabled.
      * @param serverUrl Base URL for SPKI bootstrap.
-     * @param pinSha256 Hex-encoded SHA-256 hash of server's SPKI.
+     * @param pinSha256 Hex-encoded SHA-256 hash of server's SPKI, or empty to
+     *   clear it.
+     * @return false, writing nothing, if [pinSha256] is not empty and not
+     *   64 hex characters; true once the settings are written.
      */
     public suspend fun updateSpkiSettings(
         enabled: Boolean? = null,
         serverUrl: String? = null,
         pinSha256: String? = null
-    ) {
-        dataStore.edit { preferences ->
+    ): Boolean {
+        if (pinSha256 != null && !BootstrapSettingsData(spkiPinSha256 = pinSha256).isSpkiPinValid()) {
+            return false
+        }
+        AuditLogger.editAuditedSetting(dataStore, "spkiPinSha256") { preferences ->
+            val oldValue = mapPreferencesToSettings(preferences).spkiPinSha256
             enabled?.let { preferences[KEY_SPKI_ENABLED] = it }
             serverUrl?.let { preferences[KEY_SPKI_SERVER_URL] = it }
             pinSha256?.let { preferences[KEY_SPKI_PIN_SHA256] = it }
+            auditedChange(oldValue, pinSha256)
         }
+        return true
     }
+
+    /**
+     * The change to audit when [newValue] was written over [oldValue]: null
+     * when nothing was written or the value is unchanged. The group setters
+     * write through [AuditLogger.editAuditedSetting], so a caller cancelled
+     * after the commit still leaves the entry.
+     */
+    private fun auditedChange(oldValue: String, newValue: String?): AuditLogger.SettingChange? =
+        if (newValue == null || newValue == oldValue) null else AuditLogger.SettingChange(oldValue, newValue)
 
     /**
      * Update Direct HTTPS bootstrap settings.
@@ -759,7 +795,9 @@ public class BootstrapSettingsRepository internal constructor(
             // Auto-bootstrap
             autoBootstrapEnabled = preferences[KEY_AUTO_BOOTSTRAP_ENABLED] ?: true,
             methodOrder = methodOrder,
-            perMethodTimeoutSeconds = preferences[KEY_PER_METHOD_TIMEOUT]
+            // updatePerMethodTimeout refuses a timeout that is not positive;
+            // one stored by other means reads as the default.
+            perMethodTimeoutSeconds = preferences[KEY_PER_METHOD_TIMEOUT]?.takeIf { it > 0 }
                 ?: BootstrapSettingsData.DEFAULT_PER_METHOD_TIMEOUT_SECONDS,
 
             // DANE settings
