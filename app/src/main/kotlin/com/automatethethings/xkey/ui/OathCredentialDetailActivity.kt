@@ -81,6 +81,7 @@ class OathCredentialDetailActivity : AppCompatActivity() {
     private lateinit var codeText: TextView
     private lateinit var timeLeftText: TextView
     private lateinit var hintText: TextView
+    private lateinit var copyButton: MaterialButton
 
     private val dateFormat: DateFormat = DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT)
 
@@ -187,11 +188,12 @@ class OathCredentialDetailActivity : AppCompatActivity() {
             text = getString(R.string.oath_detail_hotp_hint)
         }
         codeColumn.addView(hintText)
-        codeColumn.addView(MaterialButton(this).apply {
+        copyButton = MaterialButton(this).apply {
             text = getString(R.string.oath_detail_copy)
             tag = "copy"
             setOnClickListener { copyCode() }
-        })
+        }
+        codeColumn.addView(copyButton)
         codeCard.addView(codeColumn)
         column.addView(codeCard)
 
@@ -215,14 +217,18 @@ class OathCredentialDetailActivity : AppCompatActivity() {
     }
 
     private fun show(d: OathCredentialDetails) {
-        codeText.text = OathAdapter.formatCode(d.code)
+        // No code (the secret cannot be decrypted, a stored value the engine
+        // refuses): the metadata stays readable, Copy is off.
+        codeText.text = d.code?.let { OathAdapter.formatCode(it) } ?: OathRepository.NO_CODE
+        codeText.contentDescription = if (d.code == null) getString(R.string.oath_code_unavailable) else null
+        copyButton.isEnabled = d.code != null
         if (d.secondsLeft != null) {
             timeLeftText.text = getString(R.string.oath_detail_time_left, d.secondsLeft)
             timeLeftText.visibility = android.view.View.VISIBLE
         } else {
             timeLeftText.visibility = android.view.View.GONE
         }
-        hintText.visibility = if (d.counter != null) android.view.View.VISIBLE else android.view.View.GONE
+        hintText.visibility = if (d.code != null && d.counter != null) android.view.View.VISIBLE else android.view.View.GONE
 
         fieldsLayout.removeAllViews()
         d.issuer?.let { addRow(R.string.oath_detail_issuer, it) }
@@ -266,11 +272,12 @@ class OathCredentialDetailActivity : AppCompatActivity() {
     private fun copyCode() {
         lifecycleScope.launch {
             try {
-                if (viewModel.copy(clipboard) != null) {
-                    Toast.makeText(this@OathCredentialDetailActivity, R.string.oath_code_copied, Toast.LENGTH_SHORT).show()
-                }
+                val copied = viewModel.copy(clipboard) != null
+                val message = if (copied) R.string.oath_code_copied else R.string.oath_code_unavailable
+                Toast.makeText(this@OathCredentialDetailActivity, message, Toast.LENGTH_SHORT).show()
             } catch (e: Exception) {
-                Toast.makeText(this@OathCredentialDetailActivity, e.message ?: e.javaClass.simpleName, Toast.LENGTH_LONG).show()
+                // The exception text can quote key material: one generic message.
+                Toast.makeText(this@OathCredentialDetailActivity, R.string.oath_code_unavailable, Toast.LENGTH_SHORT).show()
             }
         }
     }

@@ -18,7 +18,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.CreationExtras
 import com.automatethethings.xkey.oath.OathCredentialEntity
-import com.automatethethings.xkey.oath.OathEngine
+import com.automatethethings.xkey.oath.OathCurrentCode
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -30,6 +30,9 @@ import kotlinx.coroutines.flow.asStateFlow
  *
  * [periodSeconds] and [secondsLeft] are set for TOTP only, [counter] for
  * HOTP only; [remoteDeviceId] only for a credential synced from a device.
+ * [code] and [secondsLeft] are null when no code can be computed (the secret
+ * cannot be decrypted or the engine refuses a stored value); every other
+ * field is still filled.
  */
 data class OathCredentialDetails(
     val oathId: String,
@@ -45,7 +48,7 @@ data class OathCredentialDetails(
     val useCount: Int,
     val source: String,
     val remoteDeviceId: String?,
-    val code: String,
+    val code: String?,
     val secondsLeft: Int?
 )
 
@@ -107,45 +110,20 @@ class OathCredentialDetailViewModel(
     /**
      * Copy the current code through [clipboard] (an HOTP copy advances the
      * counter) and refresh. Returns the code copied, or null when nothing is
-     * shown.
+     * shown or no code can be computed (the clipboard is then left alone).
      */
     suspend fun copy(clipboard: OathCodeClipboard): String? {
         val credential = current ?: return null
         val shown = (_state.value as? OathCredentialDetailUiState.Shown)?.details ?: return null
-        val copied = clipboard.copy(credential, shown.code)
+        val code = shown.code ?: return null
+        val copied = clipboard.copy(credential, code)
         refresh()
         return copied
     }
 
     private fun detailsOf(credential: OathCredentialEntity, now: Long): OathCredentialDetails {
         val totp = credential.oathType == TOTP
-        val secret = secretOf(credential)
-        val code = try {
-            if (totp) {
-                OathEngine.generateTotpCode(
-                    secret = secret,
-                    algorithm = credential.algorithm,
-                    digits = credential.digits,
-                    periodSeconds = credential.periodSeconds,
-                    timeMs = now
-                )
-            } else {
-                OathEngine.generateHotpCode(
-                    secret = secret,
-                    counter = credential.counter,
-                    algorithm = credential.algorithm,
-                    digits = credential.digits
-                )
-            }
-        } finally {
-            secret.fill(0)
-        }
-        val secondsLeft = if (totp) {
-            val elapsed = (now / 1000L) % credential.periodSeconds.toLong()
-            credential.periodSeconds - elapsed.toInt()
-        } else {
-            null
-        }
+        val current = OathCurrentCode.currentCode(credential, secretOf, now) as? OathCurrentCode.Available
         return OathCredentialDetails(
             oathId = credential.oathId,
             issuer = credential.issuer,
@@ -160,8 +138,8 @@ class OathCredentialDetailViewModel(
             useCount = credential.useCount,
             source = credential.source,
             remoteDeviceId = credential.remoteDeviceId,
-            code = code,
-            secondsLeft = secondsLeft
+            code = current?.code,
+            secondsLeft = current?.secondsLeft
         )
     }
 
