@@ -16,6 +16,9 @@ package com.automatethethings.xkey.ui
 
 import android.app.Application
 import android.app.Dialog
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.DialogInterface
 import android.os.Looper
 import android.view.View
@@ -49,6 +52,7 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import org.robolectric.shadows.ShadowDialog
+import java.time.Duration
 import javax.crypto.AEADBadTagException
 
 /**
@@ -190,8 +194,49 @@ class PasswordManagementActivityTest {
         assertEquals("Example", fields[NAME_FIELD].text.toString())
     }
 
+    @Test
+    fun `a copied password is cleared from the clipboard after 45 seconds`() {
+        stored(entity("pw-good", "Good", sealed(fixtureSecret(4))))
+        val activity = launch()
+        val clipboard = clipboard(activity)
+
+        copyFromDetail(activity, 0)
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(44))
+        assertEquals(fixtureSecret(4), clipText(clipboard))
+
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(1))
+        assertTrue("clipboard still holds the password", clipText(clipboard).isNullOrEmpty())
+    }
+
+    @Test
+    fun `a clip set by someone else after a password copy is not cleared`() {
+        stored(entity("pw-good", "Good", sealed(fixtureSecret(4))))
+        val activity = launch()
+        val clipboard = clipboard(activity)
+
+        copyFromDetail(activity, 0)
+        clipboard.setPrimaryClip(ClipData.newPlainText("note", "shopping list"))
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(45))
+
+        assertEquals("shopping list", clipText(clipboard))
+    }
+
     // -------------------------------------------------------------------------
     // Fixtures
+
+    private fun clipboard(activity: PasswordManagementActivity): ClipboardManager =
+        activity.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+
+    private fun clipText(clipboard: ClipboardManager): String? =
+        clipboard.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.text?.toString()
+
+    /** Opens row [position]'s detail dialog and taps Copy. */
+    private fun copyFromDetail(activity: PasswordManagementActivity, position: Int) {
+        clickRow(activity, position)
+        val dialog = ShadowDialog.getLatestDialog() as AlertDialog
+        dialog.getButton(DialogInterface.BUTTON_POSITIVE).performClick()
+        idle()
+    }
 
     /** The add dialog's fields in order: name, username, password, URL, notes. */
     private fun editTexts(root: View): List<EditText> {
