@@ -1360,7 +1360,14 @@ object AuditLogger {
     // OATH/TOTP Operations
     // -------------------------------------------------------------------------
 
-    fun logOathCredentialCreated(oathId: String, issuer: String?, accountName: String, oathType: String) {
+    fun logOathCredentialCreated(
+        oathId: String,
+        issuer: String?,
+        accountName: String,
+        oathType: String,
+        deviceId: String?,
+        deviceName: String?
+    ) {
         val details = JSONObject().apply {
             issuer?.let { put("issuer", it) }
             put("accountName", accountName)
@@ -1371,29 +1378,47 @@ object AuditLogger {
                 operationType = AuditOperationType.OATH_CREDENTIAL_CREATED,
                 keyId = oathId,
                 keyLabel = issuer?.let { "$it:$accountName" } ?: accountName,
+                deviceId = deviceId,
+                deviceName = deviceName,
                 success = true,
                 details = details.toString()
             )
         )
     }
 
-    fun logOathCredentialDeleted(oathId: String, issuer: String?, accountName: String) {
+    fun logOathCredentialDeleted(
+        oathId: String,
+        issuer: String?,
+        accountName: String,
+        deviceId: String?,
+        deviceName: String?
+    ) {
         log(
             AuditLogEntity(
                 operationType = AuditOperationType.OATH_CREDENTIAL_DELETED,
                 keyId = oathId,
                 keyLabel = issuer?.let { "$it:$accountName" } ?: accountName,
+                deviceId = deviceId,
+                deviceName = deviceName,
                 success = true
             )
         )
     }
 
-    fun logOathCodeGenerated(oathId: String, issuer: String?, accountName: String) {
+    fun logOathCodeGenerated(
+        oathId: String,
+        issuer: String?,
+        accountName: String,
+        deviceId: String?,
+        deviceName: String?
+    ) {
         log(
             AuditLogEntity(
                 operationType = AuditOperationType.OATH_CODE_GENERATED,
                 keyId = oathId,
                 keyLabel = issuer?.let { "$it:$accountName" } ?: accountName,
+                deviceId = deviceId,
+                deviceName = deviceName,
                 success = true
             )
         )

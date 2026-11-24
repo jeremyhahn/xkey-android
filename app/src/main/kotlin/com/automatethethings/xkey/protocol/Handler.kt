@@ -3725,9 +3725,27 @@ class RequestHandler(
     // -------------------------------------------------------------------------
 
     /**
+     * The OATH methods hand out one-time codes and change the credential
+     * store, so they are key use: a paired desktop whose settings require a
+     * current attestation for key use is refused until it attests, and a
+     * paired-device store that cannot be read refuses, as for the key
+     * operations ([isDeviceAttestationCurrent]). Called before each handler's
+     * own try block, so the refusal reaches dispatch as its error code.
+     */
+    private suspend fun requireOathAttestation() {
+        if (!isDeviceAttestationCurrent(forKeyUse = true)) {
+            throw ProtocolException(
+                "Device attestation required before key use",
+                errorCode = ErrorCodes.DEVICE_ATTESTATION_REQUIRED
+            )
+        }
+    }
+
+    /**
      * Lists all local OATH credentials (without secrets).
      */
     private suspend fun handleOathList(request: Request): Response {
+        requireOathAttestation()
         return try {
             val db = XKeyDatabase.getInstance(context)
             val credentials = db.oathCredentialDao().getAll()
@@ -3749,7 +3767,7 @@ class RequestHandler(
             Response.success(request.id, result)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to list OATH credentials", e)
-            Response.error(request.id, ErrorCodes.INTERNAL_ERROR, "Failed to list OATH credentials: ${e.message}")
+            Response.error(request.id, ErrorCodes.INTERNAL_ERROR, "Failed to list OATH credentials")
         }
     }
 
@@ -3757,6 +3775,7 @@ class RequestHandler(
      * Generates and returns the current OTP code for a credential.
      */
     private suspend fun handleOathGenerate(request: Request): Response {
+        requireOathAttestation()
         val params = request.params
             ?: return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Missing params")
 
@@ -3771,20 +3790,30 @@ class RequestHandler(
                 db.oathCredentialDao(),
                 com.automatethethings.xkey.oath.OathSecretManager()
             )
+            // Read once, before the code: a removal landing after the code is
+            // computed must not turn expires_in into 0 or the audit entry's
+            // account into an empty one.
+            val cred = db.oathCredentialDao().getByOathId(credentialId)
+                ?: return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Credential not found: $credentialId")
             val code = try {
                 oathRepository.generateCode(credentialId)
             } catch (_: NoSuchElementException) {
                 return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Credential not found: $credentialId")
+            } catch (_: com.automatethethings.xkey.oath.OathCounterExhaustedException) {
+                return Response.error(request.id, ErrorCodes.OPERATION_DENIED, "HOTP counter exhausted")
             }
 
-            val cred = db.oathCredentialDao().getByOathId(credentialId)
             // expires_in: seconds until the current TOTP window ends (0 for HOTP).
-            val expiresIn = if (cred?.oathType == "TOTP") {
-                val period = cred.periodSeconds.toLong()
+            // A period that is not positive never produced a code above.
+            val period = cred.periodSeconds.toLong()
+            val expiresIn = if (cred.oathType == "TOTP" && period > 0) {
                 (period - (System.currentTimeMillis() / 1000 % period)).toInt()
             } else 0
 
-            AuditLogger.logOathCodeGenerated(credentialId, cred?.issuer, cred?.accountName ?: "")
+            val caller = auditCaller()
+            AuditLogger.logOathCodeGenerated(
+                credentialId, cred.issuer, cred.accountName, caller.peerPublicKeyHex, caller.deviceName
+            )
 
             val result = JSONObject().apply {
                 put("code", code)
@@ -3792,8 +3821,9 @@ class RequestHandler(
             }
             Response.success(request.id, result)
         } catch (e: Exception) {
+            // The exception text stays in the log: it can name stored values.
             Log.e(TAG, "Failed to generate OATH code", e)
-            Response.error(request.id, ErrorCodes.INTERNAL_ERROR, "Failed to generate code: ${e.message}")
+            Response.error(request.id, ErrorCodes.INTERNAL_ERROR, "Failed to generate code")
         }
     }
 
@@ -3801,6 +3831,7 @@ class RequestHandler(
      * Adds (imports) an OATH credential pushed from the desktop (local.oathAdd).
      */
     private suspend fun handleOathAdd(request: Request): Response {
+        requireOathAttestation()
         val params = request.params
             ?: return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Missing params")
 
@@ -3839,16 +3870,24 @@ class RequestHandler(
                 counter = credential.optLong("counter", 0)
             )
 
-            AuditLogger.logOathCredentialCreated(name, issuer, accountName, type.uppercase())
+            // The entry names the stored credential, not the caller's free-form name.
+            val caller = auditCaller()
+            AuditLogger.logOathCredentialCreated(
+                credentialId, issuer, accountName, type.uppercase(), caller.peerPublicKeyHex, caller.deviceName
+            )
 
             val result = JSONObject().apply {
                 put("success", true)
                 put("credential_id", credentialId)
             }
             Response.success(request.id, result)
+        } catch (e: IllegalArgumentException) {
+            // The importer's validation: its messages never name the secret.
+            Log.w(TAG, "Refused OATH credential: ${e.message}")
+            Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Invalid credential: ${e.message}")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to add OATH credential", e)
-            Response.error(request.id, ErrorCodes.INTERNAL_ERROR, "Failed to add: ${e.message}")
+            Response.error(request.id, ErrorCodes.INTERNAL_ERROR, "Failed to add credential")
         }
     }
 
@@ -3856,6 +3895,7 @@ class RequestHandler(
      * Removes an OATH credential (local.oathRemove).
      */
     private suspend fun handleOathRemove(request: Request): Response {
+        requireOathAttestation()
         val params = request.params
             ?: return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Missing params")
 
@@ -3874,13 +3914,16 @@ class RequestHandler(
             // Recorded and deleted in one transaction, so no sync with another paired device adds it back.
             db.oathCredentialDao().deleteAndRecordDeletion(credentialId, System.currentTimeMillis())
 
-            AuditLogger.logOathCredentialDeleted(credentialId, cred.issuer, cred.accountName)
+            val caller = auditCaller()
+            AuditLogger.logOathCredentialDeleted(
+                credentialId, cred.issuer, cred.accountName, caller.peerPublicKeyHex, caller.deviceName
+            )
 
             val result = JSONObject().apply { put("deleted", true) }
             Response.success(request.id, result)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to remove OATH credential", e)
-            Response.error(request.id, ErrorCodes.INTERNAL_ERROR, "Failed to remove: ${e.message}")
+            Response.error(request.id, ErrorCodes.INTERNAL_ERROR, "Failed to remove credential")
         }
     }
 
