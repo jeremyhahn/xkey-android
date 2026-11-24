@@ -20,6 +20,7 @@ import android.app.NotificationManager
 import android.content.Context
 import android.os.Looper
 import android.util.Log
+import androidx.biometric.BiometricManager
 import com.automatethethings.xkey.crypto.KeySecurityLevel
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.crypto.MlDsaParameterSet
@@ -131,6 +132,8 @@ class LocalGenerateKeyMlDsaHandlerTest {
         every { context.getSystemService(Context.KEYGUARD_SERVICE) } returns mockk<KeyguardManager>(relaxed = true)
         every { context.getSystemService(NotificationManager::class.java) } returns
             mockk<NotificationManager>(relaxed = true)
+        mockkStatic(BiometricManager::class)
+        every { BiometricManager.from(any()) } returns mockk(relaxed = true)
         val pairedDevices = mockk<PairedDeviceRepository>()
         every { pairedDevices.lookupDevice(any()) } returns DeviceLookup.Paired(device())
 

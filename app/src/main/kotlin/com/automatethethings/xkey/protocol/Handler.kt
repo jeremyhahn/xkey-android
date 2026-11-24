@@ -2826,7 +2826,7 @@ class RequestHandler(
             supportsHMAC = true,
             maxKeys = 256, // Android Keystore practical limit
             version = PROTOCOL_VERSION,
-            deviceName = Build.MODEL,
+            deviceName = Build.MODEL.orEmpty(),
             currentKeyCount = keyDao.getAll().size,
             hardwareAlgorithms = KeystoreCapabilities.hardwareAlgorithms()
         )
