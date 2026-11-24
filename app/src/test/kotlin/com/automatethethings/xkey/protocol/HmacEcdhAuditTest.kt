@@ -144,25 +144,30 @@ class HmacEcdhAuditTest {
         every { KeyStore.getInstance("AndroidKeyStore") } returns mockk(relaxed = true)
         mockkConstructor(SoftwareKeyStore::class)
         every { anyConstructed<SoftwareKeyStore>().get(any()) } returns null
-        every { anyConstructed<SoftwareKeyStore>().get("sw-hmac") } returns SoftwareKey(
-            keyId = "sw-hmac",
-            algorithm = "HMAC-SHA256",
-            keyType = "symmetric",
-            keySize = 256,
-            exportable = true,
-            shareable = true,
-            material = swMaterial
-        )
+        every { anyConstructed<SoftwareKeyStore>().get("sw-hmac") } answers {
+            // A fresh copy per call, as SoftwareKeyStore decrypts one each time.
+            SoftwareKey(
+                keyId = "sw-hmac",
+                algorithm = "HMAC-SHA256",
+                keyType = "symmetric",
+                keySize = 256,
+                exportable = true,
+                shareable = true,
+                material = swMaterial.copyOf()
+            )
+        }
         // Unvalidated stored name: SoftwareKeyOps runs SHA-256 for it.
-        every { anyConstructed<SoftwareKeyStore>().get("sw-odd") } returns SoftwareKey(
-            keyId = "sw-odd",
-            algorithm = "HMAC-SHA224",
-            keyType = "symmetric",
-            keySize = 256,
-            exportable = true,
-            shareable = true,
-            material = swMaterial
-        )
+        every { anyConstructed<SoftwareKeyStore>().get("sw-odd") } answers {
+            SoftwareKey(
+                keyId = "sw-odd",
+                algorithm = "HMAC-SHA224",
+                keyType = "symmetric",
+                keySize = 256,
+                exportable = true,
+                shareable = true,
+                material = swMaterial.copyOf()
+            )
+        }
 
         val context = mockk<Context>(relaxed = true)
         every { context.filesDir } returns tmp.root
