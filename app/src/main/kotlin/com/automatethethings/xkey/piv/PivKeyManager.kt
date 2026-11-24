@@ -308,7 +308,7 @@ class PivKeyManager(
             PqcBacking.HARDWARE -> {
                 val backend = PqcHardware.backend?.takeIf { set in it.supportedParameterSets() }
                     ?: throw UnsupportedAlgorithmException(set.wireName)
-                backend.generate(alias, set, authDurationSeconds = 0, preferStrongBox = true)
+                backend.generate(alias, set, authDurationSeconds = -1, preferStrongBox = true)
             }
         }
     }

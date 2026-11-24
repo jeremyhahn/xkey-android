@@ -75,9 +75,11 @@ interface PqcHardwareBackend {
 
     /**
      * Generates a non-exportable [set] key under [alias] and returns its
-     * SubjectPublicKeyInfo DER. An [authDurationSeconds] of 0 or less means
-     * the key needs no user authentication (PIV slot keys, like their EC and
-     * RSA keys); above 0 it needs it within that many seconds.
+     * SubjectPublicKeyInfo DER. [authDurationSeconds] follows the EC keys
+     * (`KeystoreManager.applyAuthDuration`): negative needs no user
+     * authentication (PIV slot keys, like their EC and RSA keys), zero
+     * authenticates every use, positive keeps one authentication valid that
+     * many seconds.
      */
     fun generate(
         alias: String,
