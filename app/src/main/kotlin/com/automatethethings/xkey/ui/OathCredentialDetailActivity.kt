@@ -14,6 +14,7 @@
  */
 package com.automatethethings.xkey.ui
 
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.graphics.Typeface
@@ -101,6 +102,14 @@ class OathCredentialDetailActivity : AppCompatActivity() {
                 launch { viewModel.run() }
                 viewModel.state.collect { render(it) }
             }
+        }
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        // With focus the clipboard is readable again: finish a clear that waited.
+        if (hasFocus) {
+            SensitiveClipboard.retryPendingClears(getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
         }
     }
 

@@ -129,6 +129,14 @@ class PasswordManagementActivity : AppCompatActivity() {
         reload()
     }
 
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        // With focus the clipboard is readable again: finish a clear that waited.
+        if (hasFocus) {
+            SensitiveClipboard.retryPendingClears(getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
+        }
+    }
+
     /**
      * Builds the app's gradient toolbar (navy gradient, on_primary title and a
      * dimmed subtitle) to match [KeyManagementActivity].

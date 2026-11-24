@@ -139,7 +139,13 @@ Copy all go through `OathCodeClipboard`. The clip is marked sensitive
 (`ClipDescription.EXTRA_IS_SENSITIVE`, API 33+). A TOTP copy copies the code on
 screen and changes nothing. An HOTP copy calls `OathRepository.generateCode`,
 which copies the code at the stored counter, advances the counter and records
-the use, so every HOTP copy is a fresh code.
+the use, so every HOTP copy is a fresh code. `SensitiveClipboard` takes the
+code off the clipboard 45 seconds later, but only once it can read the
+clipboard and finds the token it tagged the clip with: a clip set by anyone
+else stays. Android 10 and later hide the clipboard from an app without window
+focus, and an unreadable clipboard is never cleared; the clear waits until a
+window of the app gains focus again (`retryPendingClears`) and the token is
+still there.
 
 **Long-press menu.** `OathListMenu` lists Copy, Delete and Details, followed by
 the desktop entries (copy to the desktop, show the desktop's code) that the

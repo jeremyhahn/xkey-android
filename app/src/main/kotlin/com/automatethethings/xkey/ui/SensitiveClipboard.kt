@@ -21,6 +21,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.PersistableBundle
+import android.os.SystemClock
 import java.util.UUID
 
 /**
@@ -33,9 +34,14 @@ import java.util.UUID
  *   time is up the clip is cleared only if the clipboard still holds that
  *   token: a clip someone else set in between, or a later copy of ours, is
  *   left alone. Only the description is read back, never the secret text.
- * - Android 10 and later hide the clipboard from an app that is not in the
- *   foreground. If the description cannot be read then, the clip is cleared
- *   unless a change by someone else was seen while it could be read.
+ * - Android 10 and later hide the clipboard from an app without window
+ *   focus. An unreadable clipboard is never cleared: the clear stays pending
+ *   until the app can read the clipboard again ([retryPendingClears], called
+ *   when one of its windows gains focus) and finds its own token there.
+ * - [clearIfOwned] is the only place the clipboard is cleared.
+ *
+ * Main thread only: copies, the change listener, the timer and the retry
+ * all run there.
  */
 internal object SensitiveClipboard {
 
@@ -46,6 +52,12 @@ internal object SensitiveClipboard {
     const val EXTRA_CLIP_TOKEN = "com.automatethethings.xkey.extra.CLIP_TOKEN"
 
     private val mainHandler by lazy { Handler(Looper.getMainLooper()) }
+
+    /** A copy whose clip is to be cleared once [dueAt] (uptime) has passed. */
+    private class PendingClear(val token: String, val dueAt: Long)
+
+    /** Copies not yet cleared or given up; at most the latest copy, since a new copy replaces the clip. */
+    private val pending = mutableListOf<PendingClear>()
 
     /** A plain-text clip of [text] marked sensitive and tagged with [token]. */
     fun clip(label: String, text: String, token: String = newToken()): ClipData =
@@ -58,7 +70,7 @@ internal object SensitiveClipboard {
             }
         }
 
-    /** Copy [text] to [clipboard] and clear it after [clearAfterMs] if it is still ours. */
+    /** Copy [text] to [clipboard] and clear it after [clearAfterMs] once it is provably still ours. */
     fun copy(
         clipboard: ClipboardManager,
         label: String,
@@ -67,35 +79,58 @@ internal object SensitiveClipboard {
         handler: Handler = mainHandler
     ) {
         val token = newToken()
-        var replaced = false
+        val entry = PendingClear(token, SystemClock.uptimeMillis() + clearAfterMs)
         val listener = ClipboardManager.OnPrimaryClipChangedListener {
             val seen = tokenReader(clipboard)
-            if (seen is TokenRead.Readable && seen.token != token) replaced = true
+            if (seen is TokenRead.Readable && seen.token != token) pending.remove(entry)
         }
         clipboard.setPrimaryClip(clip(label, text, token))
+        // This clip replaced any earlier copy of ours: those can never match again.
+        pending.clear()
+        pending.add(entry)
         clipboard.addPrimaryClipChangedListener(listener)
         handler.postDelayed({
             clipboard.removePrimaryClipChangedListener(listener)
-            val current = tokenReader(clipboard)
-            val ours = when (current) {
-                is TokenRead.Readable -> current.token == token
-                TokenRead.Unreadable -> !replaced
-            }
-            if (ours) clipboard.clearPrimaryClip()
+            if (entry in pending) clearIfOwned(clipboard, entry)
         }, clearAfterMs)
     }
 
-    private fun newToken(): String = UUID.randomUUID().toString()
-
     /**
      * Clear the copies whose time is up and whose clip the clipboard still
-     * holds. Call when the app gains window focus.
+     * holds. Call when a window of the app gains focus: from Android 10 on
+     * that is when the app can read the clipboard again.
      */
     fun retryPendingClears(clipboard: ClipboardManager) {
+        val now = SystemClock.uptimeMillis()
+        pending.filter { it.dueAt <= now }.forEach { entry ->
+            if (entry in pending) clearIfOwned(clipboard, entry)
+        }
     }
+
+    /**
+     * The one ownership check and the only clear: a readable clipboard holding
+     * [entry]'s token is cleared; a readable clipboard holding anything else
+     * ends [entry] without clearing; an unreadable one keeps [entry] pending
+     * and clears nothing. Returns whether the clipboard was cleared.
+     */
+    private fun clearIfOwned(clipboard: ClipboardManager, entry: PendingClear): Boolean =
+        when (val current = tokenReader(clipboard)) {
+            is TokenRead.Readable -> {
+                pending.remove(entry)
+                if (current.token == entry.token) {
+                    clipboard.clearPrimaryClip()
+                    true
+                } else {
+                    false
+                }
+            }
+            TokenRead.Unreadable -> false
+        }
 
     /** Reads the token of the clip on the clipboard; replaced in tests. */
     internal var tokenReader: (ClipboardManager) -> TokenRead = ::readToken
+
+    private fun newToken(): String = UUID.randomUUID().toString()
 
     internal sealed interface TokenRead {
         /** The clipboard could be read; [token] is null for a clip that is not ours or no clip. */
