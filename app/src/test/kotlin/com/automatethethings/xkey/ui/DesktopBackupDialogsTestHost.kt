@@ -31,7 +31,9 @@ import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import com.automatethethings.xkey.R
 import com.automatethethings.xkey.ble.XKeyGattService
+import com.automatethethings.xkey.remote.ConnectedDesktop
 import com.google.android.material.snackbar.SnackbarContentLayout
+import io.mockk.every
 import io.mockk.mockk
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
@@ -46,7 +48,9 @@ import java.time.Duration
  *
  * The dialogs reach the service only through their `() -> XKeyGattService?`
  * lambda; here it reads [service], which starts out returning the mockk
- * [gatt] and can be set to return null (no desktop connected) at any point.
+ * [gatt] and can be set to return null (service not bound) at any point.
+ * [desktop] is what [gatt] reports connected; null is the ordinary disconnect,
+ * where the service stays bound with no desktop session.
  * The real service is never bound or started.
  *
  * Dialogs are found through [ShadowDialog.getLatestDialog] and Snackbars by
@@ -72,6 +76,13 @@ class DesktopBackupDialogsTestHost {
 
     /** What the dialogs' service lambda returns, read on every call. */
     var service: () -> XKeyGattService? = { gatt }
+
+    /** The desktop [gatt] reports connected; null is a bound service with no desktop. */
+    var desktop: ConnectedDesktop? = mockk()
+
+    init {
+        every { gatt.connectedDesktop() } answers { desktop }
+    }
 
     private val controller: ActivityController<HostActivity> =
         Robolectric.buildActivity(HostActivity::class.java).setup()

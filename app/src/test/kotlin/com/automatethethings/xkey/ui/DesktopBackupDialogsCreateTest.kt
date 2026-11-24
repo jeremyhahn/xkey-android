@@ -75,6 +75,17 @@ class DesktopBackupDialogsCreateTest {
     }
 
     @Test
+    fun `with a bound service and no desktop show says so and opens no dialog`() {
+        host.desktop = null
+
+        host.dialogs.show()
+        host.idle()
+
+        assertEquals(host.string(R.string.sync_not_connected), host.snackbarText())
+        assertNull("no dialog may open without a desktop", host.latestDialog())
+    }
+
+    @Test
     fun `entry menu offers create and restore and cancel closes it`() {
         host.dialogs.show()
         host.idle()
@@ -360,6 +371,23 @@ class DesktopBackupDialogsCreateTest {
         fill(dialog, "hunter22")
         val (password, confirm) = host.fields(dialog)
         host.service = { null }
+
+        host.clickPositive(dialog)
+        host.settle()
+
+        assertEquals(listOf(host.string(R.string.sync_not_connected)), host.snackbarTexts())
+        assertFalse(dialog.isShowing)
+        assertEquals("", password.text.toString())
+        assertEquals("", confirm.text.toString())
+        coVerify(exactly = 0) { host.gatt.createDesktopBackup(any(), any()) }
+    }
+
+    @Test
+    fun `a bound service with no desktop by the send shows not connected and copies no password`() {
+        val dialog = openCreate()
+        fill(dialog, "hunter22")
+        val (password, confirm) = host.fields(dialog)
+        host.desktop = null
 
         host.clickPositive(dialog)
         host.settle()

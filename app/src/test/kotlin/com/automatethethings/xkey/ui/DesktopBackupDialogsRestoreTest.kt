@@ -393,6 +393,40 @@ class DesktopBackupDialogsRestoreTest {
         coVerify(exactly = 0) { host.gatt.restoreDesktopBackup(any(), any()) }
     }
 
+    @Test
+    fun `a bound service with no desktop by the send shows not connected and copies no password`() {
+        storedAndListed()
+        val dialog = openRestore()
+        val field = host.fields(dialog)[0]
+        field.setText("hunter22")
+        host.desktop = null
+
+        host.clickPositive(dialog)
+        host.settle()
+
+        assertEquals(listOf(host.string(R.string.sync_not_connected)), host.snackbarTexts())
+        assertNull("not connected offers no retry", host.snackbarAction())
+        assertFalse(dialog.isShowing)
+        assertEquals("", field.text.toString())
+        coVerify(exactly = 0) { host.gatt.restoreDesktopBackup(any(), any()) }
+    }
+
+    @Test
+    fun `a bound service with no desktop at the pick says so and opens no dialog`() {
+        storedAndListed()
+        host.dialogs.show()
+        host.idle()
+        val menu = host.shownDialog()
+        host.desktop = null
+
+        host.pickMenuItem(menu, RESTORE)
+        host.settle()
+
+        assertEquals(listOf(host.string(R.string.sync_not_connected)), host.snackbarTexts())
+        assertFalse(host.anyDialogShowing())
+        coVerify(exactly = 0) { host.gatt.latestStoredBackupId() }
+    }
+
     // --------------------------------------------------------------- helpers
 
     private fun stored(id: String?) {
