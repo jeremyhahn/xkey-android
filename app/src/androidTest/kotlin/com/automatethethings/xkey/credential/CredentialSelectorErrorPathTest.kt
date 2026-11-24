@@ -143,25 +143,43 @@ class CredentialSelectorErrorPathTest {
         assertError(result, GET_MARKER, GetCredentialUnknownException().type, MALFORMED_JSON_ERROR)
     }
 
+    /**
+     * A create with malformed request JSON reaches the create handler, which
+     * refuses to parse it: the malformed-request error, never the
+     * missing-request one.
+     */
     @Test
     fun createWithGarbledRequestJson_failsWithoutACredential() {
         assumeNoAuthenticator()
 
-        assertFailsWithoutCredential(
-            selector(CredentialSelectorActivity.ACTION_CREATE_CREDENTIAL, requestJson = GARBLED_JSON),
+        val result = assertFailsWithoutCredential(
+            selector(
+                CredentialSelectorActivity.ACTION_CREATE_CREDENTIAL,
+                requestJson = GARBLED_JSON,
+                providerRequestJson = GARBLED_JSON,
+            ),
             CREATE_MARKER,
         )
+
+        assertError(result, CREATE_MARKER, CreateCredentialUnknownException().type, MALFORMED_JSON_ERROR)
     }
 
     @Test
     fun createWithTruncatedRequestJson_failsWithoutACredential() {
         assumeNoAuthenticator()
-        val json = CredentialRequestFixtures.createRequestJson(RP_ID)
+        val full = CredentialRequestFixtures.createRequestJson(RP_ID)
+        val json = full.dropLast(full.length / 2)
 
-        assertFailsWithoutCredential(
-            selector(CredentialSelectorActivity.ACTION_CREATE_CREDENTIAL, requestJson = json.dropLast(json.length / 2)),
+        val result = assertFailsWithoutCredential(
+            selector(
+                CredentialSelectorActivity.ACTION_CREATE_CREDENTIAL,
+                requestJson = json,
+                providerRequestJson = json,
+            ),
             CREATE_MARKER,
         )
+
+        assertError(result, CREATE_MARKER, CreateCredentialUnknownException().type, MALFORMED_JSON_ERROR)
     }
 
     // ---------------------------------------------------------------
