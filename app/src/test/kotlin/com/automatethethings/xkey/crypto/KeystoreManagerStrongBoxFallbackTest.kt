@@ -54,6 +54,9 @@ class KeystoreManagerStrongBoxFallbackTest {
     private val ecKeyPair: KeyPair =
         KeyPairGenerator.getInstance("EC").apply { initialize(256) }.generateKeyPair()
 
+    private val rsaKeyPair: KeyPair =
+        KeyPairGenerator.getInstance("RSA").apply { initialize(1024) }.generateKeyPair()
+
     private val specs = mutableListOf<KeyGenParameterSpec>()
     private var generations = 0
 
@@ -103,5 +106,41 @@ class KeystoreManagerStrongBoxFallbackTest {
         )
         assertEquals(specs[0].userAuthenticationType, specs[1].userAuthenticationType)
         assertEquals(0, specs[1].userAuthenticationValidityDurationSeconds)
+    }
+
+    @Test
+    fun `a failure after a StrongBox key is made is not retried in the TEE`() = runTest {
+        // The key is made, then encoding its public key fails.
+        answers = listOf({ rsaKeyPair }, { ecKeyPair })
+
+        val error = runCatching { keystoreManager.generateKey("c") }.exceptionOrNull()
+
+        assertEquals("Public key is not an EC key", (error as? KeyGenerationException)?.reason)
+        assertEquals(1, generations)
+    }
+
+    @Test
+    fun `a failure after a StrongBox key with an auth duration is made is not retried`() = runTest {
+        answers = listOf({ rsaKeyPair }, { ecKeyPair })
+
+        val error = runCatching {
+            keystoreManager.generateKeyWithAuthDuration("c", authDurationSeconds = 5)
+        }.exceptionOrNull()
+
+        assertEquals("Public key is not an EC key", (error as? KeyGenerationException)?.reason)
+        assertEquals(1, generations)
+    }
+
+    @Test
+    fun `a StrongBox key that cannot be made falls back to the TEE once`() = runTest {
+        answers = listOf(
+            { throw android.security.keystore.StrongBoxUnavailableException() },
+            { ecKeyPair },
+        )
+
+        keystoreManager.generateKey("c")
+
+        assertEquals(2, generations)
+        assertFalse(specs[1].isStrongBoxBacked)
     }
 }
