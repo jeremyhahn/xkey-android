@@ -59,6 +59,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
+import org.junit.Ignore
 import org.junit.Test
 
 /**
@@ -475,6 +476,78 @@ class OathHandlerWireTest {
         assertTrue(audit.isEmpty())
     }
 
+
+    // -------------------------------------------------------------------------
+    // Audit and secret handling
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun `one audit entry per created, generated and deleted credential names its id`() = runTest {
+        val id = result(add(credential())).getString("credential_id")
+        code(generate(id))
+        assertTrue(result(remove(id)).getBoolean("deleted"))
+
+        val oath = audit.filter { it.operationType in OATH_ENTRIES }
+        assertEquals(OATH_ENTRIES, oath.map { it.operationType })
+        oath.forEach { assertEquals("entry names the credential: $it", id, it.keyId) }
+    }
+
+    @Ignore(
+        "Fails on main: AuditLogger.logOathCredentialCreated, logOathCodeGenerated and " +
+            "logOathCredentialDeleted take no device, so no OATH entry names the desktop. " +
+            "The fix is in AuditLogger (a device id and name parameter), then in the handlers."
+    )
+    @Test
+    fun `every OATH audit entry names the requesting desktop`() = runTest {
+        val id = result(add(credential())).getString("credential_id")
+        code(generate(id))
+        result(remove(id))
+
+        val oath = audit.filter { it.operationType in OATH_ENTRIES }
+        assertEquals(OATH_ENTRIES, oath.map { it.operationType })
+        oath.forEach { assertEquals("entry names the desktop: $it", PEER, it.deviceId) }
+    }
+
+    @Ignore(
+        "Fails on main: OathRepository.generateCode hands the decrypted secret to OathEngine " +
+            "and never zeroes it. The fix is in OathRepository.generateCode (fill the array " +
+            "with 0 in a finally block after each code)."
+    )
+    @Test
+    fun `oathGenerate zeroes the decrypted secret after the code`() = runTest {
+        totpAtSeconds = 59L
+        store(hotp(ID_HOTP))
+        store(totp(ID_TOTP))
+
+        code(generate(ID_HOTP))
+        code(generate(ID_TOTP))
+
+        assertEquals(2, decrypted.size)
+        decrypted.forEach { secret ->
+            assertTrue("secret left in memory", secret.all { it == 0.toByte() })
+        }
+    }
+
+    @Ignore(
+        "Fails on main: OathRepository.generateCode claims the HOTP counter, then a failing " +
+            "recordUsage throws, so the code is discarded and its counter value is spent. " +
+            "The fix is in OathRepository.generateCode (a usage record failure is logged, " +
+            "the claimed code returned)."
+    )
+    @Test
+    fun `a HOTP code whose counter was claimed is not lost to a later failure`() = runTest {
+        store(hotp(ID_HOTP, counter = 0))
+        coEvery { dao.recordUsage(any(), any()) } throws IllegalStateException("disk I/O error")
+
+        val response = generate(ID_HOTP)
+
+        if (response.has("error")) {
+            assertEquals("a refused code spends no counter", 0L, rows.getValue(ID_HOTP).counter)
+        } else {
+            assertEquals(RFC4226_CODES[0], code(response))
+        }
+    }
+
     // -------------------------------------------------------------------------
     // Harness
     // -------------------------------------------------------------------------
@@ -586,6 +659,12 @@ class OathHandlerWireTest {
         const val ID_TOTP = "totp-credential"
         const val ID_HOTP = "hotp-credential"
         const val CALLER_NAME = "caller-chosen-name"
+
+        val OATH_ENTRIES = listOf(
+            AuditOperationType.OATH_CREDENTIAL_CREATED,
+            AuditOperationType.OATH_CODE_GENERATED,
+            AuditOperationType.OATH_CREDENTIAL_DELETED
+        )
 
         /** A 10-byte secret, the shortest the importer accepts. */
         const val BASE32_SECRET = "JBSWY3DPEHPK3PXP"
