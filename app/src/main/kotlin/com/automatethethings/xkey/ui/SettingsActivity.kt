@@ -1313,10 +1313,13 @@ class SettingsActivity : AppCompatActivity() {
 
             lifecycleScope.launch {
                 try {
-                    bootstrapSettingsRepository.deriveSettingsFromUrl(url)
+                    val settings = bootstrapSettingsRepository.deriveSettingsFromUrl(url)
+                    if (settings == null) {
+                        Snackbar.make(card, getString(R.string.bootstrap_ca_url_refused), Snackbar.LENGTH_LONG).show()
+                        return@launch
+                    }
                     trustedComputingSettingsRepository.updateXkmsEndpoint(url)
 
-                    val settings = bootstrapSettingsRepository.getSettings()
                     val client = BootstrapClient(settings)
                     val result = client.fetchCABundle()
 

@@ -747,17 +747,28 @@ public class BootstrapSettingsRepository internal constructor(
     }
 
     /**
-     * Derive and save settings from a single server URL.
+     * Derive and save the bootstrap server addresses from a single server URL.
      *
-     * Auto-populates the DANE, SPKI, and Direct server URLs from the
-     * provided base URL. Noise address is derived using the default port.
+     * Writes only the DANE, SPKI and Direct server URLs and the Noise address;
+     * every other setting, including a stored SPKI pin or Noise static key,
+     * is left as stored.
      *
      * @param url The base server URL (e.g., "https://kms.example.com:8443").
+     * @return The settings as written, or null, writing nothing, if [url] is
+     *   not an http or https URL that names a host.
      */
-    public suspend fun deriveSettingsFromUrl(url: String) {
-        val current = getSettings()
-        val derived = current.deriveFromUrl(url)
-        updateSettings(derived)
+    public suspend fun deriveSettingsFromUrl(url: String): BootstrapSettingsData? {
+        // deriveFromUrl returns its receiver itself when the URL names no http(s) host.
+        val probe = BootstrapSettingsData.DEFAULT
+        val derived = probe.deriveFromUrl(url)
+        if (derived === probe) return null
+        val written = dataStore.edit { preferences ->
+            preferences[KEY_DANE_SERVER_URL] = derived.daneServerUrl
+            preferences[KEY_SPKI_SERVER_URL] = derived.spkiServerUrl
+            preferences[KEY_DIRECT_SERVER_URL] = derived.directServerUrl
+            preferences[KEY_NOISE_SERVER_ADDR] = derived.noiseServerAddr
+        }
+        return mapPreferencesToSettings(written)
     }
 
     /**
