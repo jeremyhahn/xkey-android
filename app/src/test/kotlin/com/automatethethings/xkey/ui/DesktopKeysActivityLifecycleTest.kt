@@ -252,6 +252,18 @@ class DesktopKeysActivityLifecycleTest {
     }
 
     @Test
+    fun `a refused bind leaves Loading for no session and nothing is unbound`() {
+        val controller = desktop.refuseBind().start()
+        val activity = controller.get()
+
+        activity.assertNoSession()
+        verify { client wasNot Called }
+
+        controller.pause().stop().destroy()
+        assertTrue(shadowOf(desktop.app).unboundServiceConnections.isEmpty())
+    }
+
+    @Test
     fun `onDestroy unbinds the service once`() {
         val controller = desktop.start()
         val connection = shadowOf(desktop.app).boundServiceConnections.single()
