@@ -37,11 +37,13 @@ class PasswordSync(
     /**
      * What [mergeWithDetail] did: the [counts] [merge] answers with, and how
      * many of the skipped entries were held back because the phone deleted
-     * them ([keptDeleted]).
+     * them ([keptDeleted]), and how many incoming copies were dated beyond
+     * [MAX_CLOCK_SKEW_MS] ahead of the phone's clock ([clamped]).
      */
     data class MergeResult(
         val counts: SyncEngine.ItemCounts,
-        val keptDeleted: Int = 0
+        val keptDeleted: Int = 0,
+        val clamped: Int = 0
     )
 
     /**
@@ -112,6 +114,14 @@ class PasswordSync(
      * changed after the delete is added again. Deletion records older than
      * [PasswordRepository.DELETION_RETENTION_MS] are dropped first.
      *
+     * The phone does not trust a peer clock running ahead of its own: a copy
+     * whose `updated_at` is more than [MAX_CLOCK_SKEW_MS] ahead of the
+     * phone's clock is clamped to the phone's time. It cannot tell when such a
+     * copy was really changed, so it overwrites no existing entry and adds
+     * back no deleted one (both counted as skipped); a new one is added with
+     * the phone's time as its `updated_at`. Every clamped copy is counted in
+     * [MergeResult.clamped].
+     *
      * @throws com.automatethethings.xkey.password.PasswordStoreLockedException
      *   if the store is locked; nothing is written.
      */
@@ -123,6 +133,7 @@ class PasswordSync(
         val now = clock()
         repository.pruneDeletions(now)
         var keptDeleted = 0
+        var clamped = 0
         var added = 0
         var updated = 0
         var skipped = 0
@@ -134,6 +145,10 @@ class PasswordSync(
                 skipped++
                 continue
             }
+            val sentUpdatedAt = SyncCodec.parseRfc3339(obj.optString("updated_at", ""))
+            // A peer clock this far ahead cannot be trusted: the copy is stored at the phone's time.
+            val isClamped = sentUpdatedAt > now + MAX_CLOCK_SKEW_MS
+            if (isClamped) clamped++
             val record = PasswordRecord(
                 passwordId = id,
                 name = obj.optString("name", "").ifBlank { id },
@@ -144,16 +159,18 @@ class PasswordSync(
                 notes = obj.optString("notes", "").ifBlank { null },
                 folderPath = obj.optString("folder_path", "").ifBlank { null },
                 source = "remote",
-                updatedAt = SyncCodec.parseRfc3339(obj.optString("updated_at", ""))
+                updatedAt = if (isClamped) now else sentUpdatedAt
             )
             val patch = record.asPatch()
+            // A clamped copy's real age is unknown, so it overwrites no existing entry (0 refuses every one).
+            val olderThan = if (isClamped) 0L else record.updatedAt
             val existed = try {
                 // In any tenant: an id names one entry, wherever it lives.
                 // Last writer wins: an existing entry is patched only while it is older than the incoming copy.
                 when {
-                    repository.updateFields(id, patch, onlyIfOlderThan = record.updatedAt) -> true
+                    repository.updateFields(id, patch, onlyIfOlderThan = olderThan) -> true
                     // Deleted on the phone, and this copy is no newer than the delete: it stays deleted.
-                    isDeletedSince(id, record.updatedAt) -> {
+                    isDeletedSince(id, record.updatedAt, isClamped) -> {
                         keptDeleted++
                         skipped++
                         continue
@@ -161,7 +178,7 @@ class PasswordSync(
                     // Added only while still absent: never replaces an entry another writer added since.
                     repository.insertIfAbsent(record) -> false
                     // Added meanwhile: patched in place like any existing entry, keeping the policy it was given.
-                    repository.updateFields(id, patch, onlyIfOlderThan = record.updatedAt) -> true
+                    repository.updateFields(id, patch, onlyIfOlderThan = olderThan) -> true
                     // Added and deleted again between the two: it keeps moving, so the next sync retries.
                     else -> throw PasswordUpdateConflictException()
                 }
@@ -180,17 +197,18 @@ class PasswordSync(
             }
             if (existed) updated++ else added++
         }
-        return MergeResult(SyncEngine.ItemCounts(added, updated, skipped), keptDeleted = keptDeleted)
+        return MergeResult(SyncEngine.ItemCounts(added, updated, skipped), keptDeleted = keptDeleted, clamped = clamped)
     }
 
     /**
      * Whether the phone deleted [id] at or after [updatedAt], the incoming
      * copy's time: the peer's copy predates the delete, so it must not add
-     * the entry back.
+     * the entry back. A [clamped] copy's real time is unknown, so any
+     * deletion record holds it back.
      */
-    private suspend fun isDeletedSince(id: String, updatedAt: Long): Boolean {
+    private suspend fun isDeletedSince(id: String, updatedAt: Long, clamped: Boolean): Boolean {
         val deletedAt = repository.deletedAt(id) ?: return false
-        return updatedAt <= deletedAt
+        return clamped || updatedAt <= deletedAt
     }
 
     /**
@@ -214,7 +232,10 @@ class PasswordSync(
     private fun PasswordRecord.hasDefaultPolicy() =
         tenantId == PasswordEntity.DEFAULT_TENANT && !shared && expiresAt.isNullOrEmpty()
 
-    private companion object {
-        const val TAG = "PasswordSync"
+    companion object {
+        private const val TAG = "PasswordSync"
+
+        /** How far ahead of the phone's clock a peer's `updated_at` may be before it is clamped: 5 minutes. */
+        const val MAX_CLOCK_SKEW_MS = 5L * 60 * 1000
     }
 }
