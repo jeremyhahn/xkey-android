@@ -311,9 +311,7 @@ public data class BootstrapSettingsData(
      * @return True if the key is valid or empty, false if malformed.
      */
     public fun isNoiseKeyValid(): Boolean {
-        if (noiseServerStaticKey.isBlank()) return true
-        return noiseServerStaticKey.length == HEX_KEY_LENGTH &&
-            noiseServerStaticKey.all { it.isDigit() || it in 'a'..'f' || it in 'A'..'F' }
+        return isHex64OrEmpty(noiseServerStaticKey)
     }
 
     /**
@@ -324,9 +322,7 @@ public data class BootstrapSettingsData(
      * @return True if the pin is valid or empty, false if malformed.
      */
     public fun isSpkiPinValid(): Boolean {
-        if (spkiPinSha256.isBlank()) return true
-        return spkiPinSha256.length == HEX_KEY_LENGTH &&
-            spkiPinSha256.all { it.isDigit() || it in 'a'..'f' || it in 'A'..'F' }
+        return isHex64OrEmpty(spkiPinSha256)
     }
 
     /**
@@ -444,6 +440,19 @@ public data class BootstrapSettingsData(
         public const val HEX_KEY_LENGTH: Int = 64
 
         /**
+         * Check a hex-encoded 32-byte key or pin.
+         *
+         * @param value The key or pin text.
+         * @return True if [value] is empty or exactly [HEX_KEY_LENGTH] ASCII
+         *   characters from 0-9, a-f and A-F.
+         */
+        internal fun isHex64OrEmpty(value: String): Boolean {
+            if (value.isEmpty()) return true
+            return value.length == HEX_KEY_LENGTH &&
+                value.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }
+        }
+
+        /**
          * Default settings with auto-bootstrap enabled and all methods available.
          */
         public val DEFAULT: BootstrapSettingsData = BootstrapSettingsData()
@@ -548,8 +557,12 @@ public class BootstrapSettingsRepository internal constructor(
      * Update all bootstrap settings at once.
      *
      * @param settings The new settings to persist.
+     * @return false, writing nothing, if the SPKI pin or the Noise static key
+     *   is not empty and not 64 hex characters; true once the settings are
+     *   written.
      */
-    public suspend fun updateSettings(settings: BootstrapSettingsData) {
+    public suspend fun updateSettings(settings: BootstrapSettingsData): Boolean {
+        if (!settings.isSpkiPinValid() || !settings.isNoiseKeyValid()) return false
         dataStore.edit { preferences ->
             // Auto-bootstrap
             preferences[KEY_AUTO_BOOTSTRAP_ENABLED] = settings.autoBootstrapEnabled
@@ -577,6 +590,7 @@ public class BootstrapSettingsRepository internal constructor(
             preferences[KEY_DIRECT_ENABLED] = settings.directEnabled
             preferences[KEY_DIRECT_SERVER_URL] = settings.directServerUrl
         }
+        return true
     }
 
     /**
