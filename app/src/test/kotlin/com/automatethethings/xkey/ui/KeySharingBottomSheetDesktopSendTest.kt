@@ -309,6 +309,14 @@ class KeySharingBottomSheetDesktopSendTest {
     }
 
     @Test
+    fun `every line-break character becomes a space in desktop text`() {
+        for (c in listOf('\u000A', '\u000B', '\u000C', '\u000D', '\u0085', ' ', ' ')) {
+            assertTrue("U+%04X".format(c.code), breaksLine(c))
+            assertEquals("U+%04X".format(c.code), "a b", KeySharingBottomSheet.boundedDesktopText("a${c}b"))
+        }
+    }
+
+    @Test
     fun `a timeout shows failed and enables the button again`() {
         sender.neverReply()
         val sheet = openReady()
@@ -447,10 +455,7 @@ class KeySharingBottomSheetDesktopSendTest {
         /** The most desktop-supplied text a status line may carry, the ellipsis included. */
         const val DESKTOP_TEXT_BOUND = 201
 
-        /** True for a character that starts a new line in a TextView. */
-        fun breaksLine(c: Char): Boolean = c.isISOControl() ||
-            Character.getType(c) == Character.LINE_SEPARATOR.toInt() ||
-            Character.getType(c) == Character.PARAGRAPH_SEPARATOR.toInt()
+        fun breaksLine(c: Char): Boolean = KeySharingBottomSheet.breaksLine(c)
         const val PEM = "-----BEGIN PUBLIC KEY-----\nAAAA\n-----END PUBLIC KEY-----\n"
 
         fun entityWith(policy: EntitySharingPolicyType) = KeyEntity(

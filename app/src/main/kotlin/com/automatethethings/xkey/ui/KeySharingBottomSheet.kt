@@ -981,16 +981,21 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
         /** The most characters of desktop-supplied text a status line shows. */
         private const val DESKTOP_TEXT_MAX = 200
 
+        /** True for a control character or a Unicode line or paragraph separator. */
+        internal fun breaksLine(c: Char): Boolean = c.isISOControl() ||
+            Character.getType(c) == Character.LINE_SEPARATOR.toInt() ||
+            Character.getType(c) == Character.PARAGRAPH_SEPARATOR.toInt()
+
         /**
          * Desktop-supplied text (an error message, an import id) as one
-         * bounded line: control characters become spaces, and text past
+         * bounded line: characters that [breaksLine] become spaces, and text past
          * [DESKTOP_TEXT_MAX] is cut, never inside a surrogate pair, and ends in an ellipsis.
          */
         internal fun boundedDesktopText(text: String): String {
             val line = buildString(minOf(text.length, DESKTOP_TEXT_MAX + 1)) {
                 for (c in text) {
                     if (length > DESKTOP_TEXT_MAX) break
-                    append(if (c.isISOControl()) ' ' else c)
+                    append(if (breaksLine(c)) ' ' else c)
                 }
             }
             if (line.length <= DESKTOP_TEXT_MAX) return line
