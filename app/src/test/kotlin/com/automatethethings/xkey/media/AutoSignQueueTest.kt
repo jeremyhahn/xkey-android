@@ -17,8 +17,6 @@ package com.automatethethings.xkey.media
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
-import kotlinx.coroutines.test.advanceTimeBy
-import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Test
@@ -39,18 +37,19 @@ class AutoSignQueueTest {
         val scope = TestScope(StandardTestDispatcher(testScheduler))
         val signs = AtomicInteger()
         val auditRows = AtomicInteger()
-        val queue = AutoSignQueue(scope, delayMs = 500) {
+        val queue = AutoSignQueue(scope, delayMs = 500)
+        val sign: suspend () -> AutoSignQueue.Outcome = {
             signs.incrementAndGet()
             auditRows.incrementAndGet()
             AutoSignQueue.Outcome.DONE
         }
 
-        queue.submit(uri)
-        scope.advanceTimeBy(40)
-        queue.submit(uri)
-        scope.advanceTimeBy(40)
-        queue.submit(uri)
-        scope.advanceUntilIdle()
+        queue.submit(uri, sign)
+        scope.testScheduler.advanceTimeBy(40)
+        queue.submit(uri, sign)
+        scope.testScheduler.advanceTimeBy(40)
+        queue.submit(uri, sign)
+        scope.testScheduler.advanceUntilIdle()
 
         assertEquals("one capture must be signed once", 1, signs.get())
         assertEquals("one capture must write one audit row", 1, auditRows.get())
@@ -60,16 +59,15 @@ class AutoSignQueueTest {
     fun `a skipped capture is released so a later event retries it`() = runTest {
         val scope = TestScope(StandardTestDispatcher(testScheduler))
         val attempts = AtomicInteger()
-        val queue = AutoSignQueue(scope, delayMs = 500) {
+        val queue = AutoSignQueue(scope, delayMs = 500)
+        val sign: suspend () -> AutoSignQueue.Outcome = {
             if (attempts.incrementAndGet() == 1) AutoSignQueue.Outcome.RETRY else AutoSignQueue.Outcome.DONE
         }
 
-        queue.submit(uri)
-        scope.advanceUntilIdle()
-        queue.submit(uri)
-        scope.advanceUntilIdle()
-        queue.submit(uri)
-        scope.advanceUntilIdle()
+        repeat(3) {
+            queue.submit(uri, sign)
+            scope.testScheduler.advanceUntilIdle()
+        }
 
         assertEquals("a retry must be attempted once more, then the URI is done", 2, attempts.get())
     }
@@ -78,15 +76,16 @@ class AutoSignQueueTest {
     fun `a capture whose signing throws is released`() = runTest {
         val scope = TestScope(StandardTestDispatcher(testScheduler))
         val attempts = AtomicInteger()
-        val queue = AutoSignQueue(scope, delayMs = 500) {
+        val queue = AutoSignQueue(scope, delayMs = 500)
+        val sign: suspend () -> AutoSignQueue.Outcome = {
             if (attempts.incrementAndGet() == 1) throw IllegalStateException("not readable yet")
             AutoSignQueue.Outcome.DONE
         }
 
-        queue.submit(uri)
-        scope.advanceUntilIdle()
-        queue.submit(uri)
-        scope.advanceUntilIdle()
+        repeat(2) {
+            queue.submit(uri, sign)
+            scope.testScheduler.advanceUntilIdle()
+        }
 
         assertEquals(2, attempts.get())
     }
