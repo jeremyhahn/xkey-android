@@ -191,7 +191,9 @@ class PqcSoftwareKeyStore(
 
     private fun write(file: File, bytes: ByteArray) {
         val dir = file.parentFile ?: throw IOException("No key directory")
-        if (!dir.exists() && !dir.mkdirs()) throw IOException("Cannot create key directory")
+        // Another store may make the directory between the two checks: only a
+        // directory that still is not there is a failure.
+        if (!dir.mkdirs() && !dir.isDirectory) throw IOException("Cannot create key directory")
         val temp = File(dir, file.name + ".tmp")
         temp.writeBytes(bytes)
         if (!temp.renameTo(file)) {
