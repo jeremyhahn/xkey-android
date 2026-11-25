@@ -295,7 +295,8 @@ class XKeyDatabaseMigrationTest {
         val credentialId = "legacy-credential-v$version"
 
         createLegacyDatabase(version) { db ->
-            insertKey(db, keyId = keyId, source = LEGACY_SOURCE)
+            // A v11+ database already holds the source name MIGRATION_10_11 writes.
+            insertKey(db, keyId = keyId, source = if (version < 11) LEGACY_SOURCE else CURRENT_SOURCE)
             insertCredential(db, credentialId)
         }
 
