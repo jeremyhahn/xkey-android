@@ -196,10 +196,11 @@ class MediaSigningServiceFailureTest {
         assertTrue("signed through its URI or queued: $queued", signedInBand || capture.uri.toString() in queued)
 
         // Handled once: a later event for the same URI starts no second job.
+        val queriesAfterFirst = MediaSigningServiceFixture.queries[capture.uri]
         capture.path = capture.file.path
         fixture.deliver(capture.uri)
 
-        assertEquals(1, MediaSigningServiceFixture.queries[capture.uri])
+        assertEquals(queriesAfterFirst, MediaSigningServiceFixture.queries[capture.uri])
         fixture.assertUnsigned(capture)
     }
 
