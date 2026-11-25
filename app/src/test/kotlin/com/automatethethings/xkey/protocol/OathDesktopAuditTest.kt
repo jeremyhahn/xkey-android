@@ -27,6 +27,8 @@ import com.automatethethings.xkey.oath.OathCredentialDao
 import com.automatethethings.xkey.oath.OathCredentialEntity
 import com.automatethethings.xkey.oath.OathSecretManager
 import com.automatethethings.xkey.pin.PinManager
+import com.automatethethings.xkey.settings.DeviceLookup
+import com.automatethethings.xkey.settings.PairedDeviceRepository
 import com.automatethethings.xkey.storage.XKeyDatabase
 import io.mockk.coEvery
 import io.mockk.every
@@ -45,6 +47,7 @@ import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -79,9 +82,9 @@ class OathDesktopAuditTest {
         every { Looper.getMainLooper() } returns mockk(relaxed = true)
 
         mockkObject(AuditLogger)
-        every { AuditLogger.logOathCredentialCreated(any(), any(), any(), any()) } returns Unit
-        every { AuditLogger.logOathCredentialDeleted(any(), any(), any()) } returns Unit
-        every { AuditLogger.logOathCodeGenerated(any(), any(), any()) } returns Unit
+        every { AuditLogger.logOathCredentialCreated(any(), any(), any(), any(), any(), any()) } returns Unit
+        every { AuditLogger.logOathCredentialDeleted(any(), any(), any(), any(), any()) } returns Unit
+        every { AuditLogger.logOathCodeGenerated(any(), any(), any(), any(), any()) } returns Unit
 
         val dao = mockk<OathCredentialDao>(relaxed = true)
         coEvery { dao.insert(any()) } answers { inserted += firstArg<OathCredentialEntity>(); 1L }
@@ -117,9 +120,18 @@ class OathDesktopAuditTest {
             keystoreManager = mockk<KeystoreManager>(relaxed = true),
             biometricLauncher = null,
             sessionAuthManager = null,
-            pairedDeviceRepository = null,
+            pairedDeviceRepository = pairedDevices(),
             pinManager = mockk<PinManager>(relaxed = true)
         )
+    }
+
+    /** Key use is served only to a paired peer; [PEER] is paired with no attestation required. */
+    private fun pairedDevices(): PairedDeviceRepository {
+        val repo = mockk<PairedDeviceRepository>()
+        every { repo.lookupDevice(PEER) } returns DeviceLookup.Paired(
+            mockk(relaxed = true) { every { requireAttestationForKeyUse } returns false }
+        )
+        return repo
     }
 
     @After
@@ -139,8 +151,8 @@ class OathDesktopAuditTest {
 
         assertTrue(response.toString(), response.getJSONObject("result").getBoolean("success"))
         val id = inserted.single().oathId
-        verify(exactly = 1) { AuditLogger.logOathCredentialCreated(id, "Acme", "alice", "TOTP") }
-        verify(exactly = 1) { AuditLogger.logOathCredentialCreated(any(), any(), any(), any()) }
+        verify(exactly = 1) { AuditLogger.logOathCredentialCreated(id, "Acme", "alice", "TOTP", PEER, any()) }
+        verify(exactly = 1) { AuditLogger.logOathCredentialCreated(any(), any(), any(), any(), any(), any()) }
     }
 
     @Test
@@ -148,8 +160,8 @@ class OathDesktopAuditTest {
         val response = call(MethodNames.LOCAL_OATH_REMOVE, JSONObject().put("credential_id", STORED_ID))
 
         assertEquals(true, response.getJSONObject("result").getBoolean("deleted"))
-        verify(exactly = 1) { AuditLogger.logOathCredentialDeleted(STORED_ID, "Acme", "alice") }
-        verify(exactly = 1) { AuditLogger.logOathCredentialDeleted(any(), any(), any()) }
+        verify(exactly = 1) { AuditLogger.logOathCredentialDeleted(STORED_ID, "Acme", "alice", PEER, any()) }
+        verify(exactly = 1) { AuditLogger.logOathCredentialDeleted(any(), any(), any(), any(), any()) }
     }
 
     @Test
@@ -157,7 +169,7 @@ class OathDesktopAuditTest {
         val response = call(MethodNames.LOCAL_OATH_REMOVE, JSONObject().put("credential_id", "nope"))
 
         assertEquals(false, response.getJSONObject("result").getBoolean("deleted"))
-        verify(exactly = 0) { AuditLogger.logOathCredentialDeleted(any(), any(), any()) }
+        verify(exactly = 0) { AuditLogger.logOathCredentialDeleted(any(), any(), any(), any(), any()) }
     }
 
     @Test
@@ -165,8 +177,8 @@ class OathDesktopAuditTest {
         val response = call(MethodNames.LOCAL_OATH_GENERATE, JSONObject().put("credential_id", STORED_ID))
 
         assertEquals(6, response.getJSONObject("result").getString("code").length)
-        verify(exactly = 1) { AuditLogger.logOathCodeGenerated(STORED_ID, "Acme", "alice") }
-        verify(exactly = 1) { AuditLogger.logOathCodeGenerated(any(), any(), any()) }
+        verify(exactly = 1) { AuditLogger.logOathCodeGenerated(STORED_ID, "Acme", "alice", PEER, any()) }
+        verify(exactly = 1) { AuditLogger.logOathCodeGenerated(any(), any(), any(), any(), any()) }
     }
 
     private fun stored() = OathCredentialEntity(
@@ -199,11 +211,16 @@ class OathDesktopAuditTest {
 
     private suspend fun call(method: String, params: JSONObject): JSONObject {
         val request = """{"id":1,"method":"$method","params":$params}"""
-        return JSONObject(String(handler.handleRawRequest(request.toByteArray(Charsets.UTF_8)), Charsets.UTF_8))
+        val binding = SessionBindingProvider { SessionBinding(ByteArray(32) { 3 }, ByteArray(32) { 4 }, ByteArray(0)) }
+        val raw = withContext(RequestHandler.servedConnection(binding, PEER, "test:connection")) {
+            handler.handleRawRequest(request.toByteArray(Charsets.UTF_8))
+        }
+        return JSONObject(String(raw, Charsets.UTF_8))
     }
 
     private companion object {
         const val SECRET = "JBSWY3DPEHPK3PXP"
         const val STORED_ID = "stored-oath-1"
+        const val PEER = "aa01"
     }
 }
