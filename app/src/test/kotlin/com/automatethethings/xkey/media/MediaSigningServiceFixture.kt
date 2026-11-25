@@ -249,6 +249,14 @@ class MediaSigningServiceFixture(private val dir: File) {
         coEvery { keyDao.getByKeyId(any()) } answers { keys[firstArg<String>()] }
         val database = mockk<XKeyDatabase>(relaxed = true)
         every { database.keyDao() } returns keyDao
+        // The signing key is a general key with no delete under way and no stored policy.
+        val keyPolicyDao = mockk<com.automatethethings.xkey.storage.dao.KeyPolicyDao>(relaxed = true)
+        coEvery { keyPolicyDao.deletion(any()) } returns null
+        coEvery { keyPolicyDao.policyRow(any()) } returns null
+        every { database.keyPolicyDao() } returns keyPolicyDao
+        every { anyConstructed<KeystoreManager>().exportKind(any()) } returns com.automatethethings.xkey.crypto.UserKeyKind.GENERAL
+        every { anyConstructed<KeystoreManager>().rowKeyKind(any(), any(), any(), any()) } returns
+            com.automatethethings.xkey.crypto.UserKeyKind.GENERAL
         mockkObject(XKeyDatabase.Companion)
         every { XKeyDatabase.getInstance(any()) } returns database
 
