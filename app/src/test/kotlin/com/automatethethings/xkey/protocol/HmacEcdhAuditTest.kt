@@ -144,25 +144,30 @@ class HmacEcdhAuditTest {
         every { KeyStore.getInstance("AndroidKeyStore") } returns mockk(relaxed = true)
         mockkConstructor(SoftwareKeyStore::class)
         every { anyConstructed<SoftwareKeyStore>().get(any()) } returns null
-        every { anyConstructed<SoftwareKeyStore>().get("sw-hmac") } returns SoftwareKey(
-            keyId = "sw-hmac",
-            algorithm = "HMAC-SHA256",
-            keyType = "symmetric",
-            keySize = 256,
-            exportable = true,
-            shareable = true,
-            material = swMaterial
-        )
-        // Unvalidated stored name: SoftwareKeyOps runs SHA-256 for it.
-        every { anyConstructed<SoftwareKeyStore>().get("sw-odd") } returns SoftwareKey(
-            keyId = "sw-odd",
-            algorithm = "HMAC-SHA224",
-            keyType = "symmetric",
-            keySize = 256,
-            exportable = true,
-            shareable = true,
-            material = swMaterial
-        )
+        every { anyConstructed<SoftwareKeyStore>().get("sw-hmac") } answers {
+            // A fresh copy per call, as SoftwareKeyStore decrypts one each time.
+            SoftwareKey(
+                keyId = "sw-hmac",
+                algorithm = "HMAC-SHA256",
+                keyType = "symmetric",
+                keySize = 256,
+                exportable = true,
+                shareable = true,
+                material = swMaterial.copyOf()
+            )
+        }
+        // A stored alias: SoftwareKeyOps runs HMAC-SHA256 for it.
+        every { anyConstructed<SoftwareKeyStore>().get("sw-odd") } answers {
+            SoftwareKey(
+                keyId = "sw-odd",
+                algorithm = "HS256",
+                keyType = "symmetric",
+                keySize = 256,
+                exportable = true,
+                shareable = true,
+                material = swMaterial.copyOf()
+            )
+        }
 
         val context = mockk<Context>(relaxed = true)
         every { context.filesDir } returns tmp.root
@@ -433,7 +438,12 @@ class HmacEcdhAuditTest {
         entry.details?.let { JSONObject(it).optString("algorithm", "").ifEmpty { null } }
 
     private suspend fun <T> servedBy(peer: String, block: suspend () -> T): T =
-        withContext(RequestHandler.servedConnection(binding, peer, "test:connection")) { block() }
+        withContext(RequestHandler.servedConnection(binding, peer, "test:connection") + Served()) { block() }
+
+    /** Marks a coroutine that runs inside [servedBy], so [call] keeps its peer. */
+    private class Served : kotlin.coroutines.AbstractCoroutineContextElement(Key) {
+        companion object Key : kotlin.coroutines.CoroutineContext.Key<Served>
+    }
 
     private fun device(name: String): PairedDeviceData = mockk(relaxed = true) {
         every { deviceName } returns name
@@ -462,7 +472,12 @@ class HmacEcdhAuditTest {
         }
     }
 
-    private suspend fun call(method: String, params: String): JSONObject {
+    /** Sends [method] from the paired [PEER_A] unless a [servedBy] block names another peer. */
+    private suspend fun call(method: String, params: String): JSONObject =
+        if (kotlinx.coroutines.currentCoroutineContext()[Served] != null) rawCall(method, params)
+        else servedBy(PEER_A) { rawCall(method, params) }
+
+    private suspend fun rawCall(method: String, params: String): JSONObject {
         val request = """{"id":1,"method":"$method","params":$params}"""
         return JSONObject(String(handler.handleRawRequest(request.toByteArray(Charsets.UTF_8)), Charsets.UTF_8))
     }
