@@ -45,6 +45,7 @@ import com.google.android.material.button.MaterialButton
 import com.google.android.material.card.MaterialCardView
 import com.automatethethings.xkey.R
 import com.automatethethings.xkey.ble.XKeyGattService
+import com.automatethethings.xkey.crypto.KeyPresenceUnreadableException
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.crypto.SoftwareKey
 import com.automatethethings.xkey.crypto.SoftwareKeyStore
@@ -731,8 +732,12 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
         // the row describes (#270 review r5): a credential
         // that lives only under its credential alias shares its public key
         // too, and a key whose delete was acknowledged sends nothing.
-        // A read that fails reaches the desktop refresh's failed branch.
-        val shareable = keyPolicyStore.readShareable(context, keyId, KeystoreManager(context), entity) { SoftwareKeyStore(context).get(it) }
+        // An unreadable key store shares nothing; any other read failure reaches the caller's failed branch.
+        val shareable = try {
+            keyPolicyStore.readShareable(context, keyId, KeystoreManager(context), entity) { SoftwareKeyStore(context).get(it) }
+        } catch (e: KeyPresenceUnreadableException) {
+            com.automatethethings.xkey.storage.ShareableKey(null, null)
+        }
         ShareInputs(entity, shareable.software, shareable.publicKeyPem)
     }
 
