@@ -209,8 +209,9 @@ class PivSlotTest {
 
     @Test
     fun `every PivAlgorithm round trips through its PIV id`() {
-        PivAlgorithm.entries.forEach { algorithm ->
-            assertEquals(algorithm, PivAlgorithm.fromPivAlgorithmId(algorithm.pivAlgorithmId))
+        // The ML-DSA entries have no PIV id (SP 800-78 assigns none).
+        PivAlgorithm.entries.filter { it.mlDsaSet == null }.forEach { algorithm ->
+            assertEquals(algorithm, PivAlgorithm.fromPivAlgorithmId(checkNotNull(algorithm.pivAlgorithmId)))
         }
         assertNull(PivAlgorithm.fromPivAlgorithmId(0x00))
         assertNull(PivAlgorithm.fromPivAlgorithmId(0xE2))

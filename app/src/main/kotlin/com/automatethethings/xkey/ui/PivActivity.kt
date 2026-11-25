@@ -990,7 +990,14 @@ class PivActivity : AppCompatActivity() {
                 }
             }
             .setNegativeButton(android.R.string.cancel, null)
-            .show()
+        if (algorithms.size < PivAlgorithm.entries.size) {
+            val padding = UIHelpers.dpToPxInt(this, 24)
+            builder.setView(TextView(this).apply {
+                text = getString(R.string.piv_generate_curve25519_needs_android13)
+                setPadding(padding, UIHelpers.dpToPxInt(this@PivActivity, 8), padding, 0)
+            })
+        }
+        builder.show()
     }
 
     /**
@@ -1015,14 +1022,7 @@ class PivActivity : AppCompatActivity() {
                 generateKey(slot, algorithm, options[selectedIndex])
             }
             .setNegativeButton(android.R.string.cancel, null)
-        if (algorithms.size < PivAlgorithm.entries.size) {
-            val padding = UIHelpers.dpToPxInt(this, 24)
-            builder.setView(TextView(this).apply {
-                text = getString(R.string.piv_generate_curve25519_needs_android13)
-                setPadding(padding, UIHelpers.dpToPxInt(this@PivActivity, 8), padding, 0)
-            })
-        }
-        builder.show()
+            .show()
     }
 
     /**
