@@ -1,0 +1,329 @@
+/*
+ * Copyright (c) 2026 Jeremy Hahn
+ * Copyright (c) 2026 Automate The Things, LLC
+ *
+ * This file is part of xkey-android.
+ *
+ * xkey-android is dual-licensed:
+ *
+ * 1. GNU Affero General Public License v3.0 (AGPL-3.0)
+ *    See LICENSE file or visit https://www.gnu.org/licenses/agpl-3.0.html
+ *
+ * 2. Commercial License
+ *    Contact licensing@automatethethings.com for commercial licensing options.
+ */
+
+package com.automatethethings.xkey.crypto
+
+import android.os.Build
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyInfo
+import android.security.keystore.KeyProperties
+import androidx.annotation.RequiresApi
+import androidx.annotation.VisibleForTesting
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
+import org.bouncycastle.asn1.x509.SubjectPublicKeyInfo
+import java.security.GeneralSecurityException
+import java.security.KeyFactory
+import java.security.KeyPair
+import java.security.KeyPairGenerator
+import java.security.KeyStore
+import java.security.NoSuchAlgorithmException
+import java.security.spec.NamedParameterSpec
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
+
+/**
+ * ML-DSA keys in the Android Keystore (API 37+, `KeyProperties.KEY_ALGORITHM_ML_DSA`).
+ *
+ * Which sets a device makes in hardware is learned once, in the background:
+ * [startProbe] generates a throwaway key per set under [probeAlias], reads
+ * its [KeyInfo] level and deletes it. Only a set whose probe key came back
+ * in the TEE or StrongBox is reported. Until the probe ends, and always
+ * below API 37, [supportedParameterSets] is empty, so no dialog offers
+ * hardware and `keyBacking: "hardware"` is refused.
+ *
+ * @param sdkInt the device API level; injected by tests.
+ * @param probe generates, reads back and deletes a probe key of a set, in
+ *   StrongBox when its second argument is true and the TEE otherwise, and
+ *   returns its `KeyProperties.SECURITY_LEVEL_*`, or null or a throw when the
+ *   set cannot be made there; injected by tests.
+ * @param ioDispatcher where the probe runs, never the main thread.
+ * @param generateKey generates a set under an alias with an authentication
+ *   duration, in StrongBox when its last argument is true and the TEE
+ *   otherwise, and returns the key's SPKI and KeyInfo level; injected by tests.
+ * @param deleteKey deletes an alias, doing nothing when it is absent; injected by tests.
+ */
+class KeystorePqcBackend(
+    private val sdkInt: Int = Build.VERSION.SDK_INT,
+    private val probe: (MlDsaParameterSet, Boolean) -> Int? = ::probeOnce,
+    private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    private val generateKey: (String, MlDsaParameterSet, Int, Boolean) -> PqcGeneratedKey = ::generateOnce,
+    private val deleteKey: (String) -> Unit = ::deleteAlias
+) : PqcHardwareBackend {
+
+    private val supported = AtomicReference<Set<MlDsaParameterSet>>(emptySet())
+
+    /** Each probed set's hardware locations: true is StrongBox, false the TEE. */
+    private val hardwareLocations = AtomicReference<Map<MlDsaParameterSet, Set<Boolean>>>(emptyMap())
+    private val started = AtomicBoolean(false)
+    private val probed = CompletableDeferred<Set<MlDsaParameterSet>>()
+
+    /** The sets the probe found in the TEE or StrongBox; empty until it ends. Never blocks. */
+    override fun supportedParameterSets(): Set<MlDsaParameterSet> =
+        if (sdkInt < MIN_SDK) emptySet() else supported.get()
+
+    /**
+     * Starts the probe on [ioDispatcher] in [scope]. Runs once per backend;
+     * later calls do nothing. Below API 37 no probe runs.
+     */
+    fun startProbe(scope: CoroutineScope) {
+        if (!started.compareAndSet(false, true)) return
+        if (sdkInt < MIN_SDK) {
+            probed.complete(emptySet())
+            return
+        }
+        scope.launch(ioDispatcher) {
+            try {
+                val locations = LinkedHashMap<MlDsaParameterSet, Set<Boolean>>()
+                for (set in MlDsaParameterSet.entries) {
+                    // The TEE and StrongBox are both probed: either one in hardware keeps the set.
+                    val where = listOf(false, true).filterTo(LinkedHashSet()) { strongBox ->
+                        probeLevel(set, strongBox) in HARDWARE_LEVELS
+                    }
+                    if (where.isNotEmpty()) locations[set] = where
+                }
+                hardwareLocations.set(locations)
+                supported.set(locations.keys.toSet())
+            } finally {
+                probed.complete(supported.get())
+            }
+        }
+    }
+
+    /** Waits up to [timeoutMs] for the probe; the sets found so far on timeout. Tests only. */
+    @VisibleForTesting
+    suspend fun awaitProbe(timeoutMs: Long): Set<MlDsaParameterSet> =
+        withTimeoutOrNull(timeoutMs) { probed.await() } ?: supportedParameterSets()
+
+    /**
+     * Generates a non-exportable [set] signing key under [alias], replacing
+     * any entry there, and returns its SubjectPublicKeyInfo DER.
+     *
+     * [authDurationSeconds] follows the EC keys: negative needs no user
+     * authentication, zero authenticates every use, positive keeps one
+     * authentication valid that many seconds. Only the locations the probe
+     * found [set] in hardware are tried: StrongBox first when
+     * [preferStrongBox] or when it is the only one, falling back to the TEE
+     * only when the TEE probed hardware. A key is kept only when its KeyInfo
+     * level is TEE or StrongBox and its SPKI is a [set] key; any other key is
+     * deleted. Blocks on the Keystore: never call it on the main thread.
+     *
+     * @throws UnsupportedAlgorithmException if the probe did not report [set].
+     * @throws KeyGenerationException if no probed location makes a hardware
+     *   [set] key; no key is then left under [alias].
+     */
+    override fun generate(
+        alias: String,
+        set: MlDsaParameterSet,
+        authDurationSeconds: Int,
+        preferStrongBox: Boolean
+    ): ByteArray {
+        if (sdkInt < MIN_SDK) throw UnsupportedAlgorithmException(set.wireName)
+        val where = hardwareLocations.get()[set]
+        if (where.isNullOrEmpty() || set !in supportedParameterSets()) {
+            throw UnsupportedAlgorithmException(set.wireName)
+        }
+        val order = when {
+            preferStrongBox || false !in where -> listOf(true, false).filter { it in where }
+            else -> listOf(false)
+        }
+
+        var failure: Exception? = null
+        for (strongBox in order) {
+            try {
+                deleteKey(alias)
+                val key = generateKey(alias, set, authDurationSeconds, strongBox)
+                if (key.securityLevel !in HARDWARE_LEVELS) {
+                    throw KeyGenerationException(
+                        "${set.wireName} key came back at security level ${key.securityLevel}, not in hardware"
+                    )
+                }
+                checkSpki(set, key.spki)
+                return key.spki
+            } catch (e: CancellationException) {
+                runCatching { deleteKey(alias) }
+                throw e
+            } catch (e: Exception) {
+                runCatching { deleteKey(alias) }
+                failure = e
+            }
+        }
+        throw failure as? KeyGenerationException
+            ?: KeyGenerationException("Failed to generate ${set.wireName} key", failure)
+    }
+
+    /** `"ML-DSA"`: the platform's `KeyProperties.KEY_ALGORITHM_ML_DSA`, for every set. */
+    override fun jcaSignatureAlgorithm(set: MlDsaParameterSet): String = ML_DSA
+
+    /** The probe's level for [set] in StrongBox or the TEE; null when it throws. */
+    private fun probeLevel(set: MlDsaParameterSet, strongBox: Boolean): Int? = try {
+        probe(set, strongBox)
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        null
+    } catch (e: LinkageError) {
+        null
+    }
+
+    companion object {
+        /** The API level that added `KeyProperties.KEY_ALGORITHM_ML_DSA` (android-37.0). */
+        const val MIN_SDK = 37
+
+        /** Equal to `KeyProperties.KEY_ALGORITHM_ML_DSA`, inlined to need no API guard. */
+        private const val ML_DSA = "ML-DSA"
+
+        private const val PROBE_ALIAS_PREFIX = KeystoreAeadCipher.PQC_PROBE_ALIAS_PREFIX
+
+        private val HARDWARE_LEVELS = setOf(
+            KeyProperties.SECURITY_LEVEL_TRUSTED_ENVIRONMENT,
+            KeyProperties.SECURITY_LEVEL_STRONGBOX
+        )
+
+        /** The Keystore alias of [set]'s throwaway probe key. */
+        fun probeAlias(set: MlDsaParameterSet): String = PROBE_ALIAS_PREFIX + set.name.lowercase()
+
+        /**
+         * Checks that [der] is a SubjectPublicKeyInfo with [set]'s OID and a
+         * public key of [set]'s size.
+         *
+         * @throws KeyGenerationException if it is not.
+         */
+        fun checkSpki(set: MlDsaParameterSet, der: ByteArray) {
+            val info = try {
+                SubjectPublicKeyInfo.getInstance(der)
+            } catch (e: Exception) {
+                throw KeyGenerationException("${set.wireName} public key is not a SubjectPublicKeyInfo", e)
+            }
+            val oid = info.algorithm.algorithm.id
+            if (oid != set.oid) {
+                throw KeyGenerationException("${set.wireName} public key has OID $oid, not ${set.oid}")
+            }
+            val key = info.publicKeyData
+            if (key.padBits != 0 || key.bytes.size != set.publicKeyBytes) {
+                throw KeyGenerationException(
+                    "${set.wireName} public key is ${key.bytes.size} bytes, not ${set.publicKeyBytes}"
+                )
+            }
+        }
+    }
+}
+
+private const val ANDROID_KEYSTORE = "AndroidKeyStore"
+
+private fun androidKeyStore(): KeyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
+
+/**
+ * The default probe: generates [set] in StrongBox when [strongBox], else in the TEE, under its probe alias with
+ * no user authentication, checks the public key, reads the private key's
+ * [KeyInfo] level and deletes the key whatever happened.
+ */
+private fun probeOnce(set: MlDsaParameterSet, strongBox: Boolean): Int? {
+    if (Build.VERSION.SDK_INT < KeystorePqcBackend.MIN_SDK) return null
+    val alias = KeystorePqcBackend.probeAlias(set)
+    val keyStore = androidKeyStore()
+    try {
+        if (keyStore.containsAlias(alias)) keyStore.deleteEntry(alias)
+        val pair = generateWith(alias, set, authDurationSeconds = -1, strongBox = strongBox)
+        KeystorePqcBackend.checkSpki(set, pair.public.encoded)
+        val info = KeyFactory.getInstance(pair.private.algorithm, ANDROID_KEYSTORE)
+            .getKeySpec(pair.private, KeyInfo::class.java)
+        return info.securityLevel
+    } finally {
+        runCatching { keyStore.deleteEntry(alias) }
+    }
+}
+
+/** A key the generation seam made: its SubjectPublicKeyInfo DER and its KeyInfo security level. */
+class PqcGeneratedKey(val spki: ByteArray, val securityLevel: Int?)
+
+/** Deletes [alias] from the Android Keystore; nothing when it is absent. */
+private fun deleteAlias(alias: String) {
+    val keyStore = androidKeyStore()
+    if (keyStore.containsAlias(alias)) keyStore.deleteEntry(alias)
+}
+
+/**
+ * The default generation: makes [set] under [alias] in StrongBox when
+ * [strongBox], else in the TEE, and reads the private key's [KeyInfo] level.
+ */
+private fun generateOnce(
+    alias: String,
+    set: MlDsaParameterSet,
+    authDurationSeconds: Int,
+    strongBox: Boolean
+): PqcGeneratedKey {
+    if (Build.VERSION.SDK_INT < KeystorePqcBackend.MIN_SDK) throw UnsupportedAlgorithmException(set.wireName)
+    val pair = generateWith(alias, set, authDurationSeconds, strongBox)
+    val info = KeyFactory.getInstance(pair.private.algorithm, ANDROID_KEYSTORE)
+        .getKeySpec(pair.private, KeyInfo::class.java)
+    return PqcGeneratedKey(pair.public.encoded, info.securityLevel)
+}
+
+/**
+ * Generates [set] under [alias]: a PURPOSE_SIGN spec naming the set with
+ * `NamedParameterSpec("ML-DSA-<n>")`, asked of `KeyPairGenerator` as
+ * `"ML-DSA"`, then by the set's own algorithm name where the platform has
+ * one, if the generic name is refused.
+ */
+@RequiresApi(KeystorePqcBackend.MIN_SDK)
+private fun generateWith(
+    alias: String,
+    set: MlDsaParameterSet,
+    authDurationSeconds: Int,
+    strongBox: Boolean
+): KeyPair {
+    var refused: GeneralSecurityException? = null
+    for (algorithm in generatorAlgorithms(set)) {
+        try {
+            val builder = KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_SIGN)
+                .setAlgorithmParameterSpec(NamedParameterSpec(set.wireName))
+            applyAuthDuration(builder, authDurationSeconds)
+            if (strongBox) builder.setIsStrongBoxBacked(true)
+            val generator = KeyPairGenerator.getInstance(algorithm, ANDROID_KEYSTORE)
+            generator.initialize(builder.build())
+            return generator.generateKeyPair()
+        } catch (e: GeneralSecurityException) {
+            // NoSuchAlgorithmException or InvalidAlgorithmParameterException: try the next name.
+            refused = e
+        }
+    }
+    throw refused ?: NoSuchAlgorithmException(set.wireName)
+}
+
+@RequiresApi(KeystorePqcBackend.MIN_SDK)
+private fun generatorAlgorithms(set: MlDsaParameterSet): List<String> = when (set) {
+    MlDsaParameterSet.ML_DSA_44 -> listOf(KeyProperties.KEY_ALGORITHM_ML_DSA)
+    MlDsaParameterSet.ML_DSA_65 ->
+        listOf(KeyProperties.KEY_ALGORITHM_ML_DSA, KeyProperties.KEY_ALGORITHM_ML_DSA_65)
+    MlDsaParameterSet.ML_DSA_87 ->
+        listOf(KeyProperties.KEY_ALGORITHM_ML_DSA, KeyProperties.KEY_ALGORITHM_ML_DSA_87)
+}
+
+/** The EC keys' user-authentication rule (`KeystoreManager.applyAuthDuration`), API 30+ form. */
+@RequiresApi(KeystorePqcBackend.MIN_SDK)
+private fun applyAuthDuration(builder: KeyGenParameterSpec.Builder, authDurationSeconds: Int) {
+    if (authDurationSeconds < 0) {
+        builder.setUserAuthenticationRequired(false)
+        return
+    }
+    builder.setUserAuthenticationRequired(true)
+    builder.setUserAuthenticationParameters(authDurationSeconds, KeyProperties.AUTH_BIOMETRIC_STRONG)
+}

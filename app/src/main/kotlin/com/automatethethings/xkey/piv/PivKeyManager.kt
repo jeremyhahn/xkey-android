@@ -18,6 +18,11 @@ import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Log
 import com.automatethethings.xkey.audit.AuditLogger
+import com.automatethethings.xkey.crypto.MlDsaParameterSet
+import com.automatethethings.xkey.crypto.PqcBacking
+import com.automatethethings.xkey.crypto.PqcHardware
+import com.automatethethings.xkey.crypto.PqcSoftwareKeyStore
+import com.automatethethings.xkey.crypto.UnsupportedAlgorithmException
 import com.automatethethings.xkey.remote.SharePermissionLedger
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.sync.Mutex
@@ -128,15 +133,23 @@ const val PIV_KEYSTORE_ALIAS_PREFIX = "xkey_piv_"
  * @param generateKeyPair Generates the slot's key pair under its Keystore
  *   alias, replacing any key there; the Android Keystore unless a test
  *   substitutes it.
+ * @param pqcStore Where software ML-DSA slot keys live, under the slot's
+ *   alias. Null means the app's [PqcSoftwareKeyStore.shared] store; with
+ *   neither, software ML-DSA slot keys are refused.
  */
 class PivKeyManager(
     private val pivSlotDao: PivSlotDao,
-    private val generateKeyPair: (alias: String, algorithm: PivAlgorithm) -> KeyPair = ::generateInAndroidKeystore
+    private val generateKeyPair: (alias: String, algorithm: PivAlgorithm) -> KeyPair = ::generateInAndroidKeystore,
+    private val pqcStore: PqcSoftwareKeyStore? = null
 ) {
 
     // Opened on first use, so constructing a manager does not need the
     // AndroidKeyStore provider (JVM unit tests substitute it).
     private val keyStore: KeyStore by lazy { KeyStore.getInstance("AndroidKeyStore").apply { load(null) } }
+
+    // Read at each use: the shared store appears once the app has built one.
+    private val mlDsaStore: PqcSoftwareKeyStore?
+        get() = pqcStore ?: PqcSoftwareKeyStore.shared
 
     companion object {
         private const val TAG = "PivKeyManager"
@@ -160,43 +173,52 @@ class PivKeyManager(
      * @return [PivSlotInfo] describing the newly generated key.
      * @throws java.security.GeneralSecurityException If key generation fails.
      */
-    suspend fun generateKey(slot: PivSlot, algorithm: PivAlgorithm): PivSlotInfo =
-        PivSlotLocks.withSlot(slot) { generateKeyLocked(slot, algorithm) }
+    suspend fun generateKey(
+        slot: PivSlot,
+        algorithm: PivAlgorithm,
+        backing: PqcBacking = PqcBacking.SOFTWARE
+    ): PivSlotInfo =
+        PivSlotLocks.withSlot(slot) { generateKeyLocked(slot, algorithm, backing) }
 
-    private suspend fun generateKeyLocked(slot: PivSlot, algorithm: PivAlgorithm): PivSlotInfo {
+    /**
+     * The backing an ML-DSA slot key gets by default: hardware when the
+     * device makes [algorithm]'s set there, software otherwise.
+     */
+    fun defaultBacking(algorithm: PivAlgorithm): PqcBacking =
+        if (algorithm.mlDsaSet in PqcHardware.supported()) PqcBacking.HARDWARE else PqcBacking.SOFTWARE
+
+    private suspend fun generateKeyLocked(
+        slot: PivSlot,
+        algorithm: PivAlgorithm,
+        backing: PqcBacking
+    ): PivSlotInfo {
         val alias = slot.keystoreAlias
+        // Checked before the old key is touched: a refused backing leaves the slot as it was.
+        algorithm.mlDsaSet?.let { requireMlDsaBacking(it, backing) }
+
+        val makeKey = slotKeyMaker(alias, algorithm, backing)
 
         // The slot's alias is the key ID KeyStoreSyncManager discovers it by, so
         // a share of it may be waiting: replacing the key is a revoke of that ID.
         val (publicKeyDer, now) = SharePermissionLedger.revoking(alias) {
-            // This replaces any key the slot held: from here the row must be made
-            // to describe the new key, or the slot must be emptied.
-            val keyPair = generateKeyPair(alias, algorithm)
+            replaceSlotKey(slot) {
+                val publicKeyDer = makeKey()
+                val now = System.currentTimeMillis()
 
-            val publicKeyDer = keyPair.public.encoded
-            val now = System.currentTimeMillis()
-
-            // Persist metadata in Room
-            val entity = PivSlotEntity(
-                slotId = slot.hexId,
-                algorithm = algorithm.name,
-                publicKeyDer = publicKeyDer,
-                hasKey = true,
-                createdAt = now,
-                lastUsedAt = null,
-                useCount = 0
-            )
-            // A cancelled caller must not stop the upsert half way: the row would
-            // keep the replaced key's public key and algorithm.
-            withContext(NonCancellable) {
-                try {
-                    pivSlotDao.upsert(entity)
-                } catch (e: Exception) {
-                    discardUnrecordedKey(slot)
-                    throw e
-                }
+                // Persist metadata in Room
+                val entity = PivSlotEntity(
+                    slotId = slot.hexId,
+                    algorithm = algorithm.name,
+                    publicKeyDer = publicKeyDer,
+                    hasKey = true,
+                    createdAt = now,
+                    lastUsedAt = null,
+                    useCount = 0
+                )
+                // A cancelled caller must not stop the upsert half way.
+                withContext(NonCancellable) { pivSlotDao.upsert(entity) }
+                publicKeyDer to now
             }
-            publicKeyDer to now
         }
 
         // Log to audit system
@@ -222,14 +244,33 @@ class PivKeyManager(
     }
 
     /**
-     * Empty [slot] after its Keystore key was replaced but the row could not
-     * be written: the replaced key is gone, and leaving the new one would
-     * leave a row describing a key the slot no longer holds. Best effort; the
-     * caller rethrows the original failure.
+     * Runs [replace], which swaps [slot]'s key and writes its row: the one
+     * path a slot key is generated through. Any failure, cancellation
+     * included, leaves the slot with its old key, row and certificate, or with
+     * none of them.
+     */
+    private suspend fun <T> replaceSlotKey(slot: PivSlot, replace: suspend () -> T): T =
+        try {
+            replace()
+        } catch (e: Throwable) {
+            withContext(NonCancellable) { discardUnrecordedKey(slot) }
+            throw e
+        }
+
+    /**
+     * Empty [slot] after a failed replacement, unless the key it still holds
+     * is the one its row describes: then the old key, row and certificate
+     * stay together. Best effort; the caller rethrows the original failure.
      */
     private suspend fun discardUnrecordedKey(slot: PivSlot) {
+        val row = runCatching { pivSlotDao.getBySlotId(slot.hexId) }.getOrNull()
+        val live = runCatching { liveSlotPublicKey(slot) }.getOrNull()
+        // The old key could not be removed, so its row and certificate still describe it.
+        if (row != null && live != null && live.contentEquals(row.publicKeyDer)) return
         runCatching { keyStore.deleteEntry(slot.keystoreAlias) }
             .onFailure { Log.w(TAG, "Could not remove unrecorded key from PIV slot ${slot.hexId}: ${it.message}") }
+        runCatching { mlDsaStore?.delete(slot.keystoreAlias) }
+            .onFailure { Log.w(TAG, "Could not remove unrecorded ML-DSA key from PIV slot ${slot.hexId}") }
         runCatching { pivSlotDao.deleteBySlotId(slot.hexId) }
             .onFailure { Log.w(TAG, "Could not clear PIV slot ${slot.hexId} row: ${it.message}") }
     }
@@ -241,8 +282,56 @@ class PivKeyManager(
      */
     private fun liveSlotPublicKey(slot: PivSlot): ByteArray? {
         val alias = slot.keystoreAlias
-        if (!keyStore.containsAlias(alias)) return null
+        if (!keyStore.containsAlias(alias)) return mlDsaStore?.publicKeyDer(alias)
         return keyStore.getCertificate(alias)?.publicKey?.encoded
+    }
+
+    /**
+     * Refuses [backing] for a [set] slot key before anything is replaced.
+     *
+     * @throws UnsupportedAlgorithmException when the backing cannot make [set]:
+     *   hardware the device does not report, or software with no store.
+     */
+    private fun requireMlDsaBacking(set: MlDsaParameterSet, backing: PqcBacking) {
+        val available = when (backing) {
+            PqcBacking.HARDWARE -> set in PqcHardware.supported()
+            PqcBacking.SOFTWARE -> mlDsaStore != null
+        }
+        if (!available) throw UnsupportedAlgorithmException(set.wireName)
+    }
+
+    /**
+     * Resolves how [algorithm] is made under [alias] with [backing], and
+     * returns the step that replaces a key of either backing there and gives
+     * its SubjectPublicKeyInfo DER. Nothing is touched until the step runs, so
+     * a missing store or backend leaves the slot as it was.
+     */
+    private fun slotKeyMaker(alias: String, algorithm: PivAlgorithm, backing: PqcBacking): () -> ByteArray {
+        val set = algorithm.mlDsaSet
+        val step: () -> ByteArray = when {
+            set == null -> {
+                { mlDsaStore?.delete(alias); generateKeyPair(alias, algorithm).public.encoded }
+            }
+            backing == PqcBacking.SOFTWARE -> {
+                val store = mlDsaStore ?: throw UnsupportedAlgorithmException(set.wireName)
+                val generate: () -> ByteArray = {
+                    if (keyStore.containsAlias(alias)) keyStore.deleteEntry(alias)
+                    store.generate(alias, set)
+                }
+                generate
+            }
+            else -> {
+                val backend = PqcHardware.backend?.takeIf { set in it.supportedParameterSets() }
+                    ?: throw UnsupportedAlgorithmException(set.wireName)
+                val generate: () -> ByteArray = {
+                    mlDsaStore?.delete(alias)
+                    if (keyStore.containsAlias(alias)) keyStore.deleteEntry(alias)
+                    backend.generate(alias, set, authDurationSeconds = -1, preferStrongBox = true)
+                }
+                generate
+            }
+        }
+        return step
     }
 
     /**
@@ -374,23 +463,48 @@ class PivKeyManager(
      * @throws IllegalStateException If the slot does not contain a key in Android Keystore.
      * @throws java.security.GeneralSecurityException If the signing operation fails.
      */
-    suspend fun sign(slot: PivSlot, data: ByteArray, algorithm: PivAlgorithm): ByteArray {
+    suspend fun sign(slot: PivSlot, data: ByteArray, algorithm: PivAlgorithm): ByteArray =
+        PivSlotLocks.withSlot(slot) { signLocked(slot, data, algorithm) }
+
+    private suspend fun signLocked(slot: PivSlot, data: ByteArray, algorithm: PivAlgorithm): ByteArray {
         val alias = slot.keystoreAlias
-
-        val privateKey = keyStore.getKey(alias, null)
-            ?: throw IllegalStateException("No key found in Android Keystore for PIV slot ${slot.hexId} (${slot.label})")
-
-        val signatureAlgorithm = when (algorithm) {
-            PivAlgorithm.ES256 -> "SHA256withECDSA"
-            PivAlgorithm.ES384 -> "SHA384withECDSA"
-            PivAlgorithm.RS2048, PivAlgorithm.RS3072, PivAlgorithm.RS4096 -> "SHA256withRSA"
-        }
-
+        val set = algorithm.mlDsaSet
         val startTime = System.currentTimeMillis()
-        val signature = Signature.getInstance(signatureAlgorithm)
-        signature.initSign(privateKey as java.security.PrivateKey)
-        signature.update(data)
-        val signatureBytes = signature.sign()
+
+        val signatureAlgorithm: String
+        val signatureBytes: ByteArray
+        if (set != null && !keyStore.containsAlias(alias)) {
+            // A software ML-DSA slot key: the store checks the record is this alias's and this set's as it signs.
+            val store = mlDsaStore
+            if (store == null || store.parameterSet(alias) != set) {
+                throw IllegalStateException("No ${set.wireName} key in PIV slot ${slot.hexId} (${slot.label})")
+            }
+            signatureAlgorithm = set.wireName
+            signatureBytes = store.sign(alias, set, data)
+        } else {
+            val privateKey = keyStore.getKey(alias, null)
+                ?: throw IllegalStateException("No key found in Android Keystore for PIV slot ${slot.hexId} (${slot.label})")
+            if (set != null) {
+                // A hardware slot key signs with its own set: refuse any other before signing.
+                val live = keyStore.getCertificate(alias)?.publicKey?.encoded
+                    ?: throw UnsupportedAlgorithmException(set.wireName)
+                MlDsaParameterSet.requireSpkiSet(live, set)
+            }
+
+            signatureAlgorithm = when (algorithm) {
+                PivAlgorithm.ES256 -> "SHA256withECDSA"
+                PivAlgorithm.ES384 -> "SHA384withECDSA"
+                PivAlgorithm.RS2048, PivAlgorithm.RS3072, PivAlgorithm.RS4096 -> "SHA256withRSA"
+                PivAlgorithm.ML_DSA_44, PivAlgorithm.ML_DSA_65, PivAlgorithm.ML_DSA_87 ->
+                    PqcHardware.backend?.jcaSignatureAlgorithm(set!!)
+                        ?: throw UnsupportedAlgorithmException(set!!.wireName)
+            }
+
+            val signature = Signature.getInstance(signatureAlgorithm)
+            signature.initSign(privateKey as java.security.PrivateKey)
+            signature.update(data)
+            signatureBytes = signature.sign()
+        }
         val durationMs = System.currentTimeMillis() - startTime
 
         // Record usage in Room
@@ -470,6 +584,8 @@ class PivKeyManager(
             if (inKeystore) {
                 keyStore.deleteEntry(alias)
             }
+            // A software ML-DSA slot key lives in the store; a removal that throws keeps the row and skips the audit.
+            mlDsaStore?.delete(alias)
 
             // Remove metadata from Room
             val rows = pivSlotDao.deleteBySlotId(slot.hexId)
@@ -502,8 +618,9 @@ class PivKeyManager(
  * certificate against key A must finish before another caller can replace or
  * delete A, or its upsert would bring A's row back. [PivKeyManager.listSlots]
  * reads each slot under its lock so a listing never mixes two generations.
- * Different slots do not wait for each other; signing and the getters take
- * no lock.
+ * [PivKeyManager.sign] holds it from the key lookup to the usage record, so
+ * a regenerate cannot swap the key it checked. Different slots do not wait
+ * for each other; the getters take no lock.
  */
 internal object PivSlotLocks {
     private val locks: Map<PivSlot, Mutex> = PivSlot.entries.associateWith { Mutex() }

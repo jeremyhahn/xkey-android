@@ -49,6 +49,8 @@ import com.automatethethings.xkey.ca.AndroidCA
 import com.automatethethings.xkey.ca.CAInitResult
 import com.automatethethings.xkey.ca.CASubject
 import com.automatethethings.xkey.storage.XKeyDatabase
+import com.automatethethings.xkey.storage.entity.KeyEntity
+import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.bootstrap.BootstrapClient
 import com.automatethethings.xkey.bootstrap.BootstrapFailedException
 import com.automatethethings.xkey.bootstrap.NoMethodsConfiguredException
@@ -1497,7 +1499,7 @@ class SettingsActivity : AppCompatActivity() {
 
             // Populate key spinner with signing-type keys
             val keys = keyDao.getAll()
-            val signingKeys = keys.filter { it.keyType == "signing" || it.keyType == "fido2" }
+            val signingKeys = mediaSigningKeys(keys)
             val keyNames = signingKeys.map { "${it.label.ifEmpty { it.keyId }} (${it.algorithm})" }
             val keyIds = signingKeys.map { it.keyId }
 
@@ -2527,4 +2529,9 @@ class SettingsActivity : AppCompatActivity() {
             else -> super.onOptionsItemSelected(item)
         }
     }
+}
+
+/** The keys the media-signing picker offers: signing and FIDO2 keys MediaSigningService can sign with. */
+internal fun mediaSigningKeys(keys: List<KeyEntity>): List<KeyEntity> = keys.filter {
+    (it.keyType == "signing" || it.keyType == "fido2") && KeystoreManager.hasJcaSignature(it.algorithm)
 }

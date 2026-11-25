@@ -180,7 +180,7 @@ class SoftwareKeyStore(
     }
 
     companion object {
-        private const val KEY_ALIAS = "xkey_software_key_store"
+        private const val KEY_ALIAS = KeystoreAeadCipher.SOFTWARE_KEY_STORE_ALIAS
 
         /** A filename stem already produced by [fileId]. */
         private val DIGEST_NAME = Regex("[0-9a-f]{64}")
