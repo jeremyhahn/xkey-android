@@ -72,7 +72,8 @@ class PasskeyCallerOriginTest {
         mockkStatic(KeyStore::class)
         every { KeyStore.getInstance("AndroidKeyStore") } returns mockk(relaxed = true)
         keystoreManager = mockk(relaxed = true)
-        coEvery { keystoreManager.signWithoutBiometric(any(), any()) } returns ByteArray(8)
+        coEvery { keystoreManager.signWithoutBiometric(any(), any(), any()) } returns ByteArray(8)
+        every { keystoreManager.soleKind(CREDENTIAL_ID) } returns com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL
         coEvery { keystoreManager.generateKeyWithAuthDuration(any(), any(), any()) } throws generationReached
         settings = mockk { coEvery { getSettings() } returns BiometricSettingsData() }
 
@@ -91,6 +92,11 @@ class PasskeyCallerOriginTest {
         val database = mockk<XKeyDatabase>(relaxed = true)
         every { database.credentialMetadataDao() } returns credentialDao
         every { database.keyDao() } returns keyDao
+        // No key has a pending deletion or a policy row.
+        every { database.keyPolicyDao() } returns mockk<com.automatethethings.xkey.storage.dao.KeyPolicyDao>(relaxed = true) {
+            coEvery { deletion(any()) } returns null
+            coEvery { policyRow(any()) } returns null
+        }
         mockkObject(XKeyDatabase.Companion)
         every { XKeyDatabase.getInstance(any()) } returns database
         mockkObject(AuditLogger)
@@ -109,8 +115,8 @@ class PasskeyCallerOriginTest {
         val result = runCatching { assertion(nonBrowserApp()) }
 
         assertTrue("got $result", result.exceptionOrNull() is CredentialAssertionException)
-        coVerify(exactly = 0) { keystoreManager.signWithoutBiometric(any(), any()) }
-        coVerify(exactly = 0) { keystoreManager.sign(any(), any(), any(), any(), any(), any()) }
+        coVerify(exactly = 0) { keystoreManager.signWithoutBiometric(any(), any(), any()) }
+        coVerify(exactly = 0) { keystoreManager.sign(any(), any(), any(), any(), any(), any(), any()) }
     }
 
     @Test
@@ -118,7 +124,7 @@ class PasskeyCallerOriginTest {
         val result = runCatching { assertion(unlistedApp()) }
 
         assertTrue("got $result", result.exceptionOrNull() is CredentialAssertionException)
-        coVerify(exactly = 0) { keystoreManager.signWithoutBiometric(any(), any()) }
+        coVerify(exactly = 0) { keystoreManager.signWithoutBiometric(any(), any(), any()) }
     }
 
     @Test
@@ -126,14 +132,14 @@ class PasskeyCallerOriginTest {
         val result = runCatching { assertion(browser("https://attacker.test")) }
 
         assertTrue("got $result", result.exceptionOrNull() is CredentialAssertionException)
-        coVerify(exactly = 0) { keystoreManager.signWithoutBiometric(any(), any()) }
+        coVerify(exactly = 0) { keystoreManager.signWithoutBiometric(any(), any(), any()) }
     }
 
     @Test
     fun `a privileged browser on the relying party with its own hash is signed`() = runTest {
         assertion(browser("https://login.$RP_ID"))
 
-        coVerify(exactly = 1) { keystoreManager.signWithoutBiometric(CREDENTIAL_ID, any()) }
+        coVerify(exactly = 1) { keystoreManager.signWithoutBiometric(CREDENTIAL_ID, any(), any()) }
     }
 
     // ---------------------------------------------------------------
