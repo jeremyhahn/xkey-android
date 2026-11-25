@@ -102,6 +102,10 @@ class KeySharingBottomSheetDesktopSendTest {
         every { database.keyPolicyDao() } returns mockk<com.automatethethings.xkey.storage.dao.KeyPolicyDao>(relaxed = true) {
             coEvery { deletion(any()) } returns null
             coEvery { policyRow(any()) } returns null
+            coEvery { keyInstance(any()) } answers { entity?.id }
+            every { observeKeyInstance(any()) } answers { kotlinx.coroutines.flow.MutableStateFlow(entity?.id) }
+            every { observeGrants(any()) } returns flowOf(emptyList())
+            every { observePolicyRow(any()) } returns flowOf(null)
         }
         mockkObject(XKeyDatabase.Companion)
         every { XKeyDatabase.getInstance(any()) } returns database
