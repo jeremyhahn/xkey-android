@@ -164,6 +164,35 @@ test429)
 	echo "BUILD FAILED"
 	exit 1
 	;;
+plugin)
+	echo "* What went wrong:"
+	echo "Plugin [id: 'org.gradle.toolchains.foojay-resolver-convention', version: '1.0.0'] was not found in any of the following sources:"
+	echo "- Plugin Repositories (could not resolve plugin artifact 'org.gradle.toolchains.foojay-resolver-convention:org.gradle.toolchains.foojay-resolver-convention.gradle.plugin:1.0.0')"
+	echo "STUB-MARK attempt $n"
+	echo "BUILD FAILED"
+	exit 1
+	;;
+pluginfound)
+	echo "* What went wrong:"
+	echo "Plugin [id: 'org.gradle.toolchains.foojay-resolver-convention', version: '1.0.0'] was not found in any of the following sources:"
+	echo "- Gradle Core Plugins (plugin is not in 'org.gradle' namespace)"
+	echo "STUB-MARK attempt $n"
+	echo "BUILD FAILED"
+	exit 1
+	;;
+compile)
+	echo "e: file:///w/app/src/main/kotlin/Warm.kt:3:5 Unresolved reference: sum"
+	echo "> Compilation error. See log for more details"
+	echo "STUB-MARK attempt $n"
+	echo "BUILD FAILED"
+	exit 1
+	;;
+failtests)
+	echo "> There were failing tests. See the report at: file:///w/app/build/reports/tests/index.html"
+	echo "STUB-MARK attempt $n"
+	echo "BUILD FAILED"
+	exit 1
+	;;
 esac
 STUB
 cat > "${BIN}/gradle-quiesce" << 'STUB'
@@ -251,9 +280,26 @@ case_test429_not_retried() {
 	[ "${RC}" != 0 ] && [ "${CALLS}" = 1 ] && [ "${QUIESCE}" = 0 ] && [ -z "${SLEEPS}" ] \
 		&& [[ ${OUT} == *"maps 429 to RateLimited FAILED"* ]]
 }
+case_plugin_retried() {
+	run_retry "$1" plugin ok
+	[ "${RC}" = 0 ] && [ "${CALLS}" = 2 ] && [ "${QUIESCE}" = 1 ]
+}
+case_plugin_not_found_retried() {
+	run_retry "$1" pluginfound pluginfound ok
+	[ "${RC}" = 0 ] && [ "${CALLS}" = 3 ] && [ "${QUIESCE}" = 2 ]
+}
+case_compile_not_retried() {
+	run_retry "$1" compile ok
+	[ "${RC}" != 0 ] && [ "${CALLS}" = 1 ] && [ "${QUIESCE}" = 0 ] && [[ ${OUT} == *"Compilation error"* ]]
+}
+case_failing_tests_not_retried() {
+	run_retry "$1" failtests ok
+	[ "${RC}" != 0 ] && [ "${CALLS}" = 1 ] && [ "${QUIESCE}" = 0 ] && [[ ${OUT} == *"There were failing tests"* ]]
+}
 CASES=(case_recovers case_recovers_last case_bounded case_no_attempt_after_success
 	case_other_failure_not_retried case_other_failure_after_resolve case_throttle_retried
-	case_backoff_doubles case_attempts_fewer case_attempts_more case_test429_not_retried)
+	case_backoff_doubles case_attempts_fewer case_attempts_more case_test429_not_retried
+	case_plugin_retried case_plugin_not_found_retried case_compile_not_retried case_failing_tests_not_retried)
 
 all_cases() {
 	local c
@@ -276,6 +322,10 @@ else
 	check "GRADLE_RETRY_ATTEMPTS=2 stops after 2 attempts" case_attempts_fewer "${S}"
 	check "GRADLE_RETRY_ATTEMPTS=7 allows a success on the 7th attempt" case_attempts_more "${S}"
 	check "a failing test naming 429 is not retried" case_test429_not_retried "${S}"
+	check "a plugin artifact resolution miss, then success, passes" case_plugin_retried "${S}"
+	check "a plugin not found in any source, then success, passes" case_plugin_not_found_retried "${S}"
+	check "a compilation error is not retried" case_compile_not_retried "${S}"
+	check "failing tests are not retried" case_failing_tests_not_retried "${S}"
 
 	# The mutants: each must fail at least one case. The patterns are the
 	# script's literal text, so they do not expand.
