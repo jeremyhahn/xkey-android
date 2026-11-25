@@ -16,9 +16,11 @@
 package com.automatethethings.xkey.oath
 
 import android.net.Uri
+import com.automatethethings.xkey.audit.AuditLogger
 import io.mockk.coEvery
 import io.mockk.every
 import io.mockk.mockk
+import io.mockk.mockkObject
 import io.mockk.mockkStatic
 import io.mockk.unmockkAll
 import kotlinx.coroutines.test.runTest
@@ -47,6 +49,9 @@ class OathRepositoryImportPathTest {
 
     @Before
     fun setUp() {
+        // Every add writes an audit row (OathRepositoryAuditTest covers it).
+        mockkObject(AuditLogger)
+        every { AuditLogger.logOathCredentialCreated(any(), any(), any(), any(), any(), any()) } returns Unit
         val dao = mockk<OathCredentialDao>()
         coEvery { dao.insert(any()) } answers { inserted += firstArg<OathCredentialEntity>(); 1L }
         val secretManager = mockk<OathSecretManager>()

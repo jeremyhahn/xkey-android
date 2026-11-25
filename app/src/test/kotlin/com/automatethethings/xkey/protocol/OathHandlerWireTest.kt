@@ -136,11 +136,20 @@ class OathHandlerWireTest {
             }
         }
         coEvery { dao.recordUsage(any(), any()) } returns Unit
+        // As the DAO's transaction does it, minus the rollback.
+        coEvery { dao.claimAndRecordUsage(any(), any(), any(), any()) } coAnswers {
+            val id = firstArg<String>()
+            if (thirdArg<Boolean>() && dao.claimCounter(id, secondArg()) == 0) {
+                false
+            } else {
+                dao.recordUsage(id, arg(3))
+                true
+            }
+        }
         coEvery { dao.deleteAndRecordDeletion(any(), any()) } answers {
             val id = firstArg<String>()
             deleted += id
-            rows.remove(id)
-            Unit
+            if (rows.remove(id) != null) 1 else 0
         }
         val database = mockk<XKeyDatabase>(relaxed = true)
         every { database.oathCredentialDao() } returns dao
@@ -344,7 +353,11 @@ class OathHandlerWireTest {
         assertFalse(errorMessage(response), errorMessage(response).contains("for OATH credential"))
         coVerify(exactly = 0) { dao.claimCounter(any(), any()) }
         assertEquals(OathRepository.HOTP_COUNTER_MAX, rows.getValue(ID_HOTP).counter)
-        assertTrue("no code, no audit entry: $audit", audit.isEmpty())
+        // The refusal itself is audited as POLICY_DENIED; no code row is written.
+        assertTrue(
+            "no code, no code audit entry: $audit",
+            audit.none { it.operationType == com.automatethethings.xkey.audit.AuditOperationType.OATH_CODE_GENERATED }
+        )
     }
 
     @Test
@@ -525,14 +538,19 @@ class OathHandlerWireTest {
     }
 
     @Test
-    fun `a HOTP code whose counter was claimed is not lost to a later failure`() = runTest {
+    fun `a HOTP generation whose claim and usage transaction fails answers an error and spends no counter`() = runTest {
         store(hotp(ID_HOTP, counter = 0))
-        coEvery { dao.recordUsage(any(), any()) } throws IllegalStateException("disk I/O error")
+        coEvery { dao.claimAndRecordUsage(any(), any(), any(), any()) } throws IllegalStateException("disk I/O error")
 
         val response = generate(ID_HOTP)
 
-        assertEquals(RFC4226_CODES[0], code(response))
-        assertEquals("the claimed counter is spent once", 1L, rows.getValue(ID_HOTP).counter)
+        assertEquals(ErrorCodes.INTERNAL_ERROR, errorCode(response))
+        assertFalse(errorMessage(response), errorMessage(response).contains("disk I/O"))
+        assertEquals("the transaction rolled back", 0L, rows.getValue(ID_HOTP).counter)
+        assertTrue(
+            "no code, no code audit entry: $audit",
+            audit.none { it.operationType == com.automatethethings.xkey.audit.AuditOperationType.OATH_CODE_GENERATED }
+        )
     }
 
 

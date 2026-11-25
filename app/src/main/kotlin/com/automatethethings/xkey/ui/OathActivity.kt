@@ -677,6 +677,8 @@ class OathActivity : AppCompatActivity() {
                     R.string.oath_code_copied,
                     Snackbar.LENGTH_SHORT
                 ).show()
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
             } catch (e: Exception) {
                 // The exception text can quote key material: one generic message.
                 Snackbar.make(

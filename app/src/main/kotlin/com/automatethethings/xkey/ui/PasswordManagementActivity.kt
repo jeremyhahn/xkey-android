@@ -28,6 +28,7 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import androidx.annotation.VisibleForTesting
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
@@ -55,8 +56,14 @@ import java.util.UUID
  */
 class PasswordManagementActivity : AppCompatActivity() {
 
+    companion object {
+        /** Test seam: the repository a new activity uses instead of the app database's. */
+        @VisibleForTesting
+        internal var repositoryForTest: PasswordRepository? = null
+    }
+
     private val repository: PasswordRepository by lazy {
-        PasswordRepository(XKeyDatabase.getInstance(this).passwordDao())
+        repositoryForTest ?: PasswordRepository(XKeyDatabase.getInstance(this).passwordDao())
     }
 
     private val edits: PasswordEdits by lazy { PasswordEdits(repository) }
@@ -66,6 +73,7 @@ class PasswordManagementActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        SecureScreens.protect(window)
 
         adapter = PasswordAdapter { showDetailDialog(it) }
 
@@ -282,7 +290,8 @@ class PasswordManagementActivity : AppCompatActivity() {
                 }
             }
             .setNegativeButton(R.string.button_cancel, null)
-            .show()
+            .create()
+            .let { SecureScreens.show(it) }
     }
 
     private fun showDetailDialog(record: PasswordRecord) {
@@ -306,7 +315,8 @@ class PasswordManagementActivity : AppCompatActivity() {
             .setPositiveButton(R.string.password_copy) { _, _ -> copyPassword(record.password) }
             .setNeutralButton(R.string.password_delete) { _, _ -> confirmDelete(record) }
             .setNegativeButton(R.string.password_close, null)
-            .show()
+            .create()
+            .let { SecureScreens.show(it) }
     }
 
     private fun confirmDelete(record: PasswordRecord) {
@@ -323,7 +333,8 @@ class PasswordManagementActivity : AppCompatActivity() {
                 }
             }
             .setNegativeButton(R.string.button_cancel, null)
-            .show()
+            .create()
+            .let { SecureScreens.show(it) }
     }
 
     private fun copyPassword(password: String) {

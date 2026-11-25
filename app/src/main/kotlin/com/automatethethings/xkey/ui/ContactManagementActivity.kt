@@ -1473,14 +1473,7 @@ class ContactManagementActivity : AppCompatActivity() {
     private fun deleteContact(contact: ContactEntity) {
         lifecycleScope.launch {
             try {
-                withContext(Dispatchers.IO) {
-                    contactDao.deleteByFingerprint(contact.publicKeyFingerprint)
-                }
-
-                AuditLogger.logContactDeleted(
-                    name = contact.name,
-                    fingerprint = contact.publicKeyFingerprint
-                )
+                deleteContactAudited(contactDao, contact)
 
                 Snackbar.make(
                     rootLayout,

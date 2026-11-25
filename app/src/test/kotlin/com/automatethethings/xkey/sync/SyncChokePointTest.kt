@@ -27,7 +27,8 @@ import java.io.File
  * `PasswordDao.insertIfAbsentUnlessDeleted`), and nothing outside
  * `PasswordDao` calls the raw statements those are built from. A HOTP
  * counter is advanced only by compare-and-set
- * (`OathCredentialDao.claimCounter`, from `OathRepository.generateCode`),
+ * (`OathCredentialDao.claimCounter`, only inside the DAO's
+ * `claimAndRecordUsage` transaction, from `OathRepository.generateCode`),
  * so a counter a sync raised is never rewound, and nothing calls the
  * unconditional `OathCredentialDao.updateCounter`.
  */
@@ -63,7 +64,24 @@ class SyncChokePointTest {
     fun `a HOTP counter moves only by compare-and-set, from generateCode`() {
         val unconditional = sources.filter { Regex("""\.\s*updateCounter\s*\(""").containsMatchIn(it.readText()) }
         assertEquals(emptyList<File>(), unconditional)
-        val callers = sources.filter { Regex("""\.\s*claimCounter\s*\(""").containsMatchIn(it.readText()) }
+        val claim = Regex("""\bclaimCounter\s*\(""")
+        val outside = sources.filter { it.name != "OathCredentialDao.kt" && claim.containsMatchIn(it.readText()) }
+        assertEquals(emptyList<File>(), outside)
+
+        val dao = sources.single { it.name == "OathCredentialDao.kt" }.readText()
+        assertTrue(Regex("""@Transaction\s+suspend fun claimAndRecordUsage\(""").containsMatchIn(dao))
+        val transaction = dao.substringAfter("suspend fun claimAndRecordUsage(").substringBefore("\n    }")
+        val daoCalls = Regex("""(?<!fun )\bclaimCounter\s*\(""").findAll(dao).count()
+        assertEquals("claimCounter is called only from claimAndRecordUsage", 1, daoCalls)
+        assertTrue(claim.containsMatchIn(transaction))
+
+        val callers = sources.filter { Regex("""\.\s*claimAndRecordUsage\s*\(""").containsMatchIn(it.readText()) }
         assertEquals(listOf("OathRepository.kt"), callers.map { it.name })
+        val repository = callers.single().readText()
+        val functions = Regex("""\n    (?:private |internal |override )?(?:suspend )?fun (\w+)""").findAll(repository).toList()
+        val enclosing = Regex("""\.\s*claimAndRecordUsage\s*\(""").findAll(repository).map { call ->
+            functions.last { it.range.first < call.range.first }.groupValues[1]
+        }.toSet()
+        assertEquals(setOf("generateCode"), enclosing)
     }
 }

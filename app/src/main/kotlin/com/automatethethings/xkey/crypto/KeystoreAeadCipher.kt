@@ -17,6 +17,7 @@ package com.automatethethings.xkey.crypto
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import java.security.KeyStore
+import java.util.concurrent.ConcurrentHashMap
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
@@ -47,6 +48,32 @@ class KeystoreAeadCipher(private val alias: String) {
         private const val GCM_IV_SIZE = 12
         private const val GCM_TAG_LENGTH_BITS = 128
         private const val AES_KEY_SIZE_BITS = 256
+
+        /**
+         * One lock per alias for the whole process: every instance on an
+         * alias looks its key up and generates it under the same lock, so two
+         * first uses never make two keys and strand what the first sealed.
+         */
+        private val creationLocks = ConcurrentHashMap<String, Any>()
+
+        const val PQC_WRAP_ALIAS = "xkey_pqc_wrap"
+        const val SOFTWARE_KEY_STORE_ALIAS = "xkey_software_key_store"
+        const val PASSWORD_ALIAS = "xkey_password_encryption_key"
+        const val SEAL_STORE_ALIAS = "xkey_seal_store_key"
+        const val OATH_SECRET_ALIAS = "xkey_oath_secret_encryption_key"
+        const val PQC_PROBE_ALIAS_PREFIX = "xkey_pqc_probe_"
+        /** Each software ML-DSA key's own wrap key: this prefix and the record's wrap key id. */
+        const val PQC_WRAP_ALIAS_PREFIX = "xkey_pqc_wrap_"
+
+        /** The app's own wrap keys: never listed, resolved or deleted as a user key. */
+        val INTERNAL_ALIASES: Set<String> = setOf(
+            PQC_WRAP_ALIAS, SOFTWARE_KEY_STORE_ALIAS, PASSWORD_ALIAS, SEAL_STORE_ALIAS, OATH_SECRET_ALIAS
+        )
+
+        /** True for an internal wrap key alias, a per-key ML-DSA wrap key or a PQC probe alias. */
+        fun isInternalAlias(alias: String): Boolean =
+            alias in INTERNAL_ALIASES || alias.startsWith(PQC_PROBE_ALIAS_PREFIX) ||
+                alias.startsWith(PQC_WRAP_ALIAS_PREFIX)
     }
 
     private val keyStore: KeyStore = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
@@ -81,7 +108,14 @@ class KeystoreAeadCipher(private val alias: String) {
 
     private fun getOrCreateKey(): SecretKey {
         (keyStore.getKey(alias, null) as? SecretKey)?.let { return it }
+        synchronized(creationLocks.computeIfAbsent(alias) { Any() }) {
+            // Another instance may have made the key while this one waited.
+            (keyStore.getKey(alias, null) as? SecretKey)?.let { return it }
+            return generateKey()
+        }
+    }
 
+    private fun generateKey(): SecretKey {
         val spec = KeyGenParameterSpec.Builder(
             alias,
             KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT

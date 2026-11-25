@@ -24,6 +24,7 @@ import android.util.Log
 import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.oath.OathCredentialDao
+import com.automatethethings.xkey.oath.OathSecretManager
 import com.automatethethings.xkey.pin.LockoutStatus
 import com.automatethethings.xkey.pin.PinHasher
 import com.automatethethings.xkey.pin.PinLockedException
@@ -37,6 +38,7 @@ import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
+import io.mockk.mockkConstructor
 import io.mockk.mockkObject
 import io.mockk.mockkStatic
 import io.mockk.slot
@@ -49,6 +51,7 @@ import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import kotlinx.coroutines.withContext
+import java.security.KeyStore
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -99,6 +102,12 @@ class PinOathHandlerErrorsTest {
         every { database.oathCredentialDao() } returns oathDao
         mockkObject(XKeyDatabase.Companion)
         every { XKeyDatabase.getInstance(any()) } returns database
+
+        // oathRemove deletes through OathRepository, whose OathSecretManager
+        // opens the AndroidKeyStore when it is built.
+        mockkStatic(KeyStore::class)
+        every { KeyStore.getInstance(any<String>()) } returns mockk(relaxed = true)
+        mockkConstructor(OathSecretManager::class)
 
         Dispatchers.setMain(UnconfinedTestDispatcher())
 
@@ -387,6 +396,7 @@ class PinOathHandlerErrorsTest {
     @Test
     fun `oathRemove of a known id reports deleted true`() = runTest {
         coEvery { oathDao.getByOathId("known") } returns mockk(relaxed = true)
+        coEvery { oathDao.deleteAndRecordDeletion("known", any()) } returns 1
 
         val response = call(MethodNames.LOCAL_OATH_REMOVE, """{"credential_id":"known"}""")
 

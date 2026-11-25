@@ -45,7 +45,11 @@ class PivAlgorithmWireNameTest {
             "ECDSA-P256" to PivAlgorithm.ES256,
             "ECDSA-P384" to PivAlgorithm.ES384,
             "eccp256" to PivAlgorithm.ES256,
-            "rsa_4096" to PivAlgorithm.RS4096
+            "rsa_4096" to PivAlgorithm.RS4096,
+            "ML-DSA-44" to PivAlgorithm.ML_DSA_44,
+            "ML-DSA-65" to PivAlgorithm.ML_DSA_65,
+            "MLDSA65" to PivAlgorithm.ML_DSA_65,
+            "ml_dsa_87" to PivAlgorithm.ML_DSA_87
         )
         for ((name, algorithm) in expected) {
             assertEquals(name, algorithm, PivAlgorithm.fromWireName(name))
@@ -58,6 +62,7 @@ class PivAlgorithmWireNameTest {
         assertNull(PivAlgorithm.fromWireName("RSA1024"))
         assertNull(PivAlgorithm.fromWireName("RSA-8192"))
         assertNull(PivAlgorithm.fromWireName("ECCP521"))
-        assertNull(PivAlgorithm.fromWireName("ML-DSA-65"))
+        assertNull(PivAlgorithm.fromWireName("SLH-DSA-SHA2-128S"))
+        assertNull(PivAlgorithm.fromWireName("ML-DSA-99"))
     }
 }

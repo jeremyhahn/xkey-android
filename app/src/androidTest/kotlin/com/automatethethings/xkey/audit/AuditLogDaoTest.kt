@@ -25,6 +25,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.json.JSONObject
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -452,5 +453,67 @@ class AuditLogDaoTest {
         assertEquals(3, dao.deleteAll())
         assertEquals(0L, dao.getCount())
         assertTrue(dao.getAll().isEmpty())
+    }
+
+    // -------------------------------------------------------------------------
+    // User-initiated deletion: delete and its record in one transaction
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun deleteAllAndRecordLeavesOnlyTheClearingRecord() = runBlocking {
+        dao.insertAll(listOf(entry(), entry(), entry()))
+
+        val deleted = dao.deleteAllAndRecord(AuditLogger::auditLogClearedEntry)
+
+        assertEquals(3, deleted)
+        val rows = dao.getAll()
+        assertEquals(1, rows.size)
+        assertEquals(AuditOperationType.AUDIT_LOG_CLEARED, rows.single().operationType)
+        assertEquals(3, JSONObject(rows.single().details!!).getInt("deleted"))
+    }
+
+    @Test
+    fun deleteAllAndRecordRollsBackWhenTheRecordFails() = runBlocking {
+        dao.insertAll(listOf(entry(), entry(), entry()))
+
+        val failure = runCatching {
+            dao.deleteAllAndRecord { throw IllegalStateException("interrupted") }
+        }
+
+        assertTrue(failure.exceptionOrNull() is IllegalStateException)
+        assertEquals(3L, dao.getCount())
+        assertTrue(dao.getAll().none { it.operationType == AuditOperationType.AUDIT_LOG_CLEARED })
+    }
+
+    @Test
+    fun deleteOlderThanAndRecordLeavesTheNewerRowsAndThePruneRecord() = runBlocking {
+        dao.insert(entry(timestamp = t0 - 2_000L, keyId = "old1"))
+        dao.insert(entry(timestamp = t0 - 1_000L, keyId = "old2"))
+        dao.insert(entry(timestamp = t0, keyId = "kept"))
+
+        val deleted = dao.deleteOlderThanAndRecord(t0) { AuditLogger.auditLogPrunedEntry(it, t0) }
+
+        assertEquals(2, deleted)
+        val rows = dao.getAll()
+        assertEquals(2, rows.size)
+        assertEquals(listOf("kept"), rows.mapNotNull { it.keyId })
+        val record = rows.single { it.operationType == AuditOperationType.AUDIT_LOG_PRUNED }
+        assertEquals(2, JSONObject(record.details!!).getInt("deleted"))
+        assertEquals(t0, JSONObject(record.details!!).getLong("olderThan"))
+    }
+
+    @Test
+    fun deleteOlderThanAndRecordRollsBackWhenTheRecordFails() = runBlocking {
+        dao.insert(entry(timestamp = t0 - 2_000L, keyId = "old1"))
+        dao.insert(entry(timestamp = t0 - 1_000L, keyId = "old2"))
+        dao.insert(entry(timestamp = t0, keyId = "kept"))
+
+        val failure = runCatching {
+            dao.deleteOlderThanAndRecord(t0) { throw IllegalStateException("interrupted") }
+        }
+
+        assertTrue(failure.exceptionOrNull() is IllegalStateException)
+        assertEquals(3L, dao.getCount())
+        assertTrue(dao.getAll().none { it.operationType == AuditOperationType.AUDIT_LOG_PRUNED })
     }
 }

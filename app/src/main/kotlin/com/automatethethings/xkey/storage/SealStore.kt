@@ -51,7 +51,7 @@ class SealStore(
     private val cipher: KeystoreAeadCipher = KeystoreAeadCipher(KEY_ALIAS)
 ) {
     companion object {
-        private const val KEY_ALIAS = "xkey_seal_store_key"
+        private const val KEY_ALIAS = KeystoreAeadCipher.SEAL_STORE_ALIAS
 
         /** `SealStoreStatusResponse.sealer_id`: what seals the secrets. */
         const val SEALER_ID = "android-keystore"

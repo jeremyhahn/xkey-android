@@ -45,6 +45,7 @@ import androidx.core.widget.NestedScrollView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
+import com.automatethethings.xkey.crypto.KeyDeletionException
 import com.automatethethings.xkey.crypto.SoftwareKeyStore
 import com.automatethethings.xkey.storage.deleteKeyRow
 import com.google.android.material.appbar.AppBarLayout
@@ -2074,7 +2075,15 @@ class KeyDetailActivity : AppCompatActivity() {
      */
     private fun deleteKey(key: KeyEntity) {
         lifecycleScope.launch {
-            keyDao.deleteKeyRow(key, keystoreManager, SoftwareKeyStore(this@KeyDetailActivity))
+            try {
+                keyDao.deleteKeyRow(key, keystoreManager, SoftwareKeyStore(this@KeyDetailActivity))
+            } catch (e: KeyDeletionException) {
+                // The material may still be on disk: the row stays, and so
+                // does this screen.
+                android.util.Log.e("KeyDetail", "Deleting key ${key.keyId} failed", e)
+                Snackbar.make(coordinatorLayout, getString(R.string.key_delete_failed), Snackbar.LENGTH_LONG).show()
+                return@launch
+            }
             finish()
         }
     }
