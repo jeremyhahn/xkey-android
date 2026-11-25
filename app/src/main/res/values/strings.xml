@@ -239,6 +239,10 @@
     <string name="key_create_purpose">Purpose</string>
     <string name="key_create_algorithm">Algorithm</string>
     <string name="key_create_biometric">Require biometric</string>
+    <string name="key_create_storage">Storage</string>
+    <string name="key_storage_hardware">Hardware</string>
+    <string name="key_storage_software">Software (encrypted with a Keystore key)</string>
+    <string name="piv_storage_title">Storage for %s</string>
     <string name="key_create_strongbox">Use StrongBox</string>
     <string name="key_create_success">Key created</string>
     <string name="key_create_error">Failed to create key</string>

@@ -73,6 +73,7 @@ import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import java.io.File
 import java.security.KeyPairGenerator
 import java.util.Base64
 
@@ -468,6 +469,40 @@ class CosignRequestHandlerTest {
         }
         coVerify(exactly = 0) {
             keystoreManager.signApproved(KeystoreManager.generalKeyAlias(fido2Key.keyId), any(), any(), any())
+        }
+    }
+
+    @Test
+    fun `the fallback key skips a newer ML-DSA signing key for an older EC one`() = runTest {
+        val mlDsaKey = key("cosign-ml-dsa", "signing").copy(algorithm = "ML-DSA-65", keySizeBits = 0)
+        // KeyDao.getAll lists the newest key first.
+        coEvery { keyDao.getAll() } returns listOf(mlDsaKey, signingKey)
+
+        val response = handler().handleRequest(request(keyId = null))
+
+        assertNull(response.error)
+        coVerify(exactly = 1) {
+            keystoreManager.signApproved(KeystoreManager.generalKeyAlias(signingKey.keyId), any(), any(), any())
+        }
+        coVerify(exactly = 0) {
+            keystoreManager.signApproved(KeystoreManager.generalKeyAlias(mlDsaKey.keyId), any(), any(), any())
+        }
+    }
+
+    @Test
+    fun `every co-signing key selection goes through the one JCA signing key helper`() {
+        val main = listOf(File("src/main/kotlin"), File("app/src/main/kotlin")).first { it.isDirectory }
+        val sources = listOf(
+            "com/automatethethings/xkey/protocol/Handler.kt",
+            "com/automatethethings/xkey/ui/CoSignActivity.kt"
+        ).associateWith { File(main, it).readText() }
+        for ((path, text) in sources) {
+            assertTrue("$path selects through jcaSigningKeys", text.contains("KeystoreManager.jcaSigningKeys("))
+            // A selection that reads every key and picks or filters by itself bypasses the helper.
+            assertFalse(
+                "$path picks a key from getAll() by itself",
+                Regex("""getAll\(\)\s*\.\s*(firstOrNull|first|filter|find)\b""").containsMatchIn(text)
+            )
         }
     }
 

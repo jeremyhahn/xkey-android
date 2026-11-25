@@ -33,8 +33,17 @@ object KeystoreCapabilities {
         "ES256", "ES384", "ES512",
         "RS256", "RS384", "RS512",
         "AES128", "AES192", "AES256",
-        "HMAC-SHA256", "HMAC-SHA384", "HMAC-SHA512"
+        "HMAC-SHA256", "HMAC-SHA384", "HMAC-SHA512",
+        // Software keys on every release; hardwareAlgorithms() names the sets
+        // the device also makes in the Keystore.
+        "ML-DSA-44", "ML-DSA-65", "ML-DSA-87"
     )
+
+    /** The ML-DSA sets this device makes in hardware, in FIPS 204 order. */
+    fun hardwareAlgorithms(): List<String> {
+        val supported = PqcHardware.supported()
+        return MlDsaParameterSet.entries.filter { it in supported }.map { it.wireName }
+    }
 
     /** Keystore key agreement (`KeyProperties.PURPOSE_AGREE_KEY`) is API 31. */
     const val ECDH_MIN_SDK = 31

@@ -14,6 +14,9 @@
  */
 package com.automatethethings.xkey.ui
 
+import com.automatethethings.xkey.crypto.MlDsaParameterSet
+import com.automatethethings.xkey.crypto.PqcBacking
+
 /**
  * The algorithms the Key Management create dialog offers, per purpose, and
  * the key size each name stands for. Every entry is one the Android Keystore
@@ -35,7 +38,7 @@ internal object KeyCreationAlgorithms {
         Option("ECDSA P-521", "ES512"),
         Option("RSA 2048", "RS256"),
         Option("RSA 3072", "RS384")
-    )
+    ) + mlDsa()
 
     fun tls(sdk: Int): List<Option> = buildList {
         add(Option("ECDSA P-256", "ES256"))
@@ -45,7 +48,25 @@ internal object KeyCreationAlgorithms {
         add(Option("RSA 3072", "RS384"))
         add(Option("RSA 4096", "RS512"))
         if (sdk >= ED25519_MIN_SDK) add(Option("Ed25519", "Ed25519"))
+        addAll(mlDsa())
     }
+
+    /**
+     * ML-DSA on every release: software keys need no Keystore support, and
+     * [storageOptions] adds hardware where the device makes the set.
+     */
+    private fun mlDsa(): List<Option> = MlDsaParameterSet.entries.map { Option(it.wireName, it.wireName) }
+
+    /** The ML-DSA set an entry names, or null for any other entry. */
+    fun mlDsaSet(internal: String): MlDsaParameterSet? = MlDsaParameterSet.fromWireName(internal)
+
+    /**
+     * The storage choices for a [set] key: hardware first (the default) when
+     * [hardware] holds the set, then software; software alone otherwise, so
+     * the dialog never offers hardware the device does not make.
+     */
+    fun storageOptions(set: MlDsaParameterSet, hardware: Set<MlDsaParameterSet>): List<PqcBacking> =
+        if (set in hardware) listOf(PqcBacking.HARDWARE, PqcBacking.SOFTWARE) else listOf(PqcBacking.SOFTWARE)
 
     fun encryption(): List<Option> = listOf(
         Option("RSA-OAEP 2048", "RSA-OAEP-2048"),

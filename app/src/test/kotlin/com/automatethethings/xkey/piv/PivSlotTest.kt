@@ -210,10 +210,23 @@ class PivSlotTest {
         assertEquals(0x07, PivAlgorithm.RS2048.pivAlgorithmId)
         assertEquals(0x05, PivAlgorithm.RS3072.pivAlgorithmId)
         assertEquals(0x16, PivAlgorithm.RS4096.pivAlgorithmId)
+        val withIds = PivAlgorithm.entries.mapNotNull { it.pivAlgorithmId }
+        assertEquals("every algorithm with an id has its own", withIds.size, withIds.toSet().size)
+    }
+
+    @Test
+    fun `ML-DSA slot algorithms have no SP 800-78 id`() {
+        for (algorithm in listOf(PivAlgorithm.ML_DSA_44, PivAlgorithm.ML_DSA_65, PivAlgorithm.ML_DSA_87)) {
+            assertEquals(null, algorithm.pivAlgorithmId)
+            assertEquals("ML-DSA", algorithm.keyAlgorithm)
+            assertEquals(algorithm.displayName, algorithm.mlDsaSet!!.wireName)
+            assertEquals(algorithm.mlDsaSet!!.publicKeyBytes * 8, algorithm.keySizeBits)
+        }
+        assertEquals(null, PivAlgorithm.ES256.mlDsaSet)
         assertEquals(
-            "every algorithm has its own id",
-            PivAlgorithm.entries.size,
-            PivAlgorithm.entries.map { it.pivAlgorithmId }.toSet().size
+            "every algorithm without an id is ML-DSA",
+            PivAlgorithm.entries.filter { it.pivAlgorithmId == null }.toSet(),
+            PivAlgorithm.entries.filter { it.mlDsaSet != null }.toSet()
         )
     }
 }
