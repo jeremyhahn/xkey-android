@@ -272,6 +272,15 @@ class Ctap2BleClientRoundTripTest {
         assertAssertion(assertion, made, expectedCounter = 1)
     }
 
+    @Test
+    fun `the next request written as soon as a response arrives is served, not refused busy`() {
+        val made = makeCredential()
+        client.sendDelayMillis = 200
+
+        assertAssertion(getAssertion(listOf(made.credentialId)), made, expectedCounter = 1)
+        assertAssertion(getAssertion(null), made, expectedCounter = 2)
+    }
+
     // ---- relying party checks ----
 
     private class Made(val authData: ByteArray, val credentialId: ByteArray, val publicKey: PublicKey) {
@@ -346,12 +355,17 @@ class Ctap2BleClientRoundTripTest {
         var lastRequestFrames = 0
         var lastResponseFrames = 0
 
+        @Volatile
+        var sendDelayMillis = 0L
+
         val session = FidoBleSession(
             handler = handler,
             scope = scope,
             send = { frame ->
                 assertTrue("notification of ${frame.size} bytes", frame.size <= NOTIFY_LENGTH)
                 inbox.put(frame)
+                // A slow GATT notify queue: the session waits after each frame it hands over.
+                if (frame[0] != FidoBle.CMD_KEEPALIVE) Thread.sleep(sendDelayMillis)
             },
             maxFrameSize = { NOTIFY_LENGTH },
             keepaliveIntervalMillis = 10
