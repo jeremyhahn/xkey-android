@@ -12,7 +12,17 @@ key has one of two backings:
 
 ML-KEM is out of scope: no app path decapsulates (`local.decrypt` is
 RSA-OAEP, `local.ecdh` is ECDH, `.xkeyenc` is ECIES), and a wire method only
-one side implements is a defect.
+one side implements is a defect. ML-KEM does not fit `local.decrypt`: that
+method takes an RSA-OAEP ciphertext and returns the plaintext, while ML-KEM
+decapsulation takes a KEM ciphertext and returns a shared secret, so it would
+be a new method with a new result. ML-KEM does not fit `local.ecdh` either:
+ECDH combines the phone's private key with a peer public key the caller
+sends, while ML-KEM decapsulation needs a ciphertext the peer encapsulated
+to the phone's key, not a peer public key.
+
+Hardware ML-DSA is confirmed only once `KeystorePqcBackendDeviceTest` runs
+on an API 37 device that makes ML-DSA keys; until then the JVM tests cover
+the backend through injected probes and generators.
 
 ## Parameter sets
 
