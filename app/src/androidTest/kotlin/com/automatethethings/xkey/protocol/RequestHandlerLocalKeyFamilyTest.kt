@@ -24,6 +24,7 @@ import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.crypto.SoftwareKeyStore
 import com.automatethethings.xkey.settings.AttestationBiometricPolicy
 import com.automatethethings.xkey.settings.BiometricSettingsData
+import com.automatethethings.xkey.settings.PairedDeviceRepository
 import com.automatethethings.xkey.settings.UserVerificationPolicy
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.entity.SharingPolicyType
@@ -72,8 +73,9 @@ import javax.crypto.spec.PSource
  * - `local.generateKey` for a FIDO2 key (which also emits a COSE public key and
  *   an audit record) and for the 512-bit software HMAC size.
  *
- * Every key is per-run and removed in [tearDown]; other suites assert on empty
- * or exactly-counted stores.
+ * Calls are served for a per-run peer paired in [PairedDeviceRepository], since
+ * key use needs a paired peer. Every key and the peer are per-run and removed
+ * in [tearDown]; other suites assert on empty or exactly-counted stores.
  */
 @RunWith(AndroidJUnit4::class)
 class RequestHandlerLocalKeyFamilyTest {
@@ -89,6 +91,12 @@ class RequestHandlerLocalKeyFamilyTest {
         /** Source token this suite tags its filter fixtures with. */
         private val filterSource = "keyfamily-$runId"
 
+        /** The peer this suite serves its calls for: 32 bytes of hex, unique per run. */
+        private val peerKeyHex =
+            ("fd" + java.lang.Long.toHexString(System.nanoTime())).padEnd(64, '0')
+
+        private lateinit var pairedDevices: PairedDeviceRepository
+
         private val nextRequestId = AtomicLong(1)
 
         /** Every key id this suite persists, torn down in [tearDown]. */
@@ -99,12 +107,15 @@ class RequestHandlerLocalKeyFamilyTest {
         fun setUp() {
             context = ApplicationProvider.getApplicationContext()
             softwareKeys = SoftwareKeyStore(context)
+            pairedDevices = PairedDeviceRepository(context)
             handler = RequestHandler(
                 context = context,
                 keystoreManager = KeystoreManager(context),
                 biometricLauncher = null,
-                sessionAuthManager = SessionAuthManager()
+                sessionAuthManager = SessionAuthManager(),
+                pairedDeviceRepository = pairedDevices
             )
+            pairedDevices.addDevice(peerKeyHex, "KeyFamilyTest Desktop $runId")
         }
 
         @JvmStatic
@@ -124,16 +135,19 @@ class RequestHandlerLocalKeyFamilyTest {
                     runCatching { db.keyDao().deleteByKeyId(keyId) }
                 }
             }
+            pairedDevices.removeDevice(peerKeyHex)
         }
     }
 
-    /** Headless baseline: no UI, so no biometric prompt is reachable. */
+    /** Headless baseline served for the paired peer: no UI, so no biometric prompt is reachable. */
     @Before
     fun resetHandlerState() {
         handler.setSessionId(null)
         handler.setMessageSender(null)
         handler.setActivity(null)
         handler.updateSettings(headlessSettings())
+        // setSessionId(null) clears the peer, so the paired peer is set last.
+        handler.setConnectedDevicePublicKeyHex(peerKeyHex)
     }
 
     /**
@@ -364,6 +378,8 @@ class RequestHandlerLocalKeyFamilyTest {
         val keyId = generateKey("policy-$runId", KeyTypes.SECRET, "AES256")
         val widen = JSONObject().put("keyId", keyId).put("shareable", true)
 
+        // The anonymous caller: the shared fixture's paired peer is cleared.
+        handler.setConnectedDevicePublicKeyHex(null)
         assertEquals(ErrorCodes.OPERATION_DENIED, call("local.setKeyPolicy", widen).errorCode())
         assertStaysPrivate(keyId)
 
@@ -695,7 +711,8 @@ class RequestHandlerLocalKeyFamilyTest {
             context = context,
             keystoreManager = keystoreManager,
             biometricLauncher = null,
-            sessionAuthManager = SessionAuthManager()
+            sessionAuthManager = SessionAuthManager(),
+            pairedDeviceRepository = pairedDevices
         )
         collidingHandler.updateSettings(headlessSettings())
         listOf(
@@ -776,7 +793,8 @@ class RequestHandlerLocalKeyFamilyTest {
             context = context,
             keystoreManager = keystoreManager,
             biometricLauncher = null,
-            sessionAuthManager = SessionAuthManager()
+            sessionAuthManager = SessionAuthManager(),
+            pairedDeviceRepository = pairedDevices
         )
         failingHandler.updateSettings(headlessSettings())
         listOf(

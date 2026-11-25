@@ -1243,18 +1243,32 @@ class RequestHandler(
      * A paired-device store that cannot be read fails closed: the peer's
      * settings may require an attestation the phone cannot check.
      *
-     * @return True if attestation is current or not required, false if attestation is required but expired
-     *   or the peer's record cannot be read.
+     * Every request reaches this handler from a desktop connection, so for
+     * key use a request with no authenticated peer, a peer with no paired
+     * record or a handler with no paired-device store is refused: no device
+     * policy can be checked for it. Key attestation still allows them.
+     *
+     * @return True if attestation is current or not required, false if attestation is required but expired,
+     *   the peer's record cannot be read, or (for key use) the peer is unknown or not paired.
      */
     private suspend fun isDeviceAttestationCurrent(forKeyUse: Boolean): Boolean {
-        val publicKeyHex = attestingPeerPublicKeyHex() ?: return true  // Unknown device, allow
-        val repo = pairedDeviceRepository ?: return true
+        val publicKeyHex = attestingPeerPublicKeyHex() ?: run {
+            if (forKeyUse) Log.w(TAG, "Key use with no authenticated peer; refusing")
+            return !forKeyUse
+        }
+        val repo = pairedDeviceRepository ?: run {
+            if (forKeyUse) Log.w(TAG, "Key use with no paired-device store; refusing")
+            return !forKeyUse
+        }
         val found = repo.lookupDevice(publicKeyHex)
         if (found is DeviceLookup.Unreadable) {
             Log.w(TAG, "Paired-device store unreadable; refusing until attestation can be checked", found.cause)
             return false
         }
-        val device = (found as? DeviceLookup.Paired)?.device ?: return true  // Not in repo, no device policy
+        val device = (found as? DeviceLookup.Paired)?.device ?: run {
+            if (forKeyUse) Log.w(TAG, "Key use from a peer that is not paired; refusing")
+            return !forKeyUse
+        }
 
         val requiresAttestation = if (forKeyUse) {
             device.requireAttestationForKeyUse
@@ -1921,12 +1935,11 @@ class RequestHandler(
             ?: throw ProtocolException("Missing parameters", errorCode = ErrorCodes.INVALID_PARAMS)
 
         val decryptParams = LocalDecryptParams.fromJson(params)
+        val ciphertext = decodeBase64Strict("ciphertext", decryptParams.ciphertext)
         // The requesting desktop, captured before anything can suspend.
         val caller = auditCaller()
         val startTime = System.currentTimeMillis()
-        val decrypted = keystoreManager.rsaDecryptWithAlgorithm(
-            decryptParams.keyId, decryptParams.getCiphertextBytes()
-        )
+        val decrypted = keystoreManager.rsaDecryptWithAlgorithm(decryptParams.keyId, ciphertext)
         val durationMs = System.currentTimeMillis() - startTime
 
         keyDao.recordUsage(decryptParams.keyId)
@@ -1960,16 +1973,34 @@ class RequestHandler(
         val params = request.params
             ?: throw ProtocolException("Missing parameters", errorCode = ErrorCodes.INVALID_PARAMS)
 
-        val symParams = LocalSymmetricParams.fromJson(params)
+        val symParams = LocalSymmetricParams.forEncrypt(params)
+        val plaintext = decodeBase64Strict("plaintext", symParams.data)
+        val aad = symParams.aad?.let { decodeBase64Strict("aad", it) }
         // The requesting desktop, captured before anything can suspend.
         val caller = auditCaller()
 
         // Software-backed keys are operated on outside the Keystore.
-        com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(symParams.keyId)?.let { sw ->
-            val ct = com.automatethethings.xkey.crypto.SoftwareKeyOps.aesGcmEncrypt(
-                sw.material, symParams.getDataBytes(), symParams.getAadBytes()
-            )
+        com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(symParams.keyId)?.useAndZero { sw ->
+            requireSoftwareKeyType(sw, otherType = "HMAC", operation = "AES-GCM")
+            requireKnownSoftwareAlgorithm(sw, operation = "AES-GCM")
+            val swStart = System.currentTimeMillis()
+            // Bad key material answers as the Keystore path does.
+            val ct = try {
+                com.automatethethings.xkey.crypto.SoftwareKeyOps.aesGcmEncrypt(sw.material, plaintext, aad)
+            } catch (e: java.security.GeneralSecurityException) {
+                throw EncryptionException("AES-GCM encryption failed", e)
+            } catch (e: IllegalArgumentException) {
+                throw EncryptionException("invalid AES key", e)
+            }
+            val swDurationMs = System.currentTimeMillis() - swStart
             keyDao.recordUsage(symParams.keyId)
+            logKeyUse(
+                KeyUse.ENCRYPT, symParams.keyId,
+                executedAlgorithm = KeystoreManager.EXECUTED_AES_GCM,
+                durationMs = swDurationMs,
+                caller = caller,
+                softwareKey = sw
+            )
             return Response.success(
                 request.id,
                 LocalSymmetricResult(data = Base64.getEncoder().encodeToString(ct), payloadField = LocalSymmetricResult.FIELD_CIPHERTEXT).toJson()
@@ -1977,9 +2008,7 @@ class RequestHandler(
         }
 
         val startTime = System.currentTimeMillis()
-        val ciphertext = keystoreManager.symmetricEncrypt(
-            symParams.keyId, symParams.getDataBytes(), symParams.getAadBytes()
-        )
+        val ciphertext = keystoreManager.symmetricEncrypt(symParams.keyId, plaintext, aad)
         val durationMs = System.currentTimeMillis() - startTime
 
         keyDao.recordUsage(symParams.keyId)
@@ -2014,16 +2043,34 @@ class RequestHandler(
         val params = request.params
             ?: throw ProtocolException("Missing parameters", errorCode = ErrorCodes.INVALID_PARAMS)
 
-        val symParams = LocalSymmetricParams.fromJson(params)
+        val symParams = LocalSymmetricParams.forDecrypt(params)
+        val ciphertext = decodeBase64Strict("ciphertext", symParams.data)
+        val aad = symParams.aad?.let { decodeBase64Strict("aad", it) }
         // The requesting desktop, captured before anything can suspend.
         val caller = auditCaller()
 
         // Software-backed keys are operated on outside the Keystore.
-        com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(symParams.keyId)?.let { sw ->
-            val pt = com.automatethethings.xkey.crypto.SoftwareKeyOps.aesGcmDecrypt(
-                sw.material, symParams.getDataBytes(), symParams.getAadBytes()
-            )
+        com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(symParams.keyId)?.useAndZero { sw ->
+            requireSoftwareKeyType(sw, otherType = "HMAC", operation = "AES-GCM")
+            requireKnownSoftwareAlgorithm(sw, operation = "AES-GCM")
+            val swStart = System.currentTimeMillis()
+            // A tag mismatch or a short input answers as the Keystore path does.
+            val pt = try {
+                com.automatethethings.xkey.crypto.SoftwareKeyOps.aesGcmDecrypt(sw.material, ciphertext, aad)
+            } catch (e: java.security.GeneralSecurityException) {
+                throw DecryptionException("AES-GCM decryption failed", e)
+            } catch (e: IllegalArgumentException) {
+                throw DecryptionException("ciphertext too short", e)
+            }
+            val swDurationMs = System.currentTimeMillis() - swStart
             keyDao.recordUsage(symParams.keyId)
+            logKeyUse(
+                KeyUse.DECRYPT, symParams.keyId,
+                executedAlgorithm = KeystoreManager.EXECUTED_AES_GCM,
+                durationMs = swDurationMs,
+                caller = caller,
+                softwareKey = sw
+            )
             return Response.success(
                 request.id,
                 LocalSymmetricResult(data = Base64.getEncoder().encodeToString(pt), payloadField = LocalSymmetricResult.FIELD_PLAINTEXT).toJson()
@@ -2031,9 +2078,7 @@ class RequestHandler(
         }
 
         val startTime = System.currentTimeMillis()
-        val plaintext = keystoreManager.symmetricDecrypt(
-            symParams.keyId, symParams.getDataBytes(), symParams.getAadBytes()
-        )
+        val plaintext = keystoreManager.symmetricDecrypt(symParams.keyId, ciphertext, aad)
         val durationMs = System.currentTimeMillis() - startTime
 
         keyDao.recordUsage(symParams.keyId)
@@ -2148,13 +2193,16 @@ class RequestHandler(
             ?: throw ProtocolException("Missing parameters", errorCode = ErrorCodes.INVALID_PARAMS)
 
         val hmacParams = LocalHMACParams.fromJson(params)
+        val hmacData = decodeBase64Strict("data", hmacParams.data)
         val caller = auditCaller()
 
         // Software-backed keys are operated on outside the Keystore.
-        com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(hmacParams.keyId)?.let { sw ->
+        com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(hmacParams.keyId)?.useAndZero { sw ->
+            requireSoftwareKeyType(sw, otherType = "AES", operation = "HMAC")
+            requireKnownSoftwareAlgorithm(sw, operation = "HMAC")
             val swStart = System.currentTimeMillis()
             val swMac = com.automatethethings.xkey.crypto.SoftwareKeyOps.hmac(
-                sw.material, hmacParams.getDataBytes(), sw.algorithm
+                sw.material, hmacData, sw.algorithm
             )
             val swDurationMs = System.currentTimeMillis() - swStart
             keyDao.recordUsage(hmacParams.keyId)
@@ -2173,7 +2221,7 @@ class RequestHandler(
         }
 
         val startTime = System.currentTimeMillis()
-        val hmac = keystoreManager.computeHMACWithAlgorithm(hmacParams.keyId, hmacParams.getDataBytes())
+        val hmac = keystoreManager.computeHMACWithAlgorithm(hmacParams.keyId, hmacData)
         val durationMs = System.currentTimeMillis() - startTime
 
         keyDao.recordUsage(hmacParams.keyId)
@@ -2211,11 +2259,10 @@ class RequestHandler(
             ?: throw ProtocolException("Missing parameters", errorCode = ErrorCodes.INVALID_PARAMS)
 
         val ecdhParams = LocalECDHParams.fromJson(params)
+        val peerPublicKey = decodeBase64Strict("peerPublicKey", ecdhParams.peerPublicKey)
         val caller = auditCaller()
         val startTime = System.currentTimeMillis()
-        val sharedSecret = keystoreManager.performECDH(
-            ecdhParams.keyId, ecdhParams.getPeerPublicKeyBytes()
-        )
+        val sharedSecret = keystoreManager.performECDH(ecdhParams.keyId, peerPublicKey)
         val durationMs = System.currentTimeMillis() - startTime
 
         keyDao.recordUsage(ecdhParams.keyId)
@@ -2266,9 +2313,75 @@ class RequestHandler(
     }
 
     /**
+     * Refuses software key [sw] for [operation] when its stored algorithm
+     * names the other symmetric key type ([otherType], "AES" or "HMAC"): an
+     * AES key's material is no MAC key and an HMAC key's no AES key. The
+     * code is the one a Keystore key of the wrong type answers
+     * (KeystoreManager finds no key of the class the operation needs).
+     */
+    private fun requireSoftwareKeyType(
+        sw: com.automatethethings.xkey.crypto.SoftwareKey,
+        otherType: String,
+        operation: String
+    ) {
+        if (sw.algorithm.startsWith(otherType, ignoreCase = true)) {
+            throw ProtocolException(
+                "Key ${sw.keyId} cannot be used for $operation",
+                errorCode = ErrorCodes.KEY_NOT_FOUND
+            )
+        }
+    }
+
+    /**
+     * Refuses software key [sw] for [operation] ("AES-GCM" or "HMAC") unless
+     * its stored algorithm is one this handler runs for that operation: "AES"
+     * or an AES-128/192/256 name for AES-GCM, an HMAC-SHA256/384/512 name for
+     * HMAC. Any other name is never mapped to a default algorithm.
+     */
+    private fun requireKnownSoftwareAlgorithm(
+        sw: com.automatethethings.xkey.crypto.SoftwareKey,
+        operation: String
+    ) {
+        val cose = runCatching { CoseAlgorithms.fromName(sw.algorithm) }.getOrNull()
+        val known = when (operation) {
+            "AES-GCM" -> sw.algorithm.trim().equals("AES", ignoreCase = true) || cose in setOf(
+                CoseAlgorithms.A128GCM, CoseAlgorithms.A192GCM, CoseAlgorithms.A256GCM
+            )
+            else -> cose in setOf(CoseAlgorithms.HMAC_256, CoseAlgorithms.HMAC_384, CoseAlgorithms.HMAC_512)
+        }
+        if (!known) {
+            throw ProtocolException(
+                "Key ${sw.keyId} has algorithm ${sw.algorithm}, which $operation does not support",
+                errorCode = ErrorCodes.INVALID_PARAMS
+            )
+        }
+    }
+
+    /**
+     * Runs [block] with this software key, then zeroes its decrypted
+     * material whatever the outcome: SoftwareKeyStore.get decrypts a fresh
+     * copy for each call, and nothing may keep it past the operation.
+     */
+    private inline fun <R> com.automatethethings.xkey.crypto.SoftwareKey.useAndZero(
+        block: (com.automatethethings.xkey.crypto.SoftwareKey) -> R
+    ): R =
+        try {
+            block(this)
+        } finally {
+            material.fill(0)
+        }
+
+    /**
      * Handles local.getPublicKey - export public key in specified format.
      */
     private suspend fun handleLocalGetPublicKey(request: Request): Response {
+        if (!isDeviceAttestationCurrent(forKeyUse = true)) {
+            throw ProtocolException(
+                "Device attestation required before key use",
+                errorCode = ErrorCodes.DEVICE_ATTESTATION_REQUIRED
+            )
+        }
+        val caller = auditCaller()
         val params = request.params
             ?: throw ProtocolException("Missing parameters", errorCode = ErrorCodes.INVALID_PARAMS)
 
@@ -2300,6 +2413,17 @@ class RequestHandler(
                 errorCode = ErrorCodes.UNSUPPORTED_FORMAT
             )
         }
+
+        // Log the export; the entry names the key, the format and the desktop.
+        val keyType = auditKeyType(pubKeyParams.keyId)
+        AuditLogger.logKeyExported(
+            keyId = pubKeyParams.keyId,
+            keyLabel = keyEntity.label,
+            keyType = keyType,
+            format = pubKeyParams.format,
+            deviceId = caller.peerPublicKeyHex,
+            deviceName = caller.deviceName
+        )
 
         val result = LocalGetPublicKeyResult(
             publicKey = publicKey,

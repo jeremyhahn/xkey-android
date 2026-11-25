@@ -29,6 +29,8 @@ import com.automatethethings.xkey.pin.LockoutStatus
 import com.automatethethings.xkey.pin.PinHasher
 import com.automatethethings.xkey.pin.PinLockedException
 import com.automatethethings.xkey.pin.PinManager
+import com.automatethethings.xkey.settings.DeviceLookup
+import com.automatethethings.xkey.settings.PairedDeviceRepository
 import com.automatethethings.xkey.settings.PinSettingsData
 import com.automatethethings.xkey.settings.PinSettingsRepository
 import com.automatethethings.xkey.storage.XKeyDatabase
@@ -48,6 +50,7 @@ import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
+import kotlinx.coroutines.withContext
 import java.security.KeyStore
 import org.json.JSONObject
 import org.junit.After
@@ -124,9 +127,18 @@ class PinOathHandlerErrorsTest {
         keystoreManager = mockk<KeystoreManager>(relaxed = true),
         biometricLauncher = null,
         sessionAuthManager = null,
-        pairedDeviceRepository = null,
+        pairedDeviceRepository = pairedDevices(),
         pinManager = pins
     )
+
+    /** Key use is served only to a paired peer; [PEER] is paired with no attestation required. */
+    private fun pairedDevices(): PairedDeviceRepository {
+        val repo = mockk<PairedDeviceRepository>()
+        every { repo.lookupDevice(PEER) } returns DeviceLookup.Paired(
+            mockk(relaxed = true) { every { requireAttestationForKeyUse } returns false }
+        )
+        return repo
+    }
 
     /**
      * Serves the handler from a real [PinManager] over [settings], so a test
@@ -395,7 +407,11 @@ class PinOathHandlerErrorsTest {
 
     private suspend fun call(method: String, params: String): JSONObject {
         val request = """{"id":1,"method":"$method","params":$params}"""
-        return JSONObject(String(handler.handleRawRequest(request.toByteArray(Charsets.UTF_8)), Charsets.UTF_8))
+        val binding = SessionBindingProvider { SessionBinding(ByteArray(32) { 3 }, ByteArray(32) { 4 }, ByteArray(0)) }
+        val raw = withContext(RequestHandler.servedConnection(binding, PEER, "test:connection")) {
+            handler.handleRawRequest(request.toByteArray(Charsets.UTF_8))
+        }
+        return JSONObject(String(raw, Charsets.UTF_8))
     }
 
     /**
@@ -417,5 +433,6 @@ class PinOathHandlerErrorsTest {
         /** Any stored hash and salt: [PinHasher.verifyPin] is mocked. */
         const val HASH = "AAAA"
         const val SALT = "AAAA"
+        const val PEER = "aa01"
     }
 }

@@ -27,6 +27,8 @@ import com.automatethethings.xkey.oath.OathCredentialDao
 import com.automatethethings.xkey.oath.OathCredentialEntity
 import com.automatethethings.xkey.oath.OathSecretManager
 import com.automatethethings.xkey.pin.PinManager
+import com.automatethethings.xkey.settings.DeviceLookup
+import com.automatethethings.xkey.settings.PairedDeviceRepository
 import com.automatethethings.xkey.storage.XKeyDatabase
 import io.mockk.coEvery
 import io.mockk.every
@@ -44,6 +46,7 @@ import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -120,9 +123,18 @@ class OathAddHandlerTest {
             keystoreManager = mockk<KeystoreManager>(relaxed = true),
             biometricLauncher = null,
             sessionAuthManager = null,
-            pairedDeviceRepository = null,
+            pairedDeviceRepository = pairedDevices(),
             pinManager = mockk<PinManager>(relaxed = true)
         )
+    }
+
+    /** Key use is served only to a paired peer; [PEER] is paired with no attestation required. */
+    private fun pairedDevices(): PairedDeviceRepository {
+        val repo = mockk<PairedDeviceRepository>()
+        every { repo.lookupDevice(PEER) } returns DeviceLookup.Paired(
+            mockk(relaxed = true) { every { requireAttestationForKeyUse } returns false }
+        )
+        return repo
     }
 
     @After
@@ -261,10 +273,15 @@ class OathAddHandlerTest {
 
     private suspend fun call(params: String): JSONObject {
         val request = """{"id":1,"method":"${MethodNames.LOCAL_OATH_ADD}","params":$params}"""
-        return JSONObject(String(handler.handleRawRequest(request.toByteArray(Charsets.UTF_8)), Charsets.UTF_8))
+        val binding = SessionBindingProvider { SessionBinding(ByteArray(32) { 3 }, ByteArray(32) { 4 }, ByteArray(0)) }
+        val raw = withContext(RequestHandler.servedConnection(binding, PEER, "test:connection")) {
+            handler.handleRawRequest(request.toByteArray(Charsets.UTF_8))
+        }
+        return JSONObject(String(raw, Charsets.UTF_8))
     }
 
     private companion object {
+        const val PEER = "aa01"
         const val SECRET = "JBSWY3DPEHPK3PXP"
         const val CALLER_NAME = "caller-chosen-name"
     }
