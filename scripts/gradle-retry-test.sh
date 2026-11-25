@@ -342,7 +342,7 @@ else
 	else
 		check "the script reads GRADLE_RETRY_ATTEMPTS" false
 	fi
-	if replace "${S}" '|status code 429|Too Many Requests' '' "${M}.no429"; then
+	if replace "${S}" '|status code 429|too many requests' '' "${M}.no429"; then
 		check "a mutant not retrying HTTP 429 is caught" not all_cases "${M}.no429"
 	else
 		check "the script retries HTTP 429 Too Many Requests" false
@@ -365,10 +365,20 @@ else
 	else
 		check "the script exits with the last attempt's status" false
 	fi
-	if replace "${S}" '! grep -Eq' 'false && ! grep -Eq' "${M}.any"; then
+	if replace "${S}" '! grep -Eiq' 'false && ! grep -Eiq' "${M}.any"; then
 		check "a mutant retrying every failure is caught" not all_cases "${M}.any"
 	else
 		check "the script retries only download failures" false
+	fi
+	if replace "${S}" '! grep -Eiq' '! grep -Eq' "${M}.case"; then
+		check "a mutant matching with case is caught" not all_cases "${M}.case"
+	else
+		check "the script matches failures without regard to case" false
+	fi
+	if replace "${S}" '|plugin \[id: [^]]*\] was not found' '' "${M}.noplugin"; then
+		check "a mutant not retrying a plugin not found is caught" not all_cases "${M}.noplugin"
+	else
+		check "the script retries a plugin not found in any source" false
 	fi
 fi
 
