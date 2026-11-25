@@ -24,6 +24,7 @@ import com.automatethethings.xkey.crypto.KeyPresence
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.crypto.SoftwareKeyStore
 import com.automatethethings.xkey.media.ContentAuthenticityData
+import com.automatethethings.xkey.testing.MainLooperWait
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.mockkStatic
@@ -71,9 +72,7 @@ class CoSignInitiatorQrRefusalTest {
 
     @Test
     fun generateQrWithAnUnreadableKeyStoreIsARefusalNotACrash() {
-        val controller = Robolectric.buildActivity(CoSignActivity::class.java).setup()
-        shadowOf(Looper.getMainLooper()).idle()
-        val activity = controller.get()
+        val activity = started()
 
         val keystore = spyk(KeystoreManager(activity))
         every { keystore.ed25519Prefs() } returns null
@@ -195,10 +194,17 @@ class CoSignInitiatorQrRefusalTest {
         assertNull(qr.drawable)
     }
 
-    private fun initiator(ids: List<String> = listOf(KEY_ID), stub: (KeystoreManager) -> Unit): CoSignActivity {
-        val controller = Robolectric.buildActivity(CoSignActivity::class.java).setup()
+    /** A started screen whose own key load has finished, so it cannot overwrite the keys a test sets. */
+    private fun started(): CoSignActivity {
+        val activity = Robolectric.buildActivity(CoSignActivity::class.java).setup().get()
+        val loaded = get(activity, "signingKeysLoaded") as kotlinx.coroutines.CompletableDeferred<*>
+        MainLooperWait.until("the screen's signing keys never loaded") { loaded.isCompleted }
         shadowOf(Looper.getMainLooper()).idle()
-        val activity = controller.get()
+        return activity
+    }
+
+    private fun initiator(ids: List<String> = listOf(KEY_ID), stub: (KeystoreManager) -> Unit): CoSignActivity {
+        val activity = started()
         val keystore = spyk(KeystoreManager(activity))
         every { keystore.ed25519Prefs() } returns null
         val software = mockk<SoftwareKeyStore>()
