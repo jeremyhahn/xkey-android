@@ -17,6 +17,7 @@ package com.automatethethings.xkey.credential.handler
 
 import android.app.Application
 import androidx.credentials.GetPublicKeyCredentialOption
+import androidx.credentials.provider.CallingAppInfo
 import androidx.credentials.provider.ProviderGetCredentialRequest
 import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.credential.NoCredentialsFoundException
@@ -217,7 +218,15 @@ class AssertionSignCountTest {
             .put("userVerification", "required")
             .toString()
         val option = GetPublicKeyCredentialOption(json, clientDataHash = ByteArray(32))
-        return mockk(relaxed = true) { every { credentialOptions } returns listOf(option) }
+        // A caller-supplied hash is taken only from a privileged browser on the RP.
+        val browser = mockk<CallingAppInfo>(relaxed = true) {
+            every { isOriginPopulated() } returns true
+            every { getOrigin(any()) } returns "https://$RP_ID"
+        }
+        return mockk(relaxed = true) {
+            every { credentialOptions } returns listOf(option)
+            every { callingAppInfo } returns browser
+        }
     }
 
     private companion object {

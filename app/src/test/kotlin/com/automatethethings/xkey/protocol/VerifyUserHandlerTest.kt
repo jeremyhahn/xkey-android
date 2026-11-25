@@ -148,7 +148,7 @@ class VerifyUserHandlerTest {
         val response = answer(verifyUserRequest(id = 42, generation = 7uL))
 
         assertNull("no error expected: ${response.error?.message}", response.error)
-        assertEquals(42L, response.id)
+        assertEquals(RpcId.of(42), response.id)
         assertEquals(7uL, response.generation)
         val result = LocalVerifyUserResult.fromJson(response.result!!)
         assertEquals(2, result.protocolVersion)

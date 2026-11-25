@@ -120,7 +120,7 @@ class RemoteSyncRoundTripTest {
                 .put("added", 0)
                 .put("updated", 0)
                 .put("local", desktopLocal(request.method))
-            val reply = JSONObject().put("id", request.id).put("result", result)
+            val reply = JSONObject().put("id", request.id.toJsonValue()).put("result", result)
             router.processMessage(reply.toString().toByteArray(Charsets.UTF_8))
         }
     }

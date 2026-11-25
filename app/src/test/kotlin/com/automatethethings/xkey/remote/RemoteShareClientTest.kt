@@ -329,7 +329,7 @@ class RemoteShareClientTest {
         val share = RemoteShareClient.PublicKeyShare("k1", pem, null, "EC", null, null)
         client.sharePublicKey(share)
         RemoteShareClient(sender, router, 200).sharePublicKey(share)
-        val (a, b) = sender.sent.map { it.id }
+        val (a, b) = sender.sent.map { it.id.longValueOrNull()!! }
         assertTrue(a >= RemoteShareClient.BASE_REQUEST_ID)
         assertEquals(a + 1, b)
     }

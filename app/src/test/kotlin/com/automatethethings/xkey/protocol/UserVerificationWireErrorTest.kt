@@ -122,7 +122,7 @@ class UserVerificationWireErrorTest {
         assertEquals(request.method, request.id, response.id)
         assertNull(request.method, response.result)
         assertEquals(request.method, ErrorCodes.BIOMETRIC_FAILED, response.error?.code)
-        assertEquals(request.method, -32003, response.error?.code)
+        assertEquals(request.method, -32002, response.error?.code)
         assertEquals(request.method, error.message, response.error?.message)
     }
 

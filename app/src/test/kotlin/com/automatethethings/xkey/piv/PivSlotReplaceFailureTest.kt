@@ -98,7 +98,7 @@ class PivSlotReplaceFailureTest {
         every { store.generate(alias, MlDsaParameterSet.ML_DSA_87, any()) } throws IOException("Cannot store ML-DSA key")
 
         val error = runCatching {
-            PivKeyManager(pivSlotDao, pqcStore = store).generateKey(slot, PivAlgorithm.ML_DSA_87, PqcBacking.SOFTWARE)
+            testPivKeyManager(pivSlotDao, pqcStore = store).generateKey(slot, PivAlgorithm.ML_DSA_87, PqcBacking.SOFTWARE)
         }.exceptionOrNull()
 
         assertTrue("$error", error is IOException)
@@ -115,7 +115,7 @@ class PivSlotReplaceFailureTest {
         }
 
         val error = runCatching {
-            PivKeyManager(pivSlotDao).generateKey(slot, PivAlgorithm.ML_DSA_65, PqcBacking.HARDWARE)
+            testPivKeyManager(pivSlotDao).generateKey(slot, PivAlgorithm.ML_DSA_65, PqcBacking.HARDWARE)
         }.exceptionOrNull()
 
         assertTrue("$error", error is IllegalStateException)
@@ -130,7 +130,7 @@ class PivSlotReplaceFailureTest {
         }
 
         val error = runCatching {
-            PivKeyManager(pivSlotDao, generateKeyPair = generate).generateKey(slot, PivAlgorithm.ES256, PqcBacking.HARDWARE)
+            testPivKeyManager(pivSlotDao, generateKeyPair = generate).generateKey(slot, PivAlgorithm.ES256, PqcBacking.HARDWARE)
         }.exceptionOrNull()
 
         assertTrue("$error", error is IllegalStateException)
@@ -142,7 +142,7 @@ class PivSlotReplaceFailureTest {
         val (store, softwareRow) = undeletableSoftwareSlot()
 
         val error = runCatching {
-            PivKeyManager(pivSlotDao, pqcStore = store).generateKey(slot, PivAlgorithm.ES256, PqcBacking.HARDWARE)
+            testPivKeyManager(pivSlotDao, pqcStore = store).generateKey(slot, PivAlgorithm.ES256, PqcBacking.HARDWARE)
         }.exceptionOrNull()
 
         assertTrue("$error", error is IOException)
@@ -161,7 +161,7 @@ class PivSlotReplaceFailureTest {
         }
 
         val error = runCatching {
-            PivKeyManager(pivSlotDao, pqcStore = store).generateKey(slot, PivAlgorithm.ML_DSA_65, PqcBacking.HARDWARE)
+            testPivKeyManager(pivSlotDao, pqcStore = store).generateKey(slot, PivAlgorithm.ML_DSA_65, PqcBacking.HARDWARE)
         }.exceptionOrNull()
 
         assertTrue("$error", error is IOException)
@@ -185,9 +185,11 @@ class PivSlotReplaceFailureTest {
         val root = listOf(File("src/main/kotlin"), File("app/src/main/kotlin")).first { it.isDirectory }
         val text = File(root, "com/automatethethings/xkey/piv/PivKeyManager.kt").readText()
 
-        // Key material is made or removed for a generate only in slotKeyMaker's lambdas.
+        // Key material is made or removed for a generate only in slotKeyMaker's
+        // lambdas. probeInKeystore makes a disposable curve 25519 key under its
+        // own probe alias, never a slot's, and always deletes it.
         assertEquals(
-            setOf("slotKeyMaker"),
+            setOf("slotKeyMaker", "probeInKeystore"),
             enclosingFunctions(text, Regex("""generateKeyPair\(alias|\.generate\(alias""")).toSet()
         )
         assertEquals(setOf("generateKeyLocked"), enclosingFunctions(text, Regex("""(?<!fun )\bslotKeyMaker\(""")).toSet())

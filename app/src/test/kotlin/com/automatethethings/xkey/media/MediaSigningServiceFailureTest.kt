@@ -205,8 +205,14 @@ class MediaSigningServiceFailureTest {
         val capture = video()
         // A directory where the sidecar goes: the write throws.
         assertTrue(capture.sidecar.mkdir())
-
-        fixture.deliver(capture.uri)
+        // No private store either, so nothing holds the signature.
+        val store = XmpMetadataHelper.privateStore
+        XmpMetadataHelper.privateStore = null
+        try {
+            fixture.deliver(capture.uri)
+        } finally {
+            XmpMetadataHelper.privateStore = store
+        }
 
         assertTrue("the sidecar path must still be the directory", capture.sidecar.isDirectory)
         verify(exactly = 0) { AuditLogger.logMediaAutoSigned(any(), any(), capture.uri.toString()) }

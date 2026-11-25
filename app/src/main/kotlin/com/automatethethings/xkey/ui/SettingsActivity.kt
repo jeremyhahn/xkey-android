@@ -2487,7 +2487,7 @@ class SettingsActivity : AppCompatActivity() {
         }
         updateTimeWindowVisibility(settings.authMode)
 
-        val timeWindowIndex = timeWindowValues.indexOfFirst { it.seconds == settings.timeWindowSeconds }
+        val timeWindowIndex = timeWindowValues.indexOfFirst { it.seconds == settings.effectiveTimeWindowSeconds }
         if (timeWindowIndex >= 0) {
             spinnerTimeWindow?.setSelection(timeWindowIndex)
         }

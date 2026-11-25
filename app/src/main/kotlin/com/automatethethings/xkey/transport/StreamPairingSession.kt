@@ -29,6 +29,7 @@ import com.automatethethings.xkey.protocol.Request as ProtocolRequest
 import com.automatethethings.xkey.protocol.RequestHandler
 import com.automatethethings.xkey.protocol.TransportMethods
 import com.automatethethings.xkey.protocol.Response as ProtocolResponse
+import com.automatethethings.xkey.protocol.RpcId
 import com.automatethethings.xkey.protocol.SessionBinding
 import com.automatethethings.xkey.protocol.SessionBindingProvider
 import com.automatethethings.xkey.protocol.readGeneration
@@ -122,6 +123,15 @@ class StreamPairingSession(
 
         /** How long the frames read before the end of a stream have to be delivered. */
         private const val DRAIN_TIMEOUT_MS = 5_000L
+
+        /** The Noise AEAD tag each encrypted frame carries after its plaintext. */
+        private const val NOISE_TAG_SIZE = 16
+
+        /**
+         * The largest plaintext one frame carries: the 65535-byte frame less
+         * the Noise tag. A reply over it is answered with an error instead.
+         */
+        const val MAX_PLAINTEXT_SIZE = StreamMessageFraming.MAX_MESSAGE_SIZE - NOISE_TAG_SIZE
 
         /**
          * How long a peer has, from the start of [serve], to finish the
@@ -656,7 +666,7 @@ class StreamPairingSession(
             // whose peer went away while it ran.
             if (responseBytes != null && !connection.inputEnded) {
                 try {
-                    send(connection, responseBytes, phoneInitiated = false)
+                    send(connection, fitOneFrame(plaintext, responseBytes), phoneInitiated = false)
                 } catch (e: IOException) {
                     Log.e(TAG, "[$transportLabel] failed to send response", e)
                     break
@@ -667,6 +677,28 @@ class StreamPairingSession(
                 break
             }
         }
+    }
+
+    /**
+     * [reply] to [request], or, when it is over [MAX_PLAINTEXT_SIZE] and so
+     * cannot go out in one frame, an INTERNAL_ERROR carrying the request's
+     * id and generation: the peer gets an answer and the connection goes on.
+     */
+    private fun fitOneFrame(request: ByteArray, reply: ByteArray): ByteArray {
+        if (reply.size <= MAX_PLAINTEXT_SIZE) return reply
+        val requestText = String(request, Charsets.UTF_8)
+        val method = try {
+            JSONObject(requestText).optString("method", "?")
+        } catch (e: JSONException) {
+            "?"
+        }
+        Log.w(TAG, "[$transportLabel] response to $method is ${reply.size} bytes, over $MAX_PLAINTEXT_SIZE; answering with an error")
+        return ProtocolResponse.error(
+            RpcId.read(requestText) ?: RpcId.NULL,
+            ErrorCodes.INTERNAL_ERROR,
+            "Response of ${reply.size} bytes does not fit one frame",
+            generation = readGeneration(requestText)
+        ).toJson()
     }
 
     /**
@@ -861,7 +893,7 @@ class StreamPairingSession(
     private fun refuseRepeatedConfirm(plaintext: ByteArray): ByteArray {
         val text = String(plaintext, Charsets.UTF_8)
         return ProtocolResponse.error(
-            JSONObject(text).optLong("id", -1),
+            RpcId.read(text) ?: RpcId.NULL,
             ErrorCodes.PAIRING_REJECTED,
             "Only one pairing.confirm per connection; reconnect to pair",
             generation = readGeneration(text)
@@ -885,7 +917,7 @@ class StreamPairingSession(
 
         Log.w(TAG, "[$transportLabel] refusing '$method' from an unpaired peer")
         return ProtocolResponse.error(
-            json.optLong("id", -1),
+            RpcId.read(text) ?: RpcId.NULL,
             ErrorCodes.PAIRING_REQUIRED,
             "Device is not paired; send pairing.confirm first",
             generation = readGeneration(text)
@@ -906,7 +938,7 @@ class StreamPairingSession(
         }
         if (json.getStringOrNull("method") != MethodNames.PAIRING_CONFIRM) return null
 
-        val id = json.optLong("id", -1)
+        val id = RpcId.read(text) ?: RpcId.NULL
         val generation = readGeneration(text)
         val params = json.optJSONObject("params") ?: return null
         val pairingParams = try {
@@ -1103,6 +1135,12 @@ class StreamPairingSession(
         expected: ConfirmedConnection? = null,
         check: () -> Unit = {}
     ) {
+        // Refused before admission: no nonce is spent, so the connection goes on.
+        if (plaintext.size > MAX_PLAINTEXT_SIZE) {
+            throw MessageTooLargeException(
+                "Plaintext of ${plaintext.size} bytes exceeds the $MAX_PLAINTEXT_SIZE a frame carries"
+            )
+        }
         beforeSendLockForTest?.invoke()
         connection.sendLock.withLock {
             currentCoroutineContext().ensureActive()
@@ -1173,7 +1211,7 @@ internal fun confirmAlreadyPaired(plaintext: ByteArray): ByteArray? {
     }
     if (json.getStringOrNull("method") != MethodNames.PAIRING_CONFIRM) return null
 
-    val id = json.optLong("id", -1)
+    val id = RpcId.read(text) ?: RpcId.NULL
     val result = PairingConfirmResult(confirmed = true, deviceName = phoneModelName())
     return ProtocolResponse.success(id, result.toJson(), generation = readGeneration(text)).toJson()
 }

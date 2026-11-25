@@ -330,6 +330,46 @@ class GetCredentialHandlerTest {
         assertEquals(0L, storedSignCount(credential.credentialId))
     }
 
+    @Test
+    fun browserSuppliedHash_isRefusedWhenTheCallerHasNoVerifiedOrigin() {
+        val rpId = nextRpId()
+        val credential = seedCredential(rpId)
+        val request = CredentialRequestFixtures.providerGetRequest(
+            requestJson = CredentialRequestFixtures.getRequestJson(rpId),
+            callingAppInfo = CredentialRequestFixtures.appWithoutOrigin()
+        )
+
+        val failure = assertThrows(CredentialAssertionException::class.java) {
+            runBlocking { handler.handleGetCredential(request, credential.credentialId) }
+        }
+
+        assertTrue(
+            "A supplied hash fixes the origin, so it needs a verified one: ${failure.message}",
+            failure.message!!.contains("verified web origin")
+        )
+        assertEquals(0L, storedSignCount(credential.credentialId))
+    }
+
+    @Test
+    fun browserSuppliedHash_isRefusedFromABrowserOnAnotherSite() {
+        val rpId = nextRpId()
+        val credential = seedCredential(rpId)
+        val request = CredentialRequestFixtures.providerGetRequest(
+            requestJson = CredentialRequestFixtures.getRequestJson(rpId),
+            callingAppInfo = CredentialRequestFixtures.privilegedBrowserOn("other-site.example.com")
+        )
+
+        val failure = assertThrows(CredentialAssertionException::class.java) {
+            runBlocking { handler.handleGetCredential(request, credential.credentialId) }
+        }
+
+        assertTrue(
+            "The refusal should name the relying party: ${failure.message}",
+            failure.message!!.contains("not valid for the caller's origin")
+        )
+        assertEquals(0L, storedSignCount(credential.credentialId))
+    }
+
     // ---------------------------------------------------------------------
     // Authenticator data
     // ---------------------------------------------------------------------

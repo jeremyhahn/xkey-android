@@ -314,20 +314,93 @@ class BiometricSettingsRepositoryJvmTest {
         assertEquals(emptyList<AuditLogEntity>(), inserted)
     }
 
-    /**
-     * Found: [BiometricSettingsRepository.updateTimeWindow],
-     * [BiometricSettingsRepository.updateSettings] and
-     * [BiometricSettingsRepository.resetToDefaults] write the policy without
-     * the audited path, so turning user verification off through them leaves
-     * no entry. This test records what main does.
-     */
+    /** The recorded changes as setting name to (old, new), failing on a setting recorded twice. */
+    private fun changes(entries: List<AuditLogEntity>): Map<String, Pair<String, String>> {
+        entries.forEach {
+            assertEquals(AuditOperationType.SETTINGS_CHANGED, it.operationType)
+            assertTrue(it.success)
+        }
+        val pairs = entries.map { entry ->
+            val details = JSONObject(entry.details!!)
+            details.getString("setting") to (details.getString("oldValue") to details.getString("newValue"))
+        }
+        assertEquals("a setting was recorded twice: $pairs", pairs.size, pairs.map { it.first }.toSet().size)
+        return pairs.toMap()
+    }
+
     @Test
-    fun `found - updateTimeWindow, updateSettings and resetToDefaults write no audit entry`() = runBlocking {
+    fun `updateTimeWindow records the old and new window and nothing when unchanged`() = runBlocking {
         repository.updateTimeWindow(AuthTimeWindow.MINUTES_10)
+
+        assertEquals(1, inserted.size)
+        assertChange(inserted[0], "timeWindowSeconds", "120", "600")
+
+        repository.updateTimeWindow(AuthTimeWindow.MINUTES_10.seconds)
+        assertEquals(1, inserted.size)
+    }
+
+    @Test
+    fun `updateTimeWindow records the clamped stored window as the old value`() = runBlocking {
+        store.edit { it[intPreferencesKey("time_window_seconds")] = 0 }
+
+        repository.updateTimeWindow(AuthTimeWindow.MINUTES_1)
+
+        assertEquals(1, inserted.size)
+        assertChange(inserted[0], "timeWindowSeconds", "30", "60")
+    }
+
+    @Test
+    fun `updateSettings records one entry per changed field`() = runBlocking {
+        repository.updateSettings(
+            BiometricSettingsData(
+                uvPolicy = UserVerificationPolicy.DISABLED,
+                authMode = BiometricAuthMode.TIME_WINDOW,
+                timeWindowSeconds = AuthTimeWindow.MINUTES_5.seconds,
+                attestationBiometricPolicy = AttestationBiometricPolicy.NEVER,
+                strictUserVerification = false
+            )
+        )
+
+        assertEquals(
+            mapOf(
+                "userVerificationPolicy" to ("REQUIRED" to "DISABLED"),
+                "authMode" to ("PER_OPERATION" to "TIME_WINDOW"),
+                "timeWindowSeconds" to ("120" to "300"),
+                "attestationBiometricPolicy" to ("ALWAYS" to "NEVER"),
+                "strictUserVerification" to ("true" to "false")
+            ),
+            changes(inserted)
+        )
+    }
+
+    @Test
+    fun `updateSettings records nothing for an unchanged field`() = runBlocking {
+        repository.updateSettings(BiometricSettingsData.DEFAULT)
+        assertEquals(emptyList<AuditLogEntity>(), inserted)
+
+        repository.updateSettings(BiometricSettingsData.DEFAULT.copy(authMode = BiometricAuthMode.PER_SESSION))
+
+        assertEquals(mapOf("authMode" to ("PER_OPERATION" to "PER_SESSION")), changes(inserted))
+    }
+
+    @Test
+    fun `resetToDefaults records each change back to the default`() = runBlocking {
         repository.updateSettings(BiometricSettingsData.DISABLED.copy(strictUserVerification = false))
+        inserted.clear()
+
         repository.resetToDefaults()
 
-        assertEquals(emptyList<AuditLogEntity>(), inserted)
+        assertEquals(
+            mapOf(
+                "userVerificationPolicy" to ("DISABLED" to "REQUIRED"),
+                "strictUserVerification" to ("false" to "true")
+            ),
+            changes(inserted)
+        )
         assertEquals(BiometricSettingsData.DEFAULT, repository.getSettings())
+
+        inserted.clear()
+        repository.resetToDefaults()
+        assertEquals(emptyList<AuditLogEntity>(), inserted)
     }
 }

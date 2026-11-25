@@ -28,6 +28,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.rule.GrantPermissionRule
 import com.automatethethings.xkey.protocol.ErrorCodes
 import com.automatethethings.xkey.protocol.Response
+import com.automatethethings.xkey.protocol.RpcId
 import com.automatethethings.xkey.ui.MainActivity
 import com.automatethethings.xkey.ui.PROMPT_TIMEOUT_MS
 import com.automatethethings.xkey.ui.PromptActivityTracker
@@ -260,7 +261,7 @@ class XKeyGattServicePairingPromptTest {
         val attestation = callerScope.async { probe.service.requestDeviceAttestation(peerKeyHex) }
 
         val refusal = Response.error(
-            REMOTE_BASE_REQUEST_ID,
+            RpcId.of(REMOTE_BASE_REQUEST_ID),
             ErrorCodes.INTERNAL_ERROR,
             "this laptop has no TPM"
         ).toJson()
