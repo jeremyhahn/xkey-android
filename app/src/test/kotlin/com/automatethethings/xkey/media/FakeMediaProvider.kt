@@ -102,8 +102,18 @@ class FakeMediaProvider : ContentProvider() {
      * through `ContentResolver.openFileDescriptor` arrives here (the
      * framework's defaults drop the signal).
      */
-    override fun openAssetFile(uri: Uri, mode: String, signal: CancellationSignal?): AssetFileDescriptor =
-        AssetFileDescriptor(openFile(uri, mode, signal), 0, AssetFileDescriptor.UNKNOWN_LENGTH)
+    override fun openAssetFile(uri: Uri, mode: String, signal: CancellationSignal?): AssetFileDescriptor {
+        val bounds = window
+        val fd = openFile(uri, mode, signal)
+        return if (bounds != null && 'w' !in mode) {
+            AssetFileDescriptor(fd, bounds.first, bounds.second)
+        } else {
+            AssetFileDescriptor(fd, 0, AssetFileDescriptor.UNKNOWN_LENGTH)
+        }
+    }
+
+    /** When set, a read open hands back [media] as a bounded descriptor: (start offset, declared length). */
+    var window: Pair<Long, Long>? = null
 
     override fun openTypedAssetFile(
         uri: Uri,

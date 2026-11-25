@@ -191,6 +191,26 @@ class MediaPublisherTest {
     }
 
     @Test
+    fun `a read of user content opens a descriptor only through the publisher's one read helper`() {
+        val reads = listOf("openFileDescriptor(", "openAssetFileDescriptor(", "openTypedAssetFileDescriptor(")
+        val bypasses = mainSources().flatMap { (name, text) ->
+            val lines = text.lines()
+            val helper = if (name.endsWith("media/MediaPublisher.kt")) {
+                val start = lines.indexOfFirst { "fun openContentRead(" in it }
+                val end = (start + 1 until lines.size).firstOrNull { lines[it].startsWith("    }") } ?: -1
+                start..end
+            } else {
+                IntRange.EMPTY
+            }
+            lines.withIndex()
+                .filter { (_, line) -> reads.any { it in line } && !line.trim().startsWith("*") && !line.trim().startsWith("//") }
+                .filterNot { (i, line) -> i in helper || ("openFileDescriptor(" in line && "\"rw" in line) }
+                .map { (i, line) -> "$name:${i + 1}: ${line.trim()}" }
+        }
+        assertEquals("descriptor reads outside MediaPublisher.openContentRead", emptyList<String>(), bypasses)
+    }
+
+    @Test
     fun `an in-place EXIF rewrite only ever runs on a file the publisher swaps in`() {
         val bypasses = mainSources().flatMap { (name, text) ->
             val lines = text.lines()
