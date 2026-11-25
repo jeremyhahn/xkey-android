@@ -145,6 +145,11 @@ class KeyUseHandlerTest {
         ).forEach { entity -> coEvery { keyDao.getByKeyId(entity.keyId) } returns entity }
         val database = mockk<XKeyDatabase>(relaxed = true)
         every { database.keyDao() } returns keyDao
+        // No key here is deleted or carries a stored policy.
+        every { database.keyPolicyDao() } returns mockk<com.automatethethings.xkey.storage.dao.KeyPolicyDao>(relaxed = true) {
+            coEvery { deletion(any()) } returns null
+            coEvery { policyRow(any()) } returns null
+        }
         mockkObject(XKeyDatabase.Companion)
         every { XKeyDatabase.getInstance(any()) } returns database
 
@@ -203,6 +208,9 @@ class KeyUseHandlerTest {
         // hold, or one of another type (KeystoreManager casts the entry to
         // the key class the operation needs).
         keystore = mockk(relaxed = true)
+        // Every key here is a general key, never a credential.
+        every { keystore.exportKind(any()) } returns com.automatethethings.xkey.crypto.UserKeyKind.GENERAL
+        every { keystore.rowKeyKind(any(), any(), any(), any()) } returns com.automatethethings.xkey.crypto.UserKeyKind.GENERAL
         coEvery { keystore.rsaDecryptWithAlgorithm(any(), any()) } answers { throw KeyNotFoundException(firstArg()) }
         coEvery { keystore.symmetricEncrypt(any(), any(), any()) } answers { throw KeyNotFoundException(firstArg()) }
         coEvery { keystore.symmetricDecrypt(any(), any(), any()) } answers { throw KeyNotFoundException(firstArg()) }
