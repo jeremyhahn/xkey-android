@@ -2087,29 +2087,32 @@ class RequestHandler(
         val selected = keyDao.getByKeyId(signParams.keyId)?.let { approvalSnapshot(it, signingAlias) }
         val unlistedDer = if (selected == null) keystoreManager.publicKeyDERAt(signingAlias) else null
         val launcher = biometricLauncher
-        val cryptoObjectSigner = if (perOperation && launcher != null) {
+        // The per-operation prompt reserves the key's use once its turn has come (#255 review at 9b6c00f5).
+        val promptSigner: ((reserve: suspend () -> Unit) -> com.automatethethings.xkey.crypto.CryptoObjectSigner)? = if (perOperation && launcher != null) {
+            { reserve ->
             com.automatethethings.xkey.crypto.CryptoObjectSigner { alias, jcaAlgorithm, bytes ->
                 val notice = OwnNotifications(operationType = "sign", rpName = null)
                 try {
-                    launcher.requestCryptoSignature(
+                    launcher.requestCryptoSignatureOnTurn(
                         credentialId = signParams.keyId,
-                        dataHash = bytes,
+                        signedData = { reserve(); bytes },
                         title = "Signing Request",
                         subtitle = "Verify your identity to sign data",
                         showOnLockScreen = keyguardManager.isKeyguardLocked,
                         keyAlias = alias,
-                        signatureAlgorithm = jcaAlgorithm,
-                        onLaunch = notice.onLaunch
+                        onLaunch = notice.onLaunch,
+                        signatureAlgorithm = jcaAlgorithm
                     ).also { sessionAuthManager?.recordAuthentication(requestSessionId()) }
                 } finally {
                     notice.close()
                 }
             }
+            }
         } else {
             null
         }
         var approved = false
-        if (biometricRequired && launcher != null && cryptoObjectSigner == null) {
+        if (biometricRequired && launcher != null && promptSigner == null) {
             val notice = OwnNotifications(operationType = "sign", rpName = null)
             try {
                 launcher.requestAuthentication(
@@ -2153,8 +2156,8 @@ class RequestHandler(
                 val set = requestedSet!!
                 val startTime = System.currentTimeMillis()
                 val signature = try {
-                    // Under the material-use lock and its deleted-key recheck (#255 review).
-                    withUsableGeneralKey(signParams.keyId) {
+                    // Under the material-use lock and its deleted-key recheck, reserved on the prompt's turn (#255 review).
+                    withSignerKeyUse(signParams.keyId, promptSigner) { cryptoObjectSigner ->
                         if (signingKey != null) {
                             signingKey.signMlDsa(data, set, userAuthenticatedAt, cryptoObjectSigner)
                         } else {
@@ -2182,8 +2185,8 @@ class RequestHandler(
             }
             val jcaAlgorithm = KeystoreManager.jcaSignatureAlgorithm(signAlgorithm)
             val startTime = System.currentTimeMillis()
-            // Under the material-use lock and its deleted-key recheck (#255 review).
-            val signature = withUsableGeneralKey(signParams.keyId) {
+            // Under the material-use lock and its deleted-key recheck, reserved on the prompt's turn (#255 review).
+            val signature = withSignerKeyUse(signParams.keyId, promptSigner) { cryptoObjectSigner ->
                 if (signingKey != null) {
                     signingKey.sign(data, jcaAlgorithm, cryptoObjectSigner)
                 } else {
@@ -2311,6 +2314,31 @@ class RequestHandler(
             throw ProtocolException("Key $keyId names a credential, not a general key", errorCode = ErrorCodes.OPERATION_DENIED)
         }
         return keyPolicyStore.withKeyUseOnTurn(keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL, prompt)
+    }
+
+    /**
+     * The key use of a signature that may go through a CryptoObject prompt
+     * (#255 review at 9b6c00f5): with no [promptSigner] it is
+     * [withUsableGeneralKey]'s use; with one, [sign] gets the signer that
+     * [promptSigner] makes around [withGeneralKeyUseOnTurn]'s `reserve`, so
+     * the use is reserved only once the prompt's turn has come and nothing
+     * of the key is held while the prompt waits for the queue. A signature
+     * made without that prompt, so with no use reserved, is refused.
+     */
+    private suspend fun <T> withSignerKeyUse(
+        keyId: String,
+        promptSigner: ((reserve: suspend () -> Unit) -> com.automatethethings.xkey.crypto.CryptoObjectSigner)?,
+        sign: suspend (com.automatethethings.xkey.crypto.CryptoObjectSigner?) -> T
+    ): T {
+        if (promptSigner == null) return withUsableGeneralKey(keyId) { sign(null) }
+        return withGeneralKeyUseOnTurn(keyId) { reserve ->
+            val reserved = java.util.concurrent.atomic.AtomicBoolean(false)
+            val result = sign(promptSigner { reserve(); reserved.set(true) })
+            if (!reserved.get()) {
+                throw ProtocolException("Key $keyId changed while its approval waited", errorCode = ErrorCodes.OPERATION_DENIED)
+            }
+            result
+        }
     }
 
     /**

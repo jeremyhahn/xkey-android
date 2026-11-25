@@ -381,9 +381,14 @@ class LocalGenerateKeyMlDsaHandlerTest {
         val alias = KeystoreManager.generalKeyAlias("pq")
         val launcher = mockk<BiometricActivityLauncher>(relaxed = true)
         val boundSignature = ByteArray(MlDsaParameterSet.ML_DSA_65.signatureBytes) { 5 }
+        // The prompt makes what it signs on its own turn, as the real launcher does.
+        var promptSigned: ByteArray? = null
         coEvery {
-            launcher.requestCryptoSignature(any(), any(), any(), any(), any(), alias, "ML-DSA-65", any())
-        } returns boundSignature
+            launcher.requestCryptoSignatureOnTurn(any(), any(), any(), any(), any(), alias, any(), "ML-DSA-65")
+        } coAnswers {
+            promptSigned = arg<suspend () -> ByteArray>(1)()
+            boundSignature
+        }
         every { keystore.isPerOperationKey(alias) } returns true
         coEvery { keystore.signApprovedMlDsa(alias, spki, any(), MlDsaParameterSet.ML_DSA_65, any(), any()) } coAnswers {
             val signer = arg<CryptoObjectSigner?>(5) ?: throw BiometricRequiredException()
@@ -407,7 +412,11 @@ class LocalGenerateKeyMlDsaHandlerTest {
         assertArrayEquals(boundSignature, Base64.getDecoder().decode(result!!.getString("signature")))
         coVerify(exactly = 0) { launcher.requestAuthentication(any(), any(), any(), any(), any()) }
         coVerify(exactly = 1) {
-            launcher.requestCryptoSignature("pq", "to sign".toByteArray(), any(), any(), any(), alias, "ML-DSA-65", any())
+            launcher.requestCryptoSignatureOnTurn("pq", any(), any(), any(), any(), alias, any(), "ML-DSA-65")
+        }
+        assertArrayEquals("to sign".toByteArray(), promptSigned)
+        coVerify(exactly = 0) {
+            launcher.requestCryptoSignature(any(), any(), any(), any(), any(), any(), any(), any())
         }
     }
 

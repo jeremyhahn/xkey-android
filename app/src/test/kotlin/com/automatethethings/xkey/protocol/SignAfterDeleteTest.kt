@@ -170,7 +170,7 @@ class SignAfterDeleteTest {
                 """|requestCryptoSignature(OnTurn)?\(|approvals\.sign\(|SoftwareKeyOps\.(aesGcm\w*|hmac|sign\w*|ecdh\w*)\("""
         )
         // The gates: the use gate, and its prompt-ordered forms (#255 review r4).
-        val gates = listOf("withUsableKey(", "withUsableGeneralKey(", "withKeyUseOnTurn(", "withGeneralKeyUseOnTurn(", "withKeyUseInOneTurn(")
+        val gates = listOf("withUsableKey(", "withUsableGeneralKey(", "withKeyUseOnTurn(", "withGeneralKeyUseOnTurn(", "withKeyUseInOneTurn(", "withSignerKeyUse(")
         // CosignApprovalPrompts is the co-sign prompt itself: its caller's
         // `approvals.sign(` is swept here instead.
         val bypasses = File(root, "com/automatethethings/xkey/protocol").listFiles { f -> f.extension == "kt" && f.name != "CosignApprovalPrompts.kt" }!!
@@ -213,6 +213,14 @@ class SignAfterDeleteTest {
         val onTurn = handler.substringAfter("fun <T> withGeneralKeyUseOnTurn(").substringBefore("\n    }\n")
         assertTrue("withGeneralKeyUseOnTurn resolves the id's key", "ownedKeyKind(" in onTurn)
         assertTrue("withGeneralKeyUseOnTurn reserves on the turn", "keyPolicyStore.withKeyUseOnTurn(" in onTurn)
+        // A signer's prompt reserves through withGeneralKeyUseOnTurn; with no prompt the use is withUsableGeneralKey's.
+        val signerUse = handler.substringAfter("fun <T> withSignerKeyUse(").substringBefore("\n    }\n")
+        assertTrue("withSignerKeyUse reserves a prompt's use on its turn", "withGeneralKeyUseOnTurn(" in signerUse && "reserve()" in signerUse)
+        assertTrue("withSignerKeyUse runs a prompt-free use in the use gate", "withUsableGeneralKey(" in signerUse)
+        // local.sign's CryptoObject prompt reserves its use on its turn, never before it queues.
+        val localSign = handler.substringAfter("fun handleLocalSign(").substringBefore("\n    }\n")
+        assertTrue("local.sign's prompt reserves on its turn", "requestCryptoSignatureOnTurn(" in localSign && "reserve()" in localSign)
+        assertFalse("local.sign's prompt signs eagerly", "requestCryptoSignature(" in localSign)
         // The co-sign prompt hands its caller's reserve to the on-turn launcher call.
         val prompts = File(root, "com/automatethethings/xkey/protocol/CosignApprovalPrompts.kt").readText()
         val sign = prompts.substringAfter("suspend fun sign(").substringBefore("\n    }\n")
@@ -236,6 +244,10 @@ class SignAfterDeleteTest {
         )
         val inside = root.walkTopDown().filter { it.extension == "kt" }.flatMap { file ->
             val text = file.readText()
+            // A signer callback reaches a prompt indirectly (#255 review at 9b6c00f5): any CryptoObjectSigner, or a value that makes one.
+            val signerNames = Regex("""val (\w+)\s*(?::[^=\n]*)?=[^\n]*""").findAll(text)
+                .filter { "CryptoObjectSigner" in it.value }.map { Regex.escape(it.groupValues[1]) }.toList()
+            val signerCall = Regex((listOf("""CryptoObjectSigner""", """\bcryptoObjectSigner\b""") + signerNames.map { """\b$it\b""" }).joinToString("|"))
             Regex("""(withUsableKey|withUsableGeneralKey|withUsableSoftwareKey|withKeyMaterial)\([^)]*\)\s*\{""").findAll(text).mapNotNull { open ->
                 // The block's body, up to its matching brace.
                 var depth = 0
@@ -247,7 +259,7 @@ class SignAfterDeleteTest {
                     }
                 }
                 val body = text.substring(open.range.last, end)
-                if (prompting.containsMatchIn(body)) {
+                if (prompting.containsMatchIn(body) || signerCall.containsMatchIn(body)) {
                     "${file.name}:${text.substring(0, open.range.first).count { it == '\n' } + 1}"
                 } else null
             }
