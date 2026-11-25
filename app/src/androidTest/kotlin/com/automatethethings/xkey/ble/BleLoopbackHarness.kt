@@ -184,6 +184,7 @@ class BleLoopbackHarness(
             "authenticatedPeerKeyHex",
             responder.getRemoteStaticKey()?.toHex()
         )
+        writeField(server, "establishedSession", responder)
     }
 
     /** The static key the responder authenticated for this peer. */

@@ -130,11 +130,15 @@ class GattServerOutboundProbe(val server: GattServer) {
     }
 
     suspend fun sendRequestAndWaitForResponse(method: String, params: JSONObject): JSONObject =
-        callSuspend(sendRequestMethod, method, params) as JSONObject
+        callSuspend(sendRequestMethod, currentSession(), method, params) as JSONObject
 
     suspend fun performPostPairingEnrollment(publicKeyHex: String, deviceName: String) {
-        callSuspend(enrollmentMethod, publicKeyHex, deviceName)
+        callSuspend(enrollmentMethod, publicKeyHex, deviceName, currentSession())
     }
+
+    // The server's live session, which its own callers pass to these seams.
+    private fun currentSession(): NoiseSession =
+        noiseSession ?: throw AssertionError("establish a session before driving the outbound path")
 
     /**
      * Refuses an enrollment exactly as a verification step in the ceremony does.
@@ -196,7 +200,7 @@ class GattServerOutboundProbe(val server: GattServer) {
         callSuspend(interceptOrRouteMethod, plaintext) as ByteArray?
 
     suspend fun handlePairingConfirmIfNeeded(plaintext: ByteArray): ByteArray? =
-        callSuspend(pairingConfirmMethod, plaintext) as ByteArray?
+        callSuspend(pairingConfirmMethod, plaintext, noiseSession) as ByteArray?
 
     // -----------------------------------------------------------------
     // Reflection plumbing
@@ -244,6 +248,7 @@ class GattServerOutboundProbe(val server: GattServer) {
         )
         private val sendRequestMethod = declaredMethod(
             "sendRequestAndWaitForResponse",
+            NoiseSession::class.java,
             String::class.java,
             JSONObject::class.java,
             Continuation::class.java
@@ -252,6 +257,7 @@ class GattServerOutboundProbe(val server: GattServer) {
             "performPostPairingEnrollment",
             String::class.java,
             String::class.java,
+            NoiseSession::class.java,
             Continuation::class.java
         )
         private val refuseMethod = declaredMethod(
@@ -294,7 +300,10 @@ class GattServerOutboundProbe(val server: GattServer) {
             "interceptOrRoute", ByteArray::class.java, Continuation::class.java
         )
         private val pairingConfirmMethod = declaredMethod(
-            "handlePairingConfirmIfNeeded", ByteArray::class.java, Continuation::class.java
+            "handlePairingConfirmIfNeeded",
+            ByteArray::class.java,
+            NoiseSession::class.java,
+            Continuation::class.java
         )
 
         private fun declaredMethod(name: String, vararg types: Class<*>): Method = try {
