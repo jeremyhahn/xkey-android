@@ -20,6 +20,7 @@ import com.automatethethings.xkey.password.PasswordRecord
 import com.automatethethings.xkey.password.PasswordRepository
 import com.automatethethings.xkey.password.PasswordStoreLockedException
 import com.automatethethings.xkey.password.PasswordVault
+import com.automatethethings.xkey.pin.FakeLockoutClock
 import com.automatethethings.xkey.password.PasswordVaultCredential
 import com.automatethethings.xkey.password.PasswordVaultFactorRecord
 import com.automatethethings.xkey.password.PasswordVaultFactorStore
@@ -213,7 +214,7 @@ class PasswordSyncTest {
                 update(salt)
                 digest(phrase.toByteArray(Charsets.UTF_8))
             }
-        })
+        }, clock = FakeLockoutClock())
         sync = PasswordSync(repository, factors, clock = { now })
         mockkStatic(Log::class)
         every { Log.w(any<String>(), any<String>()) } returns 0

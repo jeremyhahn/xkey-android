@@ -70,7 +70,7 @@ class SyncEngineMergeOathTest {
     fun setUp() {
         dao = mockk<OathCredentialDao>()
         coEvery { dao.getByOathId(any()) } answers { rows[firstArg()] }
-        coEvery { dao.deleteByOathId(any()) } answers { rows.remove(firstArg<String>()) }
+        coEvery { dao.deleteByOathId(any()) } answers { if (rows.remove(firstArg<String>()) != null) 1 else 0 }
         coEvery { dao.recordDeletion(any(), any()) } answers { deleted += firstArg<String>() }
         coEvery { dao.isDeleted(any()) } answers { firstArg<String>() in deleted }
         // The DAO's transactions, as their bodies leave the table (a mock does not run interface bodies).
@@ -81,8 +81,7 @@ class SyncEngineMergeOathTest {
         }
         coEvery { dao.deleteAndRecordDeletion(any(), any()) } answers {
             deleted += firstArg<String>()
-            rows.remove(firstArg<String>())
-            Unit
+            if (rows.remove(firstArg<String>()) != null) 1 else 0
         }
         coEvery { dao.insertIfAbsent(any()) } answers { insertIfAbsent(firstArg()) }
         coEvery { dao.insertIfAbsentUnlessDeleted(any()) } answers {
@@ -129,8 +128,12 @@ class SyncEngineMergeOathTest {
         mockkStatic(Log::class)
         every { Log.w(any(), any<String>()) } returns 0
 
+        // Every add, a synced one included, writes a created row from the
+        // repository; the logger is not initialized on the JVM.
         mockkObject(AuditLogger)
+        every { AuditLogger.logOathCredentialCreated(any(), any(), any(), any(), any(), any()) } returns Unit
         every { AuditLogger.logOathSyncConflict(any()) } returns Unit
+        every { AuditLogger.logOathCredentialDeleted(any(), any(), any(), any(), any()) } returns Unit
 
         engine = SyncEngine(mockk<Context>())
     }
@@ -237,6 +240,7 @@ class SyncEngineMergeOathTest {
         assertEquals(1, inserted.size)
         assertNull(inserted[0].issuer)
         assertEquals("host:user", inserted[0].accountName)
+        verify(exactly = 1) { AuditLogger.logOathCredentialCreated(any(), null, "host:user", "TOTP", any(), any()) }
     }
 
     @Test

@@ -68,7 +68,8 @@ class DesktopBackupDialogs(
                 )
             ) { _, which -> if (which == 0) showCreate() else pickLatestAndRestore() }
             .setNegativeButton(R.string.button_cancel, null)
-            .show()
+            .create()
+            .let { SecureScreens.show(it) }
     }
 
     private fun showCreate() {
@@ -120,7 +121,7 @@ class DesktopBackupDialogs(
                 }
             }
         }
-        dialog.show()
+        SecureScreens.show(dialog)
     }
 
     /**
@@ -185,7 +186,7 @@ class DesktopBackupDialogs(
                 }
             }
         }
-        dialog.show()
+        SecureScreens.show(dialog)
     }
 
     private fun showRestoreResult(result: RemoteBackupClient.RestoreResult) {
@@ -211,7 +212,8 @@ class DesktopBackupDialogs(
             )
             .setMessage(lines.joinToString("\n"))
             .setPositiveButton(R.string.button_ok, null)
-            .show()
+            .create()
+            .let { SecureScreens.show(it) }
     }
 
     /**

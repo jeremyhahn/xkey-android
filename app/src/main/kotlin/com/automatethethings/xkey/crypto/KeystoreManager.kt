@@ -123,6 +123,14 @@ class RowPublicKey(val der: ByteArray?, val cose: ByteArray?) {
     val isEmpty: Boolean get() = der == null && cose == null
 }
 
+/**
+ * Removing a key's material failed: a Keystore entry that could not be
+ * deleted, a software key store that could not be read, or a removal that did
+ * not reach disk. The material may still be there, so a caller keeps the
+ * key's metadata and reports an error, never "deleted" or "no such key".
+ */
+class KeyDeletionException(message: String, cause: Throwable? = null) : Exception(message, cause)
+
 /** A MAC and the algorithm that computed it ("HMAC-SHA256" or "HMAC-SHA512"). */
 class HmacResult(val mac: ByteArray, val algorithm: String)
 
@@ -1250,6 +1258,9 @@ class KeystoreManager(
             .putString(alias, Base64.encodeToString(keyPair.private.encoded, Base64.NO_WRAP))
             .commit()
         if (!stored) throw KeyGenerationException("Could not store the Ed25519 key $alias")
+        // A new key under the alias replaces any removal of an older one that
+        // did not commit: retrying that removal would delete the new key.
+        uncommittedSoftwareRemovals.remove(alias)
 
         return keyPair
     }
@@ -1272,6 +1283,144 @@ class KeystoreManager(
         val keyBytes = Base64.decode(encoded, Base64.NO_WRAP)
         val keyFactory = KeyFactory.getInstance("Ed25519")
         return keyFactory.generatePrivate(PKCS8EncodedKeySpec(keyBytes))
+    }
+
+    /**
+     * The one read of whether a software Ed25519 key is stored under [alias].
+     *
+     * SharedPreferences drops a removed key from its in-memory map before it
+     * writes to disk, and keeps it dropped when the write fails, so after a
+     * removal that is in flight or did not commit the cache says "absent"
+     * while the key is still on disk. Such an alias is in
+     * [uncommittedSoftwareRemovals] from before its commit starts and
+     * reads as present here until a retry of its removal reaches disk
+     * ([removalStillUncommitted], [removeSoftwareEd25519Key]).
+     *
+     * @param strict throw [KeyDeletionException] when the store cannot be
+     *   opened or read; otherwise an unreadable store answers "no key", which
+     *   is safe for a lookup but never for a caller that drops a row on it.
+     */
+    private fun softwareEd25519KeyStored(alias: String, strict: Boolean): Boolean {
+        if (!softwareEd25519Supported()) return false
+        if (alias in uncommittedSoftwareRemovals) return true
+        return try {
+            ed25519Prefs()?.contains(alias) == true
+        } catch (e: Exception) {
+            if (strict) throw KeyDeletionException("The software key store could not be read", e)
+            false
+        }
+    }
+
+    /**
+     * Removes [alias] from the software Ed25519 store and commits. The alias
+     * is recorded in [uncommittedSoftwareRemovals] before the commit starts
+     * and cleared only once it reaches disk, so the key reads as present
+     * while the removal is in flight and after one that did not commit.
+     * Call it inside `withAliasGate(alias)`.
+     *
+     * @return true if the removal reached disk.
+     * @throws KeyDeletionException if the store cannot be opened, or the
+     *   removal throws.
+     */
+    private fun commitSoftwareRemovalLocked(alias: String): Boolean {
+        val prefs = try {
+            ed25519Prefs() ?: return true
+        } catch (e: Exception) {
+            throw KeyDeletionException("The software key store could not be read to delete $alias", e)
+        }
+        // Pending before the cache drops the key, so no read sees it absent before disk does.
+        uncommittedSoftwareRemovals.add(alias)
+        val committed = try {
+            prefs.edit().remove(alias).commit()
+        } catch (e: Exception) {
+            throw KeyDeletionException("Deleting software key $alias failed", e)
+        }
+        if (committed) uncommittedSoftwareRemovals.remove(alias)
+        return committed
+    }
+
+    /** True on API 33+, where Ed25519 keys are generated in software. */
+    internal fun softwareEd25519Supported(): Boolean =
+        sdkInt >= Build.VERSION_CODES.TIRAMISU
+
+    /**
+     * Retries the removal of [alias] if an earlier one did not commit.
+     *
+     * @return true while that removal still has not reached disk (the key is
+     *   present), false if none is pending or the retry committed.
+     * @throws KeyDeletionException if the store cannot be opened.
+     */
+    private fun removalStillUncommitted(alias: String): Boolean {
+        // Under the gate, so a removal in flight ends before this reads.
+        return withAliasGate(alias) {
+            alias in uncommittedSoftwareRemovals && !commitSoftwareRemovalLocked(alias)
+        }
+    }
+
+    /**
+     * Removes the software Ed25519 key stored under [alias], if any. Call it
+     * inside `withAliasGate(alias)`.
+     *
+     * @return true if a key was stored and its removal committed, false if
+     *   none is stored (or the device keeps no software Ed25519 keys). An
+     *   earlier removal that did not commit counts as stored: it is retried.
+     * @throws KeyDeletionException if the store cannot be opened or read, so
+     *   a key may be in it, or the removal does not commit: the key is still
+     *   on disk, and that is never "no key".
+     */
+    private fun removeSoftwareEd25519Key(alias: String): Boolean {
+        if (!softwareEd25519KeyStored(alias, strict = true)) return false
+        if (!commitSoftwareRemovalLocked(alias)) {
+            throw KeyDeletionException("Deleting software key $alias did not reach disk")
+        }
+        return true
+    }
+
+    /**
+     * Throws [KeyDeletionException] if the software Ed25519 key store cannot
+     * be opened: a delete that found no key must not report the key absent
+     * when the store it would be in was unreadable.
+     */
+    private fun requireSoftwareKeyStoreReadable() {
+        if (!softwareEd25519Supported()) return
+        try {
+            ed25519Prefs()
+        } catch (e: Exception) {
+            throw KeyDeletionException("The software key store could not be read", e)
+        }
+    }
+
+    /**
+     * Removes the Keystore entry, the software ML-DSA record and the software
+     * Ed25519 key under [alias]. Call it inside `withAliasGate(alias)`, so the
+     * existence checks and the removals are one step against any other delete
+     * of the alias.
+     *
+     * The one choke point of every [KeystoreManager] key delete: a removal
+     * that fails throws, so no caller reads it as an absent key and drops the
+     * key's metadata while its material stays.
+     *
+     * @return true if any of them existed and was removed, false if none existed.
+     * @throws KeyDeletionException if the Keystore entry cannot be checked or
+     *   deleted, the software ML-DSA record cannot be removed or revoked, or
+     *   the software key cannot be removed.
+     */
+    private fun removeAliasLocked(alias: String): Boolean {
+        val inKeystore = try {
+            // The gate is reentrant: callers already hold it, this keeps the delete gated on its own.
+            withAliasGate(alias) { keyStore.containsAlias(alias).also { if (it) keyStore.deleteEntry(alias) } }
+        } catch (e: Exception) {
+            throw KeyDeletionException("Keystore entry $alias could not be deleted", e)
+        }
+        // A general alias may hold a software ML-DSA record instead of a
+        // Keystore entry; no other alias form does (resolveKeystoreAlias).
+        val inPqc = try {
+            alias.startsWith(KEY_ALIAS_PREFIX_GENERAL) && pqcStore.delete(alias)
+        } catch (e: Exception) {
+            throw KeyDeletionException("ML-DSA key $alias could not be deleted", e)
+        }
+        val inSoftware = removeSoftwareEd25519Key(alias)
+        return inKeystore || inPqc || inSoftware
     }
 
     /**
@@ -2373,7 +2522,32 @@ class KeystoreManager(
      * on a read failure (#255 review r5).
      */
     internal fun hasSoftwareEd25519Key(alias: String): Boolean =
-        ed25519Read(alias) { ed25519Prefs()?.contains(alias) == true }
+        alias in uncommittedSoftwareRemovals || ed25519Read(alias) { ed25519Prefs()?.contains(alias) == true }
+
+    /**
+     * True only when no key material for [keyId] is stored in any backend
+     * ([holdsAnyKey]), counting a software Ed25519 removal that did not
+     * commit as present after one retry of it.
+     *
+     * @throws KeyPresenceUnreadableException or [KeyDeletionException] if a
+     *   store cannot be read, so presence is unknown: the caller must keep the row.
+     */
+    fun keyMaterialAbsent(keyId: String): Boolean {
+        val softwareAliases = listOfNotNull(
+            KEY_ALIAS_PREFIX_GENERAL + keyId,
+            keyId.takeUnless { it.startsWith(PIV_KEYSTORE_ALIAS_PREFIX) }
+        )
+        // A removal that did not commit left the key on disk though the
+        // store's cache no longer lists it: retry it, and until it reaches
+        // disk the key is present.
+        if (softwareAliases.any { removalStillUncommitted(it) }) return false
+        // An unreadable backend throws KeyPresenceUnreadableException here: presence is unknown.
+        if (holdsAnyKey(keyId)) return false
+        // Ask the software store again under each alias's gate, failing loudly on an unreadable store.
+        return softwareAliases.none { alias ->
+            withAliasGate(alias) { softwareEd25519KeyStored(alias, strict = true) }
+        }
+    }
 
     /**
      * The one way an Ed25519 preference is read (#255 review round 2): the
@@ -2427,7 +2601,10 @@ class KeystoreManager(
         val prefs = ed25519Read(keyId) { ed25519Prefs() }
         for (alias in userKeyAliases(keyId)) {
             keystoreTag(alias)?.let { generation[KEYSTORE_ENTRY + alias] = it }
-            ed25519Read(alias) { prefs?.getString(alias, null) }?.let { generation[ED25519_ENTRY + alias] = digestHex(it.toByteArray()) }
+            val ed25519 = ed25519Read(alias) { prefs?.getString(alias, null) }
+            if (ed25519 != null) generation[ED25519_ENTRY + alias] = digestHex(ed25519.toByteArray())
+            // A removal that did not commit left the key on disk though the cache no longer lists it.
+            else if (alias in uncommittedSoftwareRemovals) generation[ED25519_ENTRY + alias] = UNCOMMITTED_REMOVAL_TAG
             pqcTag(alias)?.let { generation[PQC_ENTRY + alias] = it }
         }
         return generation
@@ -2477,7 +2654,9 @@ class KeystoreManager(
                     // writes the file again); replaced material is left.
                     val ours = stored == null || digestHex(stored.toByteArray()) == tag
                     if (alias in namespace && prefs != null && ours) {
-                        if (!prefs.edit().remove(alias).commit()) uncommitted[entry] = tag
+                        // Pending before the commit, so no read takes the key absent before disk does.
+                        uncommittedSoftwareRemovals.add(alias)
+                        if (prefs.edit().remove(alias).commit()) uncommittedSoftwareRemovals.remove(alias) else uncommitted[entry] = tag
                     }
                 }
                 entry.startsWith(PQC_ENTRY) -> {
@@ -2549,15 +2728,15 @@ class KeystoreManager(
      *
      * @param alias The Keystore alias to delete.
      * @return true if the key was deleted, false if it didn't exist.
+     * @throws KeyDeletionException if removing it failed: its material may
+     *   still be there.
      */
     fun deleteByAlias(alias: String): Boolean {
         // PIV slot keys are deleted through PivKeyManager with their row.
         if (alias.startsWith(PIV_KEYSTORE_ALIAS_PREFIX)) return false
         // The app's wrap keys seal other keys and are never a user's to delete.
         if (KeystoreAeadCipher.isInternalAlias(alias)) return false
-        if (!keyStore.containsAlias(alias)) return false
-        withAliasGate(alias) { keyStore.deleteEntry(alias) }
-        return true
+        return withAliasGate(alias) { removeAliasLocked(alias) }
     }
 
     /**
@@ -2647,19 +2826,14 @@ class KeystoreManager(
      *
      * @param keyId Key identifier.
      * @return true if the key was deleted, false if it did not exist.
+     * @throws KeyDeletionException if removing it failed: its material may
+     *   still be there.
      */
     fun deleteGeneralKey(keyId: String): Boolean {
         val alias = buildGeneralAlias(keyId)
-        val deleted = withAliasGate(alias) {
-            // A software ML-DSA record and a Keystore entry never share an
-            // alias; either one is the key, and both go.
-            val inKeystore = keyStore.containsAlias(alias)
-            if (inKeystore) withAliasGate(alias) { keyStore.deleteEntry(alias) }
-            pqcStore.delete(alias) || inKeystore
-        }
-        if (!deleted) {
-            return false
-        }
+        // A software ML-DSA record and a Keystore entry never share an
+        // alias; either one is the key, and removeAliasLocked removes both.
+        if (!withAliasGate(alias) { removeAliasLocked(alias) }) return false
 
         // Log key deletion
         AuditLogger.logKeyDeleted(
@@ -2678,13 +2852,12 @@ class KeystoreManager(
      *
      * @param credentialId Credential identifier.
      * @return true if the entry was deleted, false if it did not exist.
+     * @throws KeyDeletionException if removing it failed: its material may
+     *   still be there.
      */
     fun deleteCredentialKey(credentialId: String): Boolean {
         val alias = credentialAlias(credentialId)
-        if (!keyStore.containsAlias(alias)) {
-            return false
-        }
-        withAliasGate(alias) { keyStore.deleteEntry(alias) }
+        if (!withAliasGate(alias) { removeAliasLocked(alias) }) return false
 
         AuditLogger.logKeyDeleted(
             keyId = credentialId,
@@ -3022,6 +3195,19 @@ class KeystoreManager(
          * waits on its gate, so churned aliases leave nothing behind.
          */
         private val aliasGates = java.util.concurrent.ConcurrentHashMap<String, AliasGate>()
+
+        /**
+         * Software Ed25519 aliases whose removal did not reach disk. The
+         * SharedPreferences cache that already dropped them lives exactly as
+         * long as this process, so a process-scoped record covers exactly the
+         * window in which that cache can lie; after a restart the store is
+         * read from disk again, where the key still is.
+         */
+        private val uncommittedSoftwareRemovals: MutableSet<String> =
+            java.util.concurrent.ConcurrentHashMap.newKeySet()
+
+        /** The generation tag of a software Ed25519 key whose removal did not commit. */
+        private const val UNCOMMITTED_REMOVAL_TAG = "uncommitted-removal"
 
         /**
          * Runs [block] holding the process-wide gate for Keystore [alias].

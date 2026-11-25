@@ -1,0 +1,182 @@
+/*
+ * Copyright (c) 2025 Jeremy Hahn
+ * Copyright (c) 2025 Automate The Things, LLC
+ *
+ * This file is part of xKey.
+ *
+ * xKey is dual-licensed:
+ *
+ * 1. GNU Affero General Public License v3.0 (AGPL-3.0)
+ *    See LICENSE file or visit https://www.gnu.org/licenses/agpl-3.0.html
+ *
+ * 2. Commercial License
+ *    Contact licensing@automatethethings.com for commercial licensing options.
+ */
+
+package com.automatethethings.xkey.storage
+
+import android.content.Context
+import android.content.SharedPreferences
+import android.util.Log
+import com.automatethethings.xkey.crypto.FakeSharedPreferences
+import com.automatethethings.xkey.crypto.KeyDeletionException
+import com.automatethethings.xkey.crypto.KeystoreManager
+import com.automatethethings.xkey.crypto.PausedRemoval
+import com.automatethethings.xkey.crypto.noPqcKeys
+import com.automatethethings.xkey.storage.dao.CredentialMetadataDao
+import com.automatethethings.xkey.storage.dao.KeyDao
+import com.automatethethings.xkey.storage.entity.KeyEntity
+import io.mockk.coEvery
+import io.mockk.coVerify
+import io.mockk.every
+import io.mockk.mockk
+import io.mockk.mockkStatic
+import io.mockk.spyk
+import io.mockk.unmockkAll
+import io.mockk.verify
+import java.security.KeyStore
+import java.util.Collections
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
+import kotlin.concurrent.thread
+import kotlinx.coroutines.runBlocking
+import org.junit.After
+import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
+import org.junit.Before
+import org.junit.Test
+
+/**
+ * A software key store that cannot be read says nothing about whether a key
+ * is in it. The sync removes a key row only when the key is definitely
+ * absent, so an unreadable store keeps every row it could hold, and the
+ * failure is logged as an error instead of passing as a stale entry.
+ */
+class KeyStoreSyncManagerStaleEntryTest {
+
+    private lateinit var keyStore: KeyStore
+
+    @Before
+    fun setUp() {
+        mockkStatic(Log::class)
+        every { Log.d(any(), any<String>()) } returns 0
+        every { Log.w(any(), any<String>()) } returns 0
+        every { Log.w(any(), any<String>(), any()) } returns 0
+        every { Log.e(any(), any<String>()) } returns 0
+        every { Log.e(any(), any<String>(), any()) } returns 0
+        keyStore = mockk(relaxed = true)
+        every { keyStore.containsAlias(any()) } returns false
+        every { keyStore.aliases() } answers { Collections.emptyEnumeration() }
+        mockkStatic(KeyStore::class)
+        every { KeyStore.getInstance("AndroidKeyStore") } returns keyStore
+    }
+
+    @After
+    fun tearDown() {
+        unmockkAll()
+    }
+
+    @Test
+    fun `sync keeps a key row while the software key store cannot be read`() = runBlocking<Unit> {
+        val manager = spyk(KeystoreManager(mockk<Context>(relaxed = true), pqcStore = noPqcKeys()))
+        every { manager.softwareEd25519Supported() } returns true
+        every { manager.ed25519Prefs() } throws IllegalStateException("master key unreadable")
+        val credentialDao = mockk<CredentialMetadataDao>(relaxed = true)
+        coEvery { credentialDao.getAll() } returns emptyList()
+        val keyDao = mockk<KeyDao>(relaxed = true)
+        val key = mockk<KeyEntity>(relaxed = true)
+        every { key.keyId } returns "ed"
+        every { key.source } returns "local"
+        coEvery { keyDao.getAll() } returns listOf(key)
+
+        KeyStoreSyncManager(manager, credentialDao, keyDao, mockk(relaxed = true)).syncAll()
+
+        coVerify(exactly = 0) { keyDao.deleteByKeyId(any()) }
+        verify { Log.e(any(), match<String> { "ed" in it }, any()) }
+    }
+
+    @Test
+    fun `sync still removes the row of a key absent from a readable store`() = runBlocking<Unit> {
+        val prefs = mockk<SharedPreferences>()
+        every { prefs.contains(any()) } returns false
+        val manager = spyk(KeystoreManager(mockk<Context>(relaxed = true), pqcStore = noPqcKeys()))
+        every { manager.softwareEd25519Supported() } returns true
+        every { manager.ed25519Prefs() } returns prefs
+        val credentialDao = mockk<CredentialMetadataDao>(relaxed = true)
+        coEvery { credentialDao.getAll() } returns emptyList()
+        val keyDao = mockk<KeyDao>(relaxed = true)
+        val key = mockk<KeyEntity>(relaxed = true)
+        every { key.keyId } returns "gone"
+        every { key.source } returns "local"
+        coEvery { keyDao.getAll() } returns listOf(key)
+
+        KeyStoreSyncManager(manager, credentialDao, keyDao, mockk(relaxed = true)).syncAll()
+
+        coVerify { keyDao.deleteByKeyId("gone") }
+    }
+
+    @Test
+    fun `sync keeps a key row whose key removal did not commit`() = runBlocking<Unit> {
+        // Like Android's, the fake drops the key from its in-memory map even
+        // though the write to disk fails, so the cache alone reads it absent.
+        val prefs = FakeSharedPreferences(mapOf("xkey_key_edsync" to "secret"))
+        prefs.diskFails = true
+        val manager = spyk(KeystoreManager(mockk<Context>(relaxed = true), pqcStore = noPqcKeys()))
+        every { manager.softwareEd25519Supported() } returns true
+        every { manager.ed25519Prefs() } returns prefs
+        assertThrows(KeyDeletionException::class.java) { manager.deleteByAlias("xkey_key_edsync") }
+        val credentialDao = mockk<CredentialMetadataDao>(relaxed = true)
+        coEvery { credentialDao.getAll() } returns emptyList()
+        val keyDao = mockk<KeyDao>(relaxed = true)
+        val key = mockk<KeyEntity>(relaxed = true)
+        every { key.keyId } returns "edsync"
+        every { key.source } returns "local"
+        coEvery { keyDao.getAll() } returns listOf(key)
+
+        KeyStoreSyncManager(manager, credentialDao, keyDao, mockk(relaxed = true)).syncAll()
+
+        coVerify(exactly = 0) { keyDao.deleteByKeyId(any()) }
+        assertTrue("the key is still on disk", "xkey_key_edsync" in prefs.disk)
+    }
+
+    @Test
+    fun `sync overlapping a removal whose commit then fails keeps the key row`() {
+        val prefs = FakeSharedPreferences(mapOf("xkey_key_edrace" to "secret"))
+        val manager = spyk(KeystoreManager(mockk<Context>(relaxed = true), pqcStore = noPqcKeys()))
+        every { manager.softwareEd25519Supported() } returns true
+        every { manager.ed25519Prefs() } returns prefs
+        val credentialDao = mockk<CredentialMetadataDao>(relaxed = true)
+        coEvery { credentialDao.getAll() } returns emptyList()
+        val keyDao = mockk<KeyDao>(relaxed = true)
+        val key = mockk<KeyEntity>(relaxed = true)
+        every { key.keyId } returns "edrace"
+        every { key.source } returns "local"
+        coEvery { keyDao.getAll() } returns listOf(key)
+        // The probe's thread, published as it enters, and whether it returned.
+        val probeThread = AtomicReference<Thread>()
+        val probeDone = CountDownLatch(1)
+        every { manager.holdsAnyKey("edrace") } answers {
+            probeThread.set(Thread.currentThread())
+            try {
+                callOriginal()
+            } finally {
+                probeDone.countDown()
+            }
+        }
+
+        val removal = PausedRemoval.start(prefs) { manager.deleteByAlias("xkey_key_edrace") }
+        val sync = thread { runBlocking { KeyStoreSyncManager(manager, credentialDao, keyDao, mockk(relaxed = true)).syncAll() } }
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
+        while (probeDone.count > 0L && probeThread.get()?.state != Thread.State.WAITING) {
+            check(System.nanoTime() < deadline) { "the sync never probed the key" }
+            Thread.sleep(5)
+        }
+        removal.failCommit()
+        sync.join(10_000)
+
+        assertTrue("the removal did not commit", removal.result.isFailure)
+        coVerify(exactly = 0) { keyDao.deleteByKeyId(any()) }
+        assertTrue("the key is still on disk", "xkey_key_edrace" in prefs.disk)
+    }
+}

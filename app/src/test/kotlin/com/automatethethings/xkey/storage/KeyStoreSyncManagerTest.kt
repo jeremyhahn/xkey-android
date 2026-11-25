@@ -123,6 +123,25 @@ class KeyStoreSyncManagerTest {
     }
 
     @Test
+    fun `a row whose key store cannot be read is kept and the sweep goes on`() = runTest {
+        val unreadable = mockk<KeyEntity>(relaxed = true)
+        every { unreadable.keyId } returns "unreadable-1"
+        every { unreadable.source } returns "local"
+        val gone = mockk<KeyEntity>(relaxed = true)
+        every { gone.keyId } returns "gone-1"
+        every { gone.source } returns "local"
+        coEvery { keyDao.getAll() } returns listOf(unreadable, gone)
+        every { keystoreManager.holdsAnyKey("unreadable-1") } throws
+            com.automatethethings.xkey.crypto.KeyPresenceUnreadableException("xkey_key_unreadable-1", null)
+        every { keystoreManager.holdsAnyKey("gone-1") } returns false
+
+        KeyStoreSyncManager(keystoreManager, credentialDao, keyDao, tables.store()).syncAll()
+
+        coVerify(exactly = 0) { keyDao.deleteByKeyId("unreadable-1") }
+        coVerify { keyDao.deleteByKeyId("gone-1") }
+    }
+
+    @Test
     fun `a general key whose logical id starts with the PIV prefix is kept`() = runTest {
         val generalId = "xkey_piv_example"
         val listed = mockk<KeyEntity>(relaxed = true)

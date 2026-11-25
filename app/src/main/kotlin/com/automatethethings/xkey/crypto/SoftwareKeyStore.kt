@@ -446,7 +446,12 @@ class SoftwareKeyStore(
     /**
      * Delete a software key by id: its record under its digest name, and
      * every older build's record naming it that could not be migrated
-     * (#255 review r9), each through [deleteRecord].
+     * (#255 review r9), each through [deleteRecord]. A key that is not
+     * stored deletes quietly.
+     *
+     * @throws KeyDeletionException if a material file is still there, or
+     *   cannot be read, afterwards: the key was not deleted, and no caller
+     *   may report it so.
      */
     fun delete(keyId: String) {
         migrateLegacyRecords()
@@ -456,7 +461,11 @@ class SoftwareKeyStore(
         } catch (e: KeyPresenceUnreadableException) {
             emptySet()
         }
-        for (stem in listOf(own) + legacy.sorted()) deleteRecord(stem)
+        val stems = listOf(own) + legacy.sorted()
+        for (stem in stems) deleteRecord(stem)
+        if (stems.any { filePresence(File(dir, "$it.key")) != KeyPresence.ABSENT }) {
+            throw KeyDeletionException("Software key material could not be deleted")
+        }
     }
 
     /**

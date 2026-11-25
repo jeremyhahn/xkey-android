@@ -14,6 +14,8 @@
  */
 package com.automatethethings.xkey.crypto
 
+import android.os.Build
+import androidx.annotation.VisibleForTesting
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
 import androidx.core.content.ContextCompat
@@ -146,6 +148,8 @@ class BiometricHelper(
      * @param subtitle Subtitle providing context.
      * @param description Optional additional description.
      * @param onTurn As for [authenticate].
+     * @param allowDeviceCredential Whether the screen lock (PIN, pattern,
+     *   password) is accepted in place of a biometric.
      * @throws UserCancelledException if the user cancels authentication.
      * @throws BiometricLockoutException if too many failed attempts occurred.
      * @throws BiometricException for other authentication errors.
@@ -154,8 +158,11 @@ class BiometricHelper(
         title: String = DEFAULT_TITLE,
         subtitle: String = DEFAULT_SUBTITLE,
         description: String? = null,
-        onTurn: (key: String) -> Unit = {}
-    ) = inTurn(onTurn) { prompt(title, subtitle, description, cryptoObject = null) }
+        onTurn: (key: String) -> Unit = {},
+        allowDeviceCredential: Boolean = false
+    ) = inTurn(onTurn) {
+        prompt(title, subtitle, description, cryptoObject = null, allowDeviceCredential = allowDeviceCredential)
+    }
 
     /**
      * Runs [prompt] on a queue turn of its own, after [onTurn]; inside a turn
@@ -184,7 +191,8 @@ class BiometricHelper(
         title: String,
         subtitle: String,
         description: String?,
-        cryptoObject: BiometricPrompt.CryptoObject?
+        cryptoObject: BiometricPrompt.CryptoObject?,
+        allowDeviceCredential: Boolean = false
     ): Unit = suspendCancellableCoroutine { continuation ->
         val callback = object : BiometricPrompt.AuthenticationCallback() {
             override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
@@ -210,9 +218,14 @@ class BiometricHelper(
         val promptInfoBuilder = BiometricPrompt.PromptInfo.Builder()
             .setTitle(title)
             .setSubtitle(subtitle)
-            .setNegativeButtonText(NEGATIVE_BUTTON_TEXT)
-            .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
             .setConfirmationRequired(true)
+        val allowCredential = allowDeviceCredential && cryptoObject == null
+        promptInfoBuilder.setAllowedAuthenticators(promptAuthenticators(allowCredential))
+        if (!allowCredential) {
+            // The screen lock draws its own cancel, so a negative button is
+            // set only when the screen lock is not accepted.
+            promptInfoBuilder.setNegativeButtonText(NEGATIVE_BUTTON_TEXT)
+        }
 
         if (description != null) {
             promptInfoBuilder.setDescription(description)
@@ -320,6 +333,20 @@ class BiometricHelper(
         private const val DEFAULT_TITLE = "xKey Authentication"
         private const val DEFAULT_SUBTITLE = "Verify your identity"
         private const val NEGATIVE_BUTTON_TEXT = "Cancel"
+
+        /** The authenticators of a prompt; BIOMETRIC_STRONG | DEVICE_CREDENTIAL is refused by PromptInfo before API 30. */
+        @VisibleForTesting
+        internal fun promptAuthenticators(allowDeviceCredential: Boolean, sdkInt: Int = Build.VERSION.SDK_INT): Int =
+            when {
+                !allowDeviceCredential -> BiometricManager.Authenticators.BIOMETRIC_STRONG
+                sdkInt >= Build.VERSION_CODES.R ->
+                    BiometricManager.Authenticators.BIOMETRIC_STRONG or
+                        BiometricManager.Authenticators.DEVICE_CREDENTIAL
+                // Android 9 and 10 accept the screen lock only beside BIOMETRIC_WEAK.
+                else ->
+                    BiometricManager.Authenticators.BIOMETRIC_WEAK or
+                        BiometricManager.Authenticators.DEVICE_CREDENTIAL
+            }
     }
 }
 

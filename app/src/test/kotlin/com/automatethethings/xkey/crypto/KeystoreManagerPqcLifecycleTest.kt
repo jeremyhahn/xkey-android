@@ -103,7 +103,10 @@ class KeystoreManagerPqcLifecycleTest {
 
         defaultClock = PqcSoftwareKeyStore.clock
         PqcSoftwareKeyStore.clock = { now }
-        manager = KeystoreManager(context, sdkInt = 34, pqcStore = store)
+        // API 34 generates Ed25519 keys in software; an unreadable software key
+        // store fails every delete and absence check, so this one is readable.
+        manager = io.mockk.spyk(KeystoreManager(context, sdkInt = 34, pqcStore = store))
+        every { manager.ed25519Prefs() } returns FakeSharedPreferences()
     }
 
     @After

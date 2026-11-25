@@ -159,6 +159,8 @@
     <string name="key_badge_system">System</string>
     <string name="key_badge_shared">Shared</string>
     <string name="key_deleted">Key deleted</string>
+    <string name="key_delete_failed">The key could not be deleted. It is still on this device.</string>
+    <string name="ca_reset_failed">The CA could not be reset. Its keys may still be on this device.</string>
 
     <!-- Key Context Menu -->
     <string name="key_menu_share_settings">Share Settings</string>
@@ -218,7 +220,6 @@
     <string name="key_public_key_copied">Public key copied to clipboard</string>
     <string name="key_public_key_unavailable">Public key not available</string>
     <string name="key_store_unreadable">The key store cannot be read. Nothing was changed.</string>
-    <string name="key_delete_failed">The key could not be deleted</string>
     <string name="key_delete_pending">An earlier delete of this key is not finished; try again</string>
     <string name="cosign_owner_key_unavailable">Your signing key\'s public key cannot be read. No co-sign request was made.</string>
 
@@ -638,6 +639,8 @@
     <string name="audit_delete_older_confirm">Delete all audit log entries older than 30 days? This cannot be undone.</string>
     <string name="audit_logs_cleared">All audit logs cleared</string>
     <string name="audit_old_logs_deleted">Old audit logs deleted (%1$d removed)</string>
+    <string name="audit_delete_auth_subtitle">Confirm it is you before deleting audit history</string>
+    <string name="audit_delete_not_authenticated">Not confirmed; nothing was deleted</string>
     <string name="audit_log_card_description">View security event history</string>
 
     <!-- Passkeys -->
@@ -967,6 +970,7 @@
     <string name="oath_field_digits">Digits</string>
     <string name="oath_field_period">Period (seconds)</string>
     <string name="oath_code_copied">Code copied to clipboard</string>
+    <string name="oath_code_copy_failed">Could not generate a code to copy</string>
     <string name="oath_code_unavailable">No code is available for this account</string>
     <string name="oath_delete_confirm">Delete this credential?</string>
     <string name="oath_delete_message">This will permanently remove the %s credential for %s.</string>
@@ -1146,6 +1150,8 @@
     <string name="audit_log_op_password_deleted">Password Deleted</string>
     <string name="audit_log_op_backup_created">Backup Stored</string>
     <string name="audit_log_op_backup_restored">Backup Restored</string>
+    <string name="audit_log_op_audit_log_cleared">Audit Log Cleared</string>
+    <string name="audit_log_op_audit_log_pruned">Old Audit Entries Deleted</string>
 
     <!-- PIV Smart Card -->
     <string name="piv_title">PIV Smart Card</string>
