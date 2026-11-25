@@ -4835,7 +4835,8 @@ class RequestHandler(
             }
             named
         } else {
-            db.keyDao().getAll().firstOrNull { it.keyType == KeyTypes.SIGNING }
+            // The newest signing key that has a JCA signature; an ML-DSA key cannot co-sign.
+            KeystoreManager.jcaSigningKeys(db.keyDao().getAll(), listOf(KeyTypes.SIGNING)).firstOrNull()
                 ?: return Response.error(request.id, ErrorCodes.KEY_NOT_FOUND, "No signing key available")
         }
 

@@ -29,6 +29,7 @@ import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.piv.PIV_KEYSTORE_ALIAS_PREFIX
+import com.automatethethings.xkey.storage.entity.KeyEntity
 import java.security.Key
 import java.security.KeyFactory
 import java.security.KeyPairGenerator
@@ -2511,6 +2512,18 @@ class KeystoreManager(
 
         /** True when a key of [algorithm] signs through [jcaSignatureAlgorithm]; ML-DSA keys do not. */
         fun hasJcaSignature(algorithm: String): Boolean = algorithm in JCA_SIGNATURE_ALGORITHMS
+
+        /**
+         * The keys among [keys] of a type in [keyTypes] that sign through a
+         * JCA signature, in [keys]' order: the one selection every co-signing
+         * key choice (automatic or picked) goes through, so an ML-DSA key is
+         * never chosen to co-sign.
+         */
+        fun jcaSigningKeys(
+            keys: List<KeyEntity>,
+            keyTypes: Collection<String>
+        ): List<KeyEntity> =
+            keys.filter { it.keyType in keyTypes && hasJcaSignature(it.algorithm) }
 
         private val JCA_SIGNATURE_ALGORITHMS = mapOf(
             "ES256" to SIG_ALGORITHM_ES256,

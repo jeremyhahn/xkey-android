@@ -823,10 +823,9 @@ class CoSignActivity : AppCompatActivity() {
         lifecycleScope.launch(Dispatchers.IO) {
             try {
                 val db = XKeyDatabase.getInstance(this@CoSignActivity)
-                val keys = db.keyDao().getAll().filter {
-                    !it.isSystemKey && it.keyType in listOf("signing", "fido2", "tls", "ssh") &&
-                        KeystoreManager.hasJcaSignature(it.algorithm)
-                }
+                val keys = KeystoreManager.jcaSigningKeys(
+                    db.keyDao().getAll(), listOf("signing", "fido2", "tls", "ssh")
+                ).filterNot { it.isSystemKey }
                 val keyIds = keys.map { it.keyId }
                 val keyTypes = keys.map { it.keyType }
                 val keyMaterials = keys.map { it.publicKeyDer }
