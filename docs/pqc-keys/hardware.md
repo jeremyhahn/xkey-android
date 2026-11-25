@@ -40,21 +40,21 @@ ML-DSA keys:
 
 `startProbe` runs once per process, on `Dispatchers.IO` in an
 application-lifetime scope that `onCreate` starts and never waits for. For
-each set it:
+each set, once in the TEE and once in StrongBox, it:
 
 1. generates a throwaway key under `xkey_pqc_probe_ml_dsa_44`,
    `xkey_pqc_probe_ml_dsa_65` or `xkey_pqc_probe_ml_dsa_87` (deleting a
-   leftover from a killed process first), in the TEE, with no user
-   authentication;
+   leftover from a killed process first), with no user authentication;
 2. checks that the public key is a SubjectPublicKeyInfo with the set's OID
    and size;
 3. reads the private key's `KeyInfo.securityLevel`
    (`isInsideSecureHardware` is not needed: the probe only runs on API 37+);
 4. deletes the key, in a `finally`, whatever happened.
 
-A set is supported only if its level is `SECURITY_LEVEL_TRUSTED_ENVIRONMENT`
-or `SECURITY_LEVEL_STRONGBOX`. Software, unknown, null and any exception
-make it unsupported; one failing set does not hide the others. The result
+A set is supported if either probe's level is `SECURITY_LEVEL_TRUSTED_ENVIRONMENT`
+or `SECURITY_LEVEL_STRONGBOX`, and the backend remembers which of the two
+locations came back in hardware. Software, unknown, null and any exception
+make that location unsupported; one failing set does not hide the others. The result
 is published once, in an `AtomicReference`.
 
 `supportedParameterSets()` never blocks: it returns the published set,
@@ -68,9 +68,13 @@ probe has finished.
 the probe did not report with `UnsupportedAlgorithmException`. Otherwise it
 deletes any entry under the alias, generates a `PURPOSE_SIGN` key with the
 EC keys' authentication rule (negative: none; zero: every use; positive:
-that many seconds, biometric strong), asks StrongBox first when preferred
-and falls back to the TEE on any StrongBox refusal, checks the returned
-SubjectPublicKeyInfo (OID and size), and returns its DER. It blocks on the
+that many seconds, biometric strong) in the locations the probe found the
+set in hardware only: StrongBox first when preferred or when it is the only
+one, then the TEE only if the TEE probed hardware. A key whose KeyInfo level
+is not TEE or StrongBox, or whose SubjectPublicKeyInfo is not the set's (OID
+and size), is deleted and the next location tried; when none is left it
+throws `KeyGenerationException` and leaves no key under the alias. It returns
+the kept key's SubjectPublicKeyInfo DER. It blocks on the
 Keystore, so callers run it off the main thread.
 
 ## Tests
