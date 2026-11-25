@@ -159,6 +159,9 @@ class KeyShareAuditTest {
 
         context = mockk(relaxed = true)
         every { context.filesDir } returns tmp.root
+        // The software ML-DSA store is built on the application context's files directory.
+        every { context.applicationContext } returns context
+        com.automatethethings.xkey.crypto.PqcSoftwareKeyStore.clearSharedForTest()
         every { context.getSystemService(Context.KEYGUARD_SERVICE) } returns
             mockk<KeyguardManager>(relaxed = true)
         every { context.getSystemService(NotificationManager::class.java) } returns
@@ -190,6 +193,7 @@ class KeyShareAuditTest {
     fun tearDown() {
         Dispatchers.resetMain()
         unmockkAll()
+        com.automatethethings.xkey.crypto.PqcSoftwareKeyStore.clearSharedForTest()
     }
 
     // -----------------------------------------------------------------
@@ -1602,7 +1606,10 @@ class KeyShareAuditTest {
             "getPublicKeyDER", "getPublicKeySSH", "getPublicKey", "getCOSEPublicKey", "getAttestationChain", "keySecurityLevel",
             "sign", "signWithoutBiometric", "keyExists", "deleteKey", "isKeyStrongBoxBacked"
         )) {
-            val starts = Regex("fun $fn\\(").findAll(manager).map { it.range.first }.toList()
+            // KeystoreManager's own functions: a fun interface's member (CryptoObjectSigner.sign) names no key.
+            val starts = Regex("fun $fn\\(").findAll(manager).map { it.range.first }
+                .filterNot { manager.lastIndexOf("fun interface ", it) > manager.lastIndexOf("class KeystoreManager", it) }
+                .toList()
             assertEquals("one $fn", 1, starts.size)
             val start = starts.single()
             val header = manager.substring(start, manager.indexOf(")", manager.indexOf("kind", start)) + 1)

@@ -205,7 +205,8 @@ class KeyStoreSyncManager(
         for (alias in keyStore.aliases()) {
             if (alias.startsWith(PIV_KEYSTORE_ALIAS_PREFIX)) continue
             if (alias.startsWith(EPHEMERAL_ALIAS_PREFIX)) continue
-            if (KeystoreAeadCipher.isInternalAlias(alias)) continue
+            // An internal wrap key is never listed as a key; a row an earlier sync listed is still marked protected.
+            val internal = KeystoreAeadCipher.isInternalAlias(alias)
             val (keyId, isFido2, isCA) = when {
                 alias in CA_ALIASES -> {
                     Triple(alias, false, true)
@@ -233,6 +234,7 @@ class KeyStoreSyncManager(
             if (keyId == alias && ownedByUserKey(keyId)) continue
 
             if (!keyDao.exists(keyId)) {
+                if (internal) continue
                 val entity = buildKeyEntityFromKeystore(keyStore, alias, keyId, isFido2, isCA)
                 if (entity != null && track(entity)) {
                     discovered++

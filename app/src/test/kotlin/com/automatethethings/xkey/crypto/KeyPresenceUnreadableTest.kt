@@ -213,10 +213,11 @@ class KeyPresenceUnreadableTest {
                 )
             }
         }
-        assertTrue(
-            "the Ed25519 probe refuses an unreadable store",
-            "throw KeyPresenceUnreadableException" in probes.single { it.first == "hasSoftwareEd25519Key" }.second
-        )
+        // The Ed25519 probe reads through ed25519Read, which turns a read failure into the refusal.
+        val read = body(source, source.indexOf("fun <T> ed25519Read("))
+        assertTrue("the Ed25519 probe reads through ed25519Read", "ed25519Read(" in probes.single { it.first == "hasSoftwareEd25519Key" }.second)
+        assertFalse("ed25519Read swallows a failure with runCatching", "runCatching" in read)
+        assertTrue("the Ed25519 probe refuses an unreadable store", "throw KeyPresenceUnreadableException" in read)
     }
 
     /** Puts a general key of [id] in [backend] alone. */
@@ -309,10 +310,10 @@ class KeyPresenceUnreadableTest {
 
     /** The text of the function starting at [start]: to its closing brace, or its expression's end. */
     private fun body(source: String, start: Int): String {
-        val next = source.indexOf("\n    fun ", start + 1).let { if (it < 0) source.length else it }
-        val nextInternal = source.indexOf("\n    internal fun ", start + 1).let { if (it < 0) source.length else it }
-        val nextPrivate = source.indexOf("\n    private fun ", start + 1).let { if (it < 0) source.length else it }
-        return source.substring(start, minOf(next, nextInternal, nextPrivate))
+        // The next declared function at any depth, so a companion function ends where it does.
+        val next = Regex("""\n[ \t]*(?:(?:private|internal|override|suspend|inline)[ \t]+)*fun """)
+            .find(source, start + 1)?.range?.first ?: source.length
+        return source.substring(start, next)
     }
 
     private fun assertRefuses(name: String, path: () -> Any?) {

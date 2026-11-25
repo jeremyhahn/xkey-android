@@ -299,7 +299,8 @@ class KeystoreManagerPqcLifecycleTest {
         assertTrue("the resolver keeps its raw-alias fallback", checks.isNotEmpty())
         for (check in checks) {
             val owner = function.findAll(source.substring(0, check.range.first)).last().groupValues[1]
-            assertEquals("raw-alias check at offset ${check.range.first}", "resolveKeystoreAlias", owner)
+            // rawAlias is the one raw-alias probe the presence checks share (#255).
+            assertTrue("raw-alias check at offset ${check.range.first} in $owner", owner in setOf("resolveKeystoreAlias", "rawAlias"))
         }
     }
 
