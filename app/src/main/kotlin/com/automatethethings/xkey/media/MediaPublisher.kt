@@ -24,6 +24,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentSender
 import android.content.pm.PackageManager
+import android.content.res.AssetFileDescriptor
 import android.net.Uri
 import android.os.Build
 import android.os.CancellationSignal
@@ -590,30 +591,31 @@ object MediaPublisher {
 
     /**
      * Copy [target]'s original bytes into [snapshot] with no lock held, in
-     * [READ_CHUNK] pieces, through an interruptible channel when the
-     * provider hands out a file. With a [cancel] signal the descriptor is
-     * opened with it, and its listener closes that channel, which ends a
-     * read the provider stalls. A screen's read always has one
+     * [READ_CHUNK] pieces. With a [cancel] signal the read is opened through
+     * [openContentRead], and its listener closes the descriptor, which ends a
+     * read the provider stalls; a whole file is read through an
+     * interruptible channel. A screen's read always has one
      * ([readCancellable]); a null [cancel] is a process-scoped read's.
      */
     private fun copyOriginal(context: Context, target: Uri, snapshot: File, cancel: CancellationSignal?) {
         checkCancelled(cancel)
         val original = originalUri(context, target) ?: throw OriginalUnavailableException(target)
-        val resolver = context.contentResolver
-        val input = try {
-            if (cancel == null) {
-                openOriginalUnchecked(context, target)
-            } else {
-                resolver.openFileDescriptor(original, "r", cancel)?.let { ParcelFileDescriptor.AutoCloseInputStream(it) }
-            }
+        val descriptor = try {
+            if (cancel == null) null else openContentRead(context.contentResolver, original, cancel)
         } catch (e: OperationCanceledException) {
             throw CancellationException("the read of $target was cancelled").apply { initCause(e) }
         } catch (e: InterruptedException) {
             throw CancellationException("the read of $target was interrupted").apply { initCause(e) }
-        } ?: throw IOException("cannot read $target")
+        }
+        val input = descriptor?.createInputStream() ?: openOriginalUnchecked(context, target)
         input.use {
-            val channel = (input as? FileInputStream)?.channel
-            if (channel != null) cancel?.setOnCancelListener { runCatching { channel.close() } }
+            // Only a whole file's channel is bounded by the document: a window's channel reads past its length.
+            val whole = descriptor != null && descriptor.startOffset == 0L &&
+                descriptor.declaredLength == AssetFileDescriptor.UNKNOWN_LENGTH
+            val channel = if (whole) (input as? FileInputStream)?.channel else null
+            if (descriptor != null) {
+                cancel?.setOnCancelListener { runCatching { channel?.close() ?: descriptor.close() } }
+            }
             try {
                 FileOutputStream(snapshot).use { out ->
                     if (channel != null) {
@@ -641,10 +643,26 @@ object MediaPublisher {
                     throw CancellationException("the read of $target was cancelled").apply { initCause(e) }
                 }
                 throw e
+            } catch (e: IOException) {
+                // A window's read fails once the cancel listener closes its descriptor.
+                if (cancel?.isCanceled == true) {
+                    throw CancellationException("the read of $target was cancelled").apply { initCause(e) }
+                }
+                throw e
             } finally {
-                if (channel != null) cancel?.setOnCancelListener(null)
+                if (descriptor != null) cancel?.setOnCancelListener(null)
             }
         }
+    }
+
+    /**
+     * The one cancellable open of user content for reading: an asset
+     * descriptor opened with [cancel], read through its createInputStream,
+     * which keeps the provider's start offset and declared length.
+     * openFileDescriptor refuses a bounded descriptor ("Not a whole file").
+     */
+    internal fun openContentRead(resolver: ContentResolver, uri: Uri, cancel: CancellationSignal): AssetFileDescriptor {
+        return resolver.openAssetFileDescriptor(uri, "r", cancel) ?: throw IOException("cannot read $uri")
     }
 
     /** How often [openOriginal] takes a read again that overlapped a write of the same item. */
