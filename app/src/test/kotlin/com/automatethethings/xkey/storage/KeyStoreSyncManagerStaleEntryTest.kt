@@ -22,6 +22,7 @@ import com.automatethethings.xkey.crypto.FakeSharedPreferences
 import com.automatethethings.xkey.crypto.KeyDeletionException
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.crypto.PausedRemoval
+import com.automatethethings.xkey.crypto.noPqcKeys
 import com.automatethethings.xkey.storage.dao.CredentialMetadataDao
 import com.automatethethings.xkey.storage.dao.KeyDao
 import com.automatethethings.xkey.storage.entity.KeyEntity
@@ -78,7 +79,7 @@ class KeyStoreSyncManagerStaleEntryTest {
 
     @Test
     fun `sync keeps a key row while the software key store cannot be read`() = runBlocking<Unit> {
-        val manager = spyk(KeystoreManager(mockk<Context>(relaxed = true)))
+        val manager = spyk(KeystoreManager(mockk<Context>(relaxed = true), pqcStore = noPqcKeys()))
         every { manager.softwareEd25519Supported() } returns true
         every { manager.ed25519Prefs() } throws IllegalStateException("master key unreadable")
         val credentialDao = mockk<CredentialMetadataDao>(relaxed = true)
@@ -99,7 +100,7 @@ class KeyStoreSyncManagerStaleEntryTest {
     fun `sync still removes the row of a key absent from a readable store`() = runBlocking<Unit> {
         val prefs = mockk<SharedPreferences>()
         every { prefs.contains(any()) } returns false
-        val manager = spyk(KeystoreManager(mockk<Context>(relaxed = true)))
+        val manager = spyk(KeystoreManager(mockk<Context>(relaxed = true), pqcStore = noPqcKeys()))
         every { manager.softwareEd25519Supported() } returns true
         every { manager.ed25519Prefs() } returns prefs
         val credentialDao = mockk<CredentialMetadataDao>(relaxed = true)
@@ -121,7 +122,7 @@ class KeyStoreSyncManagerStaleEntryTest {
         // though the write to disk fails, so the cache alone reads it absent.
         val prefs = FakeSharedPreferences(mapOf("xkey_key_edsync" to "secret"))
         prefs.diskFails = true
-        val manager = spyk(KeystoreManager(mockk<Context>(relaxed = true)))
+        val manager = spyk(KeystoreManager(mockk<Context>(relaxed = true), pqcStore = noPqcKeys()))
         every { manager.softwareEd25519Supported() } returns true
         every { manager.ed25519Prefs() } returns prefs
         assertThrows(KeyDeletionException::class.java) { manager.deleteByAlias("xkey_key_edsync") }
@@ -142,7 +143,7 @@ class KeyStoreSyncManagerStaleEntryTest {
     @Test
     fun `sync overlapping a removal whose commit then fails keeps the key row`() {
         val prefs = FakeSharedPreferences(mapOf("xkey_key_edrace" to "secret"))
-        val manager = spyk(KeystoreManager(mockk<Context>(relaxed = true)))
+        val manager = spyk(KeystoreManager(mockk<Context>(relaxed = true), pqcStore = noPqcKeys()))
         every { manager.softwareEd25519Supported() } returns true
         every { manager.ed25519Prefs() } returns prefs
         val credentialDao = mockk<CredentialMetadataDao>(relaxed = true)
