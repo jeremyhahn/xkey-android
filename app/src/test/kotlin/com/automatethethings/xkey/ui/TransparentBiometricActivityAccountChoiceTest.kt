@@ -73,7 +73,13 @@ class TransparentBiometricActivityAccountChoiceTest {
         Dispatchers.setMain(UnconfinedTestDispatcher())
         app = RuntimeEnvironment.getApplication()
         ShadowAlertDialog.reset()
+        endLeakedPrompts()
         launcher = BiometricActivityLauncher(app).also { it.register() }
+    }
+
+    /** Ends every process-wide queue entry an earlier test class left open, which would hold this class's requests queued. */
+    private fun endLeakedPrompts() {
+        while (true) PromptOwnership.process.end(PromptOwnership.process.activeKey ?: break)
     }
 
     @After
@@ -164,6 +170,20 @@ class TransparentBiometricActivityAccountChoiceTest {
 
     @Test
     fun `back on the list answers no account`() = runTest {
+        val (answer, controller) = choose()
+
+        list().onBackPressed()
+        settle()
+
+        assertNull(answer.await())
+        assertTrue(controller.get().isFinishing)
+    }
+
+    @Test
+    fun `a prompt an earlier test left open does not hold the list back`() = runTest {
+        PromptOwnership.process.enqueue("left-open-by-an-earlier-test", clock = this, onQueueExpired = {}, onActive = {})
+        // What setUp does before every test, here after the leak.
+        endLeakedPrompts()
         val (answer, controller) = choose()
 
         list().onBackPressed()
