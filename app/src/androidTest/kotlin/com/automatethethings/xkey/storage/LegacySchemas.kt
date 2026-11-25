@@ -463,8 +463,7 @@ object LegacySchemas {
     ).let {
         // Migration 10->11 rewrites data only, so schema 11 is schema 10 verbatim
         // (11.json differs from 10.json in its version number alone).
-        it + (11 to it.getValue(10)) + (13 to schema13(it.getValue(12))) +
-            (14 to schema14(schema13(it.getValue(12))))
+        it + (11 to it.getValue(10)) + (14 to schema14(it.getValue(13)))
     }
 
     /**
@@ -481,21 +480,4 @@ object LegacySchemas {
         "CREATE TABLE IF NOT EXISTS `password_deletions` (`password_id` TEXT NOT NULL, `deleted_at` INTEGER NOT NULL, PRIMARY KEY(`password_id`))",
         "CREATE TABLE IF NOT EXISTS `oath_deletions` (`oath_id` TEXT NOT NULL, `deleted_at` INTEGER NOT NULL, PRIMARY KEY(`oath_id`))"
     )
-
-    /**
-     * Schema 13 is schema 12 with `keys.policy_revision` (13.json differs from
-     * 12.json in that column and the identity hash alone), plus the trigger
-     * MIGRATION_12_13 creates, which Room's schema does not carry.
-     */
-    private fun schema13(v12: List<String>): List<String> = v12.map { sql ->
-        when {
-            sql.startsWith("CREATE TABLE IF NOT EXISTS `keys` ") -> sql.replace(
-                "`sharing_policy` TEXT NOT NULL, ",
-                "`sharing_policy` TEXT NOT NULL, `policy_revision` INTEGER NOT NULL DEFAULT 0, "
-            )
-            sql.startsWith("INSERT OR REPLACE INTO room_master_table") ->
-                "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'e02480570d8c7a895d2410493d8e9e08')"
-            else -> sql
-        }
-    } + XKeyDatabase.CREATE_POLICY_REVISION_TRIGGER
 }
