@@ -17,6 +17,7 @@ package com.automatethethings.xkey.oath
 import android.net.Uri
 import android.util.Log
 import com.automatethethings.xkey.audit.AuditLogger
+import com.automatethethings.xkey.audit.auditedWrite
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import java.net.URLEncoder
@@ -175,7 +176,8 @@ class OathRepository(
         algorithm: String = "SHA1",
         digits: Int = 6,
         periodSeconds: Int = 30,
-        counter: Long = 0L
+        counter: Long = 0L,
+        caller: OathAuditCaller = OathAuditCaller.LOCAL
     ): String {
         val oathId = UUID.randomUUID().toString()
         val encryptedSecret = secretManager.encryptSecret(secret)
@@ -195,7 +197,15 @@ class OathRepository(
             createdAt = now
         )
 
-        dao.insert(entity)
+        // Every add (QR scan, manual entry, local.oathAdd) passes here: the
+        // one place it is audited, even when the caller is cancelled after
+        // the insert commits. The row names the credential, never its secret.
+        auditedWrite(
+            write = { dao.insert(entity) },
+            audit = { AuditLogger.logOathCredentialCreated(
+                oathId, issuer, accountName, entity.oathType, caller.deviceId, caller.deviceName
+            ) }
+        )
         return oathId
     }
 
@@ -251,7 +261,8 @@ class OathRepository(
         algorithm: String = "SHA1",
         digits: Int = 6,
         period: Int = 30,
-        counter: Long? = null
+        counter: Long? = null,
+        caller: OathAuditCaller = OathAuditCaller.LOCAL
     ): String {
         val otpType = type.lowercase()
         val uri = otpauthUri(
@@ -264,7 +275,7 @@ class OathRepository(
             period = period,
             counter = if (otpType == "hotp") counter ?: 0L else null
         )
-        return importParsed(uri, structuredLabel = true)
+        return importParsed(uri, structuredLabel = true, caller = caller)
     }
 
     /**
@@ -353,14 +364,34 @@ class OathRepository(
     /**
      * Add [entity] through [OathCredentialDao.insertIfAbsentUnlessDeleted]:
      * [SyncMergeOutcome.ADDED] or [SyncMergeOutcome.DELETED], or null when a
-     * row already has its oath id and nothing was written.
+     * row already has its oath id and nothing was written. A synced add is
+     * audited as any other add ([addCredential]), through the same write
+     * helper, and only when the row was inserted.
      */
-    private suspend fun insertedUnlessDeleted(entity: OathCredentialEntity): SyncMergeOutcome? =
-        when (dao.insertIfAbsentUnlessDeleted(entity)) {
-            OATH_KEPT_DELETED -> SyncMergeOutcome.DELETED
-            -1L -> null
-            else -> SyncMergeOutcome.ADDED
-        }
+    private suspend fun insertedUnlessDeleted(entity: OathCredentialEntity): SyncMergeOutcome? {
+        val outcome = auditedWrite(
+            write = {
+                when (dao.insertIfAbsentUnlessDeleted(entity)) {
+                    OATH_KEPT_DELETED -> SyncMergeOutcome.DELETED
+                    -1L -> null
+                    else -> SyncMergeOutcome.ADDED
+                }
+            },
+            audit = { result ->
+                if (result == SyncMergeOutcome.ADDED) {
+                    AuditLogger.logOathCredentialCreated(
+                        entity.oathId,
+                        entity.issuer,
+                        entity.accountName,
+                        entity.oathType,
+                        null,
+                        null
+                    )
+                }
+            }
+        )
+        return outcome
+    }
 
     /**
      * True if [stored] has the same secret, type, algorithm, digits and
@@ -392,7 +423,11 @@ class OathRepository(
         }
     }
 
-    private suspend fun importParsed(uri: String, structuredLabel: Boolean): String {
+    private suspend fun importParsed(
+        uri: String,
+        structuredLabel: Boolean,
+        caller: OathAuditCaller = OathAuditCaller.LOCAL
+    ): String {
         val parsed = parseOathUri(uri, structuredLabel)
         return addCredential(
             issuer = parsed.issuer,
@@ -402,7 +437,8 @@ class OathRepository(
             algorithm = parsed.algorithm,
             digits = parsed.digits,
             periodSeconds = parsed.periodSeconds,
-            counter = parsed.counter
+            counter = parsed.counter,
+            caller = caller
         )
     }
 
@@ -495,15 +531,17 @@ class OathRepository(
      * Generate the current OTP code for a credential.
      *
      * For TOTP credentials, computes the code based on the current system time.
-     * For HOTP credentials, computes the code using the stored counter value
-     * and advances the counter by compare-and-set
-     * ([OathCredentialDao.claimCounter]): when the counter moved since it
-     * was read (a sync raised it, or another code took it), that code is
-     * discarded and the row read again, so no code is ever returned for a
-     * counter that is not the one the store moved past, and a counter a
+     * For HOTP credentials, computes the code from the stored counter and
+     * advances the counter with a compare-and-set ([OathCredentialDao.claimCounter]).
+     * When the counter moved since it was read (a sync raised it, or another
+     * generation took it first), that code is discarded, the credential is
+     * read again and the code is generated from the current counter, so two
+     * overlapping generations never return the same HOTP code, no code is
+     * returned for a counter the store did not move past, and a counter a
      * sync raised is never rewound.
      *
-     * Records the usage timestamp and increments the use count in the database.
+     * Records the usage timestamp and increments the use count in the database,
+     * once, for the code that is returned.
      *
      * @param oathId The unique identifier of the OATH credential.
      * @return The generated OTP code string, zero-padded to the configured digit length.
@@ -511,82 +549,95 @@ class OathRepository(
      * @throws OathCounterExhaustedException if the HOTP counter is at
      *         [HOTP_COUNTER_MAX]: no further code exists for it.
      * @throws IllegalStateException if an HOTP claim fails while the stored
-     *         counter has not moved past the value tried.
+     *         counter has not moved past the value tried, or no claim succeeds
+     *         within [MAX_COUNTER_ATTEMPTS] attempts.
      */
-    suspend fun generateCode(oathId: String): String {
+    suspend fun generateCode(oathId: String, caller: OathAuditCaller = OathAuditCaller.LOCAL): String {
         var credential = dao.getByOathId(oathId)
             ?: throw NoSuchElementException("No OATH credential found with oathId: $oathId")
-
-        val code = when (credential.oathType) {
-            "TOTP" -> {
-                val secret = secretManager.decryptSecret(credential.secretEncrypted)
-                try {
-                    OathEngine.generateTotpCode(
-                        secret = secret,
-                        algorithm = credential.algorithm,
-                        digits = credential.digits,
-                        periodSeconds = credential.periodSeconds
-                    )
-                } finally {
-                    secret.fill(0)
-                }
-            }
-            "HOTP" -> {
-                // A code is handed out only once its counter value is claimed
-                // (compare-and-set, one statement): two callers that read the
-                // same counter (a desktop generate and a phone tap) cannot
-                // both claim it, and a sync that raised the counter makes the
-                // claim fail, so the loser re-reads and takes the current
-                // value. The code is computed before the claim, so a decrypt
-                // or engine failure never burns a counter value. A retry
-                // happens only when the counter moved on; otherwise the claim
-                // could fail forever on the same value.
-                if (credential.counter == HOTP_COUNTER_MAX) {
-                    throw OathCounterExhaustedException(oathId)
-                }
-                var hotpCode: String
-                while (true) {
-                    val tried = credential.counter
+        var attempt = 0
+        while (true) {
+            // A code is handed out only once its counter value is claimed
+            // (compare-and-set, one statement): two callers that read the
+            // same counter (a desktop generate and a phone tap) cannot both
+            // claim it, and a sync that raised the counter makes the claim
+            // fail, so the loser re-reads and takes the current value. The
+            // code is computed before the claim, so a decrypt or engine
+            // failure never burns a counter value.
+            val code = when (credential.oathType) {
+                "TOTP" -> {
                     val secret = secretManager.decryptSecret(credential.secretEncrypted)
-                    hotpCode = try {
+                    try {
+                        OathEngine.generateTotpCode(
+                            secret = secret,
+                            algorithm = credential.algorithm,
+                            digits = credential.digits,
+                            periodSeconds = credential.periodSeconds
+                        )
+                    } finally {
+                        secret.fill(0)
+                    }
+                }
+                "HOTP" -> {
+                    if (credential.counter == HOTP_COUNTER_MAX) {
+                        throw OathCounterExhaustedException(oathId)
+                    }
+                    val secret = secretManager.decryptSecret(credential.secretEncrypted)
+                    try {
                         OathEngine.generateHotpCode(
                             secret = secret,
-                            counter = tried,
+                            counter = credential.counter,
                             algorithm = credential.algorithm,
                             digits = credential.digits
                         )
                     } finally {
                         secret.fill(0)
                     }
-                    if (dao.claimCounter(oathId, tried) > 0) break
-                    credential = dao.getByOathId(oathId)
-                        ?: throw NoSuchElementException("No OATH credential found with oathId: $oathId")
-                    if (credential.counter == HOTP_COUNTER_MAX) {
-                        throw OathCounterExhaustedException(oathId)
-                    }
-                    if (credential.counter <= tried) {
-                        throw IllegalStateException(
-                            "HOTP counter claim failed without progress for OATH credential $oathId"
+                }
+                else -> throw IllegalStateException(
+                    "Unknown OATH type: ${credential.oathType}"
+                )
+            }
+
+            // The HOTP counter claim, the usage and the audit row are one
+            // audited write: a caller cancelled after the counter commits
+            // still leaves its row. A generation the user or desktop asked for
+            // (an HOTP copy advances the counter) is audited; list refreshes
+            // go through observeAll and are not.
+            val tried = credential.counter
+            val won = auditedWrite(
+                write = {
+                    dao.claimAndRecordUsage(oathId, tried, credential.oathType == "HOTP", System.currentTimeMillis())
+                },
+                audit = { claimed ->
+                    if (claimed) {
+                        AuditLogger.logOathCodeGenerated(
+                            oathId, credential.issuer, credential.accountName, caller.deviceId, caller.deviceName
                         )
                     }
                 }
-                hotpCode
-            }
-            else -> throw IllegalStateException(
-                "Unknown OATH type: ${credential.oathType}"
             )
-        }
+            if (won) return code
 
-        // The HOTP counter is already claimed, so a failed usage record must not discard the code.
-        try {
-            dao.recordUsage(oathId, System.currentTimeMillis())
-        } catch (e: kotlinx.coroutines.CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            Log.w(TAG, "Usage record failed for OATH credential $oathId: ${e.javaClass.simpleName}")
+            // A retry happens only when the counter moved on; otherwise the
+            // claim could fail forever on the same value.
+            credential = dao.getByOathId(oathId)
+                ?: throw NoSuchElementException("No OATH credential found with oathId: $oathId")
+            if (credential.counter == HOTP_COUNTER_MAX) {
+                throw OathCounterExhaustedException(oathId)
+            }
+            if (credential.counter <= tried) {
+                throw IllegalStateException(
+                    "HOTP counter claim failed without progress for OATH credential $oathId"
+                )
+            }
+            attempt++
+            if (attempt >= MAX_COUNTER_ATTEMPTS) {
+                throw IllegalStateException(
+                    "HOTP counter for $oathId could not be advanced after $MAX_COUNTER_ATTEMPTS attempts"
+                )
+            }
         }
-
-        return code
     }
 
     /**
@@ -645,10 +696,29 @@ class OathRepository(
      * a sync merge running at the same time, or any later one, never adds
      * the credential back, and no interruption leaves one without the other.
      *
+     * Audited here, so a delete on the phone and local.oathRemove write the
+     * same single row; nothing is deleted or audited when no credential has
+     * [oathId]. Two calls can both read the credential before either
+     * deletes it (a phone delete racing local.oathRemove): only the delete
+     * that removed the row is audited and returns true.
+     *
      * @param oathId The unique identifier of the credential to delete.
+     * @return true if this call deleted the credential, false if none had
+     *         [oathId] or a concurrent delete removed it first.
      */
-    suspend fun deleteCredential(oathId: String) {
-        dao.deleteAndRecordDeletion(oathId, System.currentTimeMillis())
+    suspend fun deleteCredential(oathId: String, caller: OathAuditCaller = OathAuditCaller.LOCAL): Boolean {
+        val credential = dao.getByOathId(oathId) ?: return false
+        val deleted = auditedWrite(
+            write = { dao.deleteAndRecordDeletion(oathId, System.currentTimeMillis()) },
+            audit = { rows ->
+                if (rows > 0) {
+                    AuditLogger.logOathCredentialDeleted(
+                        oathId, credential.issuer, credential.accountName, caller.deviceId, caller.deviceName
+                    )
+                }
+            }
+        )
+        return deleted > 0
     }
 
     /**
@@ -680,6 +750,12 @@ class OathRepository(
          * [OathCredentialDao.claimCounter] never advances past it.
          */
         const val HOTP_COUNTER_MAX = Long.MAX_VALUE
+
+        /**
+         * How many times [generateCode] reads an HOTP credential again after
+         * another generation advanced its counter first.
+         */
+        const val MAX_COUNTER_ATTEMPTS = 8
 
         /**
          * RFC 4648 Base32 alphabet (A-Z, 2-7).
@@ -780,3 +856,17 @@ class OathRepository(
  */
 class OathCounterExhaustedException(oathId: String) :
     IllegalStateException("HOTP counter exhausted for OATH credential $oathId")
+
+/**
+ * The device an OATH audit row names: the requesting desktop for a protocol
+ * request, none for an action on the phone itself.
+ *
+ * @property deviceId the peer's static key hex, or null when unknown or local
+ * @property deviceName its paired-device name, when it is paired
+ */
+data class OathAuditCaller(val deviceId: String?, val deviceName: String?) {
+    companion object {
+        /** An action taken on the phone: no requesting device. */
+        val LOCAL = OathAuditCaller(null, null)
+    }
+}

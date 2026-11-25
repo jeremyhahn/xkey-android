@@ -36,6 +36,7 @@ import androidx.test.espresso.matcher.ViewMatchers.isDisplayed
 import androidx.test.espresso.matcher.ViewMatchers.withText
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.automatethethings.xkey.R
+import com.automatethethings.xkey.audit.AuditOperationType
 import com.automatethethings.xkey.oath.OathCredentialDao
 import com.automatethethings.xkey.oath.OathRepository
 import com.automatethethings.xkey.oath.OathSecretManager
@@ -179,6 +180,25 @@ class OathActivityUiTest {
                 }.isNotEmpty()
             }
             found
+        }
+    }
+
+    /** Tapping a row copies a generated code, which writes one audit row. */
+    @Test
+    fun tapCopy_recordsOneOathCodeGeneratedRow() {
+        seedCredential()
+        val auditDao = XKeyDatabase.getInstance(
+            ApplicationProvider.getApplicationContext<Context>()
+        ).auditLogDao()
+
+        val scenario = ActivityScenario.launch(OathActivity::class.java)
+        awaitText(scenario, testAccount)
+
+        onView(withText(testAccount)).perform(click())
+
+        awaitCondition("A phone copy should write one OATH_CODE_GENERATED row") {
+            runBlocking { auditDao.getByKeyId(testOathId!!) }
+                .count { it.operationType == AuditOperationType.OATH_CODE_GENERATED } == 1
         }
     }
 

@@ -133,11 +133,20 @@ class SoftwareKeyStore(
         return File(dir, "${fileId(keyId)}.key").exists()
     }
 
-    /** Delete a software key by id. */
+    /**
+     * Delete a software key by id; a key that is not stored deletes quietly.
+     *
+     * @throws KeyDeletionException if the material file is still there
+     *   afterwards: the key was not deleted, and no caller may report it so.
+     *   A metadata file left behind lists nothing without its material.
+     */
     fun delete(keyId: String) {
         migrateLegacyRecords()
         val id = fileId(keyId)
-        File(dir, "$id.key").delete()
+        val keyFile = File(dir, "$id.key")
+        if (!keyFile.delete() && keyFile.exists()) {
+            throw KeyDeletionException("Software key material could not be deleted")
+        }
         File(dir, "$id.meta").delete()
     }
 

@@ -567,26 +567,33 @@ class PivKeyManager(
      * This operation is irreversible.
      *
      * @param slot The PIV slot to clear.
+     * @return true if the slot held a Keystore key or a row and it was
+     *   removed (and audited); false for an empty slot, which is not audited.
      */
-    suspend fun deleteKey(slot: PivSlot) =
+    suspend fun deleteKey(slot: PivSlot): Boolean =
         PivSlotLocks.withSlot(slot) { deleteKeyLocked(slot) }
 
-    private suspend fun deleteKeyLocked(slot: PivSlot) {
+    private suspend fun deleteKeyLocked(slot: PivSlot): Boolean {
         val alias = slot.keystoreAlias
 
         // The slot's alias is the key ID KeyStoreSyncManager discovers it by, so
         // a share of it may be waiting: removing the key is a revoke of that ID.
-        SharePermissionLedger.revoking(alias) {
+        val removed = SharePermissionLedger.revoking(alias) {
             // Remove from Android Keystore
-            if (keyStore.containsAlias(alias)) {
+            val inKeystore = keyStore.containsAlias(alias)
+            if (inKeystore) {
                 keyStore.deleteEntry(alias)
             }
             // A software ML-DSA slot key lives in the store; a removal that throws keeps the row and skips the audit.
             mlDsaStore?.delete(alias)
 
             // Remove metadata from Room
-            pivSlotDao.deleteBySlotId(slot.hexId)
+            val rows = pivSlotDao.deleteBySlotId(slot.hexId)
+            inKeystore || rows > 0
         }
+
+        // An empty slot (no key, no row) was not deleted: nothing to audit.
+        if (!removed) return false
 
         // Log to audit system
         AuditLogger.logKeyDeleted(
@@ -596,6 +603,7 @@ class PivKeyManager(
         )
 
         Log.i(TAG, "Deleted key from PIV slot ${slot.hexId} (${slot.label})")
+        return true
     }
 }
 

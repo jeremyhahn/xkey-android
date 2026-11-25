@@ -84,27 +84,28 @@ object AuditLogger {
     /**
      * Initialize the audit logger with application context.
      *
-     * Must be called once during application startup before any logging operations.
+     * Must be called once during application startup before any logging
+     * operations. The wiring happens once; every call then applies the
+     * retention policy (entries older than 90 days, then beyond the
+     * [MAX_ENTRIES] newest) in the background.
      *
      * @param context Application context for database access.
      */
     fun initialize(context: Context) {
-        val existing = daoRef.get()
-        if (existing != null) return
-
-        val database = XKeyDatabase.getInstance(context)
-        val dao = database.auditLogDao()
-        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-
-        if (daoRef.compareAndSet(null, dao)) {
-            scopeRef.set(scope)
-            // Apply retention policy on startup
-            scope.launch {
-                try {
-                    applyRetentionPolicy(dao)
-                } catch (e: Exception) {
-                    Log.w(TAG, "Failed to apply retention policy", e)
-                }
+        if (daoRef.get() == null) {
+            val dao = XKeyDatabase.getInstance(context).auditLogDao()
+            val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+            if (daoRef.compareAndSet(null, dao)) {
+                scopeRef.set(scope)
+            }
+        }
+        val dao = daoRef.get() ?: return
+        val scope = scopeRef.get() ?: return
+        scope.launch {
+            try {
+                applyRetentionPolicy(dao)
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to apply retention policy", e)
             }
         }
     }
@@ -1054,16 +1055,20 @@ object AuditLogger {
      * @param deviceId The device ID involved (if applicable).
      * @param deviceName The device name (if applicable).
      * @param reason The reason for denial.
+     * @param operation The refused request method (for example
+     *   `local.signFido2Assertion`), if applicable.
      */
     fun logPolicyDenied(
         keyId: String? = null,
         keyLabel: String? = null,
         deviceId: String? = null,
         deviceName: String? = null,
-        reason: String
+        reason: String,
+        operation: String? = null
     ) {
         val details = JSONObject().apply {
             put("reason", reason)
+            operation?.let { put("operation", it) }
         }
         log(
             AuditLogEntity(
@@ -1724,6 +1729,43 @@ object AuditLogger {
         }
         log(AuditLogEntity(operationType = AuditOperationType.BACKUP_RESTORED, deviceId = deviceId, deviceName = deviceName, success = true, details = details.toString()))
     }
+
+    /**
+     * Clears the whole audit log at the user's request and records the
+     * clearing (AUDIT_LOG_CLEARED with the count) in the same Room
+     * transaction on [dao]: both commit or neither does, so a cancel or a
+     * crash inside the transaction rolls the delete back and the history is
+     * never erased without its record.
+     *
+     * @param dao The audit table to clear.
+     * @return Rows the clear removed.
+     */
+    suspend fun clearAuditLog(dao: AuditLogDao): Int =
+        dao.deleteAllAndRecord(::auditLogClearedEntry)
+
+    /**
+     * Deletes audit entries older than [olderThan] at the user's request and
+     * records the prune (AUDIT_LOG_PRUNED with the count and cutoff) in the
+     * same transaction, as [clearAuditLog] does.
+     *
+     * @param dao The audit table to prune.
+     * @param olderThan The epoch-millisecond cutoff.
+     * @return Rows the prune removed.
+     */
+    suspend fun pruneAuditLog(dao: AuditLogDao, olderThan: Long): Int =
+        dao.deleteOlderThanAndRecord(olderThan) { auditLogPrunedEntry(it, olderThan) }
+
+    internal fun auditLogClearedEntry(deleted: Int): AuditLogEntity = AuditLogEntity(
+        operationType = AuditOperationType.AUDIT_LOG_CLEARED,
+        success = true,
+        details = JSONObject().put("deleted", deleted).toString()
+    )
+
+    internal fun auditLogPrunedEntry(deleted: Int, olderThan: Long): AuditLogEntity = AuditLogEntity(
+        operationType = AuditOperationType.AUDIT_LOG_PRUNED,
+        success = true,
+        details = JSONObject().put("deleted", deleted).put("olderThan", olderThan).toString()
+    )
 
     // -------------------------------------------------------------------------
     // Internal Methods

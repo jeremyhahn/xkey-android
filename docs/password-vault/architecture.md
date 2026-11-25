@@ -33,7 +33,7 @@ USB `Password*` methods are described in
 | `PasswordVaultFactorStore`, `FilePasswordVaultFactorStore` | same file | Enrolled factors in `filesDir/password_vault/factors.json` (`PasswordVault.FACTOR_DIR`), written through a temporary file and a rename |
 | `PasswordVaultFactorRecord` | same file | One factor: id, factor type, label, salt, Argon2id verifier |
 | `Argon2PassphraseHasher`, `PassphraseHasher` | same file | Argon2id, 64 MiB, 3 iterations, 4 lanes, 32-byte output |
-| `VaultUnlockAttemptStore`, `PinSettingsVaultUnlockAttemptStore` | same file | Persisted failed-unlock counter, held to the PIN's `maxPinAttempts` and `lockoutDurationSeconds` |
+| `VaultUnlockAttemptStore`, `PinSettingsVaultUnlockAttemptStore` | same file | Persisted failed-unlock counter, held to the PIN's `maxPinAttempts`, `lockoutDurationSeconds` and backoff on the same monotonic clock ([PIN lockout](../pin/architecture.md#lockout)), without the permanent block |
 | `SessionPasswordVault` | same file | Coroutine-context element naming the session's vault for code below the transport |
 | `requirePasswordStoreUnlocked` | same file | The lock check used by every path without a vault of its own |
 | `PasswordVaultCredential` | `app/src/main/kotlin/com/automatethethings/xkey/password/PasswordVaultCredential.kt` | Credential types `Passphrase`, `Passkey`, `Key` |

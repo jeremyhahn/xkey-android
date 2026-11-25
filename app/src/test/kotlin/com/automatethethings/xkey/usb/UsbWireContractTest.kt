@@ -23,6 +23,7 @@ import com.automatethethings.xkey.password.PasswordDeletionQueries
 import com.automatethethings.xkey.password.PasswordEntity
 import com.automatethethings.xkey.password.PasswordRepository
 import com.automatethethings.xkey.password.PasswordVault
+import com.automatethethings.xkey.pin.FakeLockoutClock
 import com.automatethethings.xkey.password.PasswordVaultFactorRecord
 import com.automatethethings.xkey.password.PasswordVaultFactorStore
 import com.automatethethings.xkey.password.VaultUnlockAttemptStore
@@ -217,7 +218,7 @@ class UsbWireContractTest {
                 update(salt)
                 digest(passphrase.toByteArray(Charsets.UTF_8))
             }
-        })
+        }, clock = FakeLockoutClock())
         handler = mockk(relaxed = true)
         // As XKeyGattService wires USB: the password store, then the seal store.
         server = usbServer(

@@ -599,7 +599,7 @@ class RequestHandler(
             )
         }
 
-        return try {
+        val response = try {
             handler(request)
         } catch (e: ProtocolException) {
             Log.e(TAG, "Handler error: ${e.message}")
@@ -663,6 +663,52 @@ class RequestHandler(
         } catch (e: Exception) {
             Log.e(TAG, "Unexpected handler error", e)
             Response.error(request.id, ErrorCodes.INTERNAL_ERROR, "Internal error: ${e.message}")
+        }
+
+        // A refusal is audited from the response, so one a handler returns
+        // and one it throws are recorded alike, once each.
+        val error = response.error
+        if (error?.code == ErrorCodes.OPERATION_DENIED) {
+            auditPolicyDenied(request.method, error.message)
+        }
+        return response
+    }
+
+    /**
+     * Records a policy refusal ([ErrorCodes.OPERATION_DENIED]) as one
+     * POLICY_DENIED audit row. [dispatch] calls it on every response it
+     * returns with that code, whether the handler threw the refusal or
+     * returned it, so this is the one place they are recorded; a refusal
+     * site never writes its own POLICY_DENIED row. (A refused export also
+     * keeps its failed KEY_EXPORTED record, written where it is refused.) The row carries the requesting peer, the
+     * request method and the refusal message, which names at most a key or
+     * credential id, never key material or request data. Recording never
+     * changes the response.
+     *
+     * A refusal on a served connection (one with a [CallerSession]) that
+     * authenticated no peer writes no row: every row names the caller's
+     * peer, and each row counts against the log's retention and count
+     * limits, so an unauthenticated caller must not be able to push real
+     * entries out. A request with no [CallerSession] (in-process) records
+     * with whatever [currentPeerPublicKeyHex] returns.
+     */
+    private suspend fun auditPolicyDenied(method: String, reason: String?) {
+        try {
+            val callerPeer = currentPeerPublicKeyHex()
+            if (callerPeer == null && currentCoroutineContext()[CallerSession] != null) {
+                Log.w(TAG, "policy denial on a connection with no peer not audited")
+                return
+            }
+            AuditLogger.logPolicyDenied(
+                deviceId = callerPeer,
+                deviceName = auditPeerName(callerPeer),
+                reason = reason ?: "Operation denied",
+                operation = method
+            )
+        } catch (c: kotlin.coroutines.cancellation.CancellationException) {
+            throw c
+        } catch (x: Exception) {
+            Log.w(TAG, "policy denial not audited: ${x.javaClass.simpleName}")
         }
     }
 
@@ -1282,10 +1328,12 @@ class RequestHandler(
         // Keystore is touched, like every other key delete: a share of the key
         // pending at a transport is refused at admission. The ID as given is
         // revoked too when it differs.
-        val deleted = SharePermissionLedger.revoking(keyId) {
-            SharePermissionLedger.revoking(deleteParams.credentialId) {
-                keystoreManager.deleteKey(deleteParams.credentialId).also { removed ->
-                    if (removed) keyDao.deleteByKeyId(keyId)
+        val deleted = keyDeletionOrError(deleteParams.credentialId) {
+            SharePermissionLedger.revoking(keyId) {
+                SharePermissionLedger.revoking(deleteParams.credentialId) {
+                    keystoreManager.deleteKey(deleteParams.credentialId).also { removed ->
+                        if (removed) keyDao.deleteByKeyId(keyId)
+                    }
                 }
             }
         }
@@ -2452,6 +2500,12 @@ class RequestHandler(
         return AuditCaller(peer, auditPeerName(peer))
     }
 
+    /** [auditCaller] in the form OathRepository's audit rows take. */
+    private suspend fun oathAuditCaller(): com.automatethethings.xkey.oath.OathAuditCaller {
+        val caller = auditCaller()
+        return com.automatethethings.xkey.oath.OathAuditCaller(caller.peerPublicKeyHex, caller.deviceName)
+    }
+
     /**
      * Refuses software key [sw] for [operation] when its stored algorithm
      * names the other symmetric key type ([otherType], "AES" or "HMAC"): an
@@ -2690,24 +2744,30 @@ class RequestHandler(
         // finishes with it before it goes.
         val softwareKeys = com.automatethethings.xkey.crypto.SoftwareKeyStore(context)
         val canonicalId = if (keyDao.exists(keyId) || softwareKeys.contains(keyId)) keyId else canonicalKeyId(keyId)
+        //
+        // A removal that fails throws KeyDeletionException before the row
+        // goes: the key's material may still be on disk, so the row stays and
+        // the request answers an error, never deleted=true.
         var materialRemoved = false
-        val rowsDeleted = keyIds.withKeyLock(keyLockId(canonicalId)) {
-            keyDao.deleteKeyAndMaterial(canonicalId) {
-                materialRemoved = when {
-                    canonicalId != keyId -> deleteKeystoreAlias(canonicalId, keyId)
-                    softwareKeys.contains(canonicalId) -> {
-                        softwareKeys.delete(canonicalId)
-                        true
+        val rowsDeleted = keyDeletionOrError(keyId) {
+            keyIds.withKeyLock(keyLockId(canonicalId)) {
+                keyDao.deleteKeyAndMaterial(canonicalId) {
+                    materialRemoved = when {
+                        canonicalId != keyId -> deleteKeystoreAlias(canonicalId, keyId)
+                        softwareKeys.contains(canonicalId) -> {
+                            softwareKeys.delete(canonicalId)
+                            true
+                        }
+                        // A software ML-DSA key lives under its general alias,
+                        // outside the Keystore; deleteGeneralKey removes and audits it.
+                        keystoreManager.pqcSoftwareKeyExists(canonicalId) ->
+                            keystoreManager.deleteGeneralKey(canonicalId)
+                        // A canonical ID names its general key `xkey_key_k` first, as
+                        // this method always did; another alias only when it has none.
+                        else -> com.automatethethings.xkey.storage.KeyStoreSyncManager.keystoreAliasesOf(canonicalId)
+                            .sortedByDescending { it == KeystoreManager.generalKeyAlias(canonicalId) }
+                            .any { deleteKeystoreAlias(canonicalId, it) }
                     }
-                    // A software ML-DSA key lives under its general alias,
-                    // outside the Keystore; deleteGeneralKey removes and audits it.
-                    keystoreManager.pqcSoftwareKeyExists(canonicalId) ->
-                        keystoreManager.deleteGeneralKey(canonicalId)
-                    // A canonical ID names its general key `xkey_key_k` first, as
-                    // this method always did; another alias only when it has none.
-                    else -> com.automatethethings.xkey.storage.KeyStoreSyncManager.keystoreAliasesOf(canonicalId)
-                        .sortedByDescending { it == KeystoreManager.generalKeyAlias(canonicalId) }
-                        .any { deleteKeystoreAlias(canonicalId, it) }
                 }
             }
         }
@@ -2728,6 +2788,20 @@ class RequestHandler(
             keystoreManager.deleteGeneralKey(keyId)
         } else {
             keystoreManager.deleteByAlias(alias)
+        }
+
+    /**
+     * Runs the delete [block] of key [keyId] and answers a removal that
+     * failed ([KeyDeletionException]: the key's material may still be on
+     * disk) as an INTERNAL_ERROR, so no delete request reads it as done or as
+     * a key that was never there.
+     */
+    private suspend fun <T> keyDeletionOrError(keyId: String, block: suspend () -> T): T =
+        try {
+            block()
+        } catch (e: com.automatethethings.xkey.crypto.KeyDeletionException) {
+            Log.e(TAG, "Deleting key $keyId failed; its metadata is kept", e)
+            throw ProtocolException("Failed to delete key: its material could not be removed", errorCode = ErrorCodes.INTERNAL_ERROR)
         }
 
     /**
@@ -4118,7 +4192,7 @@ class RequestHandler(
             val cred = db.oathCredentialDao().getByOathId(credentialId)
                 ?: return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Credential not found: $credentialId")
             val code = try {
-                oathRepository.generateCode(credentialId)
+                oathRepository.generateCode(credentialId, oathAuditCaller())
             } catch (_: NoSuchElementException) {
                 return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Credential not found: $credentialId")
             } catch (_: com.automatethethings.xkey.oath.OathCounterExhaustedException) {
@@ -4132,11 +4206,7 @@ class RequestHandler(
                 (period - (System.currentTimeMillis() / 1000 % period)).toInt()
             } else 0
 
-            val caller = auditCaller()
-            AuditLogger.logOathCodeGenerated(
-                credentialId, cred.issuer, cred.accountName, caller.peerPublicKeyHex, caller.deviceName
-            )
-
+            // OathRepository.generateCode wrote the audit row, naming this caller.
             val result = JSONObject().apply {
                 put("code", code)
                 put("expires_in", expiresIn)
@@ -4189,14 +4259,10 @@ class RequestHandler(
                 algorithm = credential.optString("algorithm", "SHA1"),
                 digits = credential.optInt("digits", 6),
                 period = credential.optInt("period", 30),
-                counter = credential.optLong("counter", 0)
+                counter = credential.optLong("counter", 0),
+                caller = oathAuditCaller()
             )
-
-            // The entry names the stored credential, not the caller's free-form name.
-            val caller = auditCaller()
-            AuditLogger.logOathCredentialCreated(
-                credentialId, issuer, accountName, type.uppercase(), caller.peerPublicKeyHex, caller.deviceName
-            )
+            // OathRepository.addCredential wrote the audit row, under credentialId, naming this caller.
 
             val result = JSONObject().apply {
                 put("success", true)
@@ -4228,20 +4294,17 @@ class RequestHandler(
 
         return try {
             val db = XKeyDatabase.getInstance(context)
-            val cred = db.oathCredentialDao().getByOathId(credentialId)
-            if (cred == null) {
-                // Nothing has that id: say so rather than claim a deletion.
-                return Response.success(request.id, JSONObject().apply { put("deleted", false) })
-            }
-            // Recorded and deleted in one transaction, so no sync with another paired device adds it back.
-            db.oathCredentialDao().deleteAndRecordDeletion(credentialId, System.currentTimeMillis())
-
-            val caller = auditCaller()
-            AuditLogger.logOathCredentialDeleted(
-                credentialId, cred.issuer, cred.accountName, caller.peerPublicKeyHex, caller.deviceName
+            val oathRepository = com.automatethethings.xkey.oath.OathRepository(
+                db.oathCredentialDao(),
+                com.automatethethings.xkey.oath.OathSecretManager()
             )
+            // Nothing has that id: say so rather than claim a deletion. The
+            // repository writes the audit row, as for a delete on the phone,
+            // and records the deletion with the delete in one transaction, so
+            // no sync with another paired device adds it back.
+            val deleted = oathRepository.deleteCredential(credentialId, oathAuditCaller())
 
-            val result = JSONObject().apply { put("deleted", true) }
+            val result = JSONObject().apply { put("deleted", deleted) }
             Response.success(request.id, result)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to remove OATH credential", e)

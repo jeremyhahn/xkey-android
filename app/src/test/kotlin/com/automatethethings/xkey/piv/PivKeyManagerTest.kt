@@ -409,6 +409,28 @@ class PivKeyManagerTest {
     }
 
     @Test
+    fun `deleteKey of an empty slot writes no deleted entry`() = runTest {
+        keystore.live = null
+        coEvery { pivSlotDao.deleteBySlotId("9A") } returns 0
+
+        PivKeyManager(pivSlotDao).deleteKey(PivSlot.AUTHENTICATION)
+
+        verify(exactly = 0) { AuditLogger.logKeyDeleted(any(), any(), any()) }
+    }
+
+    @Test
+    fun `deleteKey of a populated slot writes one deleted entry`() = runTest {
+        coEvery { pivSlotDao.deleteBySlotId("9A") } returns 1
+
+        PivKeyManager(pivSlotDao).deleteKey(PivSlot.AUTHENTICATION)
+
+        assertNull(keystore.live)
+        verify(exactly = 1) {
+            AuditLogger.logKeyDeleted(PivSlot.AUTHENTICATION.keystoreAlias, PivSlot.AUTHENTICATION.label, "piv")
+        }
+    }
+
+    @Test
     fun `a hardware ML-DSA-87 slot asked for ML-DSA-44 refuses before it signs`() = runTest {
         val slotCertificate = mockk<Certificate>()
         every { slotCertificate.publicKey.encoded } returns PqcKeysTest.spkiOf(MlDsaParameterSet.ML_DSA_87)
@@ -433,6 +455,16 @@ class PivKeyManagerTest {
         } finally {
             PqcHardware.backend = saved
         }
+    }
+
+    @Test
+    fun `deleteKey of a slot with only its row writes one deleted entry`() = runTest {
+        keystore.live = null
+        coEvery { pivSlotDao.deleteBySlotId("9A") } returns 1
+
+        PivKeyManager(pivSlotDao).deleteKey(PivSlot.AUTHENTICATION)
+
+        verify(exactly = 1) { AuditLogger.logKeyDeleted(any(), any(), "piv") }
     }
 
     @Test

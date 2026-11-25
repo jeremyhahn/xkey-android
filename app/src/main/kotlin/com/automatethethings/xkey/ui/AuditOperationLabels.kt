@@ -16,6 +16,7 @@ package com.automatethethings.xkey.ui
 
 import androidx.annotation.StringRes
 import com.automatethethings.xkey.R
+import com.automatethethings.xkey.audit.AuditLogEntity
 import com.automatethethings.xkey.audit.AuditOperationType
 
 /**
@@ -90,7 +91,16 @@ object AuditOperationLabels {
         AuditOperationType.PASSWORD_DELETED -> R.string.audit_log_op_password_deleted
         AuditOperationType.BACKUP_CREATED -> R.string.audit_log_op_backup_created
         AuditOperationType.BACKUP_RESTORED -> R.string.audit_log_op_backup_restored
+        AuditOperationType.AUDIT_LOG_CLEARED -> R.string.audit_log_op_audit_log_cleared
+        AuditOperationType.AUDIT_LOG_PRUNED -> R.string.audit_log_op_audit_log_pruned
     }
+
+    /** The refusals the audit screen colors as a warning. */
+    val refusalTypes: Set<AuditOperationType> = setOf(
+        AuditOperationType.PAIRING_DENIED,
+        AuditOperationType.POLICY_DENIED,
+        AuditOperationType.BIOMETRIC_FAILURE
+    )
 
     /** The operation types the audit screen offers as filter chips, in order. */
     val filterTypes: List<AuditOperationType> = listOf(
@@ -99,6 +109,74 @@ object AuditOperationLabels {
         AuditOperationType.SIGNING_REQUEST,
         AuditOperationType.FIDO2_AUTHENTICATION,
         AuditOperationType.PAIRING_APPROVED,
-        AuditOperationType.CONNECTION_ESTABLISHED
+        AuditOperationType.CONNECTION_ESTABLISHED,
+        AuditOperationType.PAIRING_DENIED,
+        AuditOperationType.POLICY_DENIED,
+        AuditOperationType.BIOMETRIC_FAILURE
     )
+
+    /** The operation types with no filter chip; a new type goes here or in [filterTypes]. */
+    val typesWithoutChip: Set<AuditOperationType> = setOf(
+        AuditOperationType.KEY_USED,
+        AuditOperationType.KEY_ATTESTED,
+        AuditOperationType.KEY_SHARING_CHANGED,
+        AuditOperationType.KEY_EXPORTED,
+        AuditOperationType.ENCRYPTION_REQUEST,
+        AuditOperationType.DECRYPTION_REQUEST,
+        AuditOperationType.KEY_DERIVATION_REQUEST,
+        AuditOperationType.HMAC_REQUEST,
+        AuditOperationType.FIDO2_REGISTRATION,
+        AuditOperationType.DEVICE_UNPAIRED,
+        AuditOperationType.CONNECTION_CLOSED,
+        AuditOperationType.DEVICE_ATTESTED,
+        AuditOperationType.DEVICE_ENROLLED,
+        AuditOperationType.SETTINGS_CHANGED,
+        AuditOperationType.TRUST_STORE_IMPORT,
+        AuditOperationType.TRUST_STORE_DELETE,
+        AuditOperationType.BIOMETRIC_SUCCESS,
+        AuditOperationType.SERVICE_STARTED,
+        AuditOperationType.SERVICE_STOPPED,
+        AuditOperationType.CERTIFICATE_ISSUED,
+        AuditOperationType.CERTIFICATE_REVOKED,
+        AuditOperationType.CSR_SIGNED,
+        AuditOperationType.CRL_GENERATED,
+        AuditOperationType.CERTIFICATE_EXPORTED,
+        AuditOperationType.FILE_SIGNED,
+        AuditOperationType.FILE_VERIFIED,
+        AuditOperationType.FILE_ENCRYPTED,
+        AuditOperationType.FILE_DECRYPTED,
+        AuditOperationType.MEDIA_AUTO_SIGNED,
+        AuditOperationType.CONTACT_IMPORTED,
+        AuditOperationType.CONTACT_DELETED,
+        AuditOperationType.OATH_CREDENTIAL_CREATED,
+        AuditOperationType.OATH_CREDENTIAL_DELETED,
+        AuditOperationType.OATH_CODE_GENERATED,
+        AuditOperationType.OATH_SYNC_PERFORMED,
+        AuditOperationType.PASSWORD_SYNC_PERFORMED,
+        AuditOperationType.TRUST_STORE_SYNC_PERFORMED,
+        AuditOperationType.COSIGN_INITIATED,
+        AuditOperationType.COSIGN_RECEIVED,
+        AuditOperationType.PIN_SO_SET,
+        AuditOperationType.PIN_SO_CHANGED,
+        AuditOperationType.PIN_USER_SET,
+        AuditOperationType.PIN_USER_CHANGED,
+        AuditOperationType.PIN_VERIFICATION_SUCCESS,
+        AuditOperationType.PIN_VERIFICATION_FAILED,
+        AuditOperationType.PIN_LOCKOUT_TRIGGERED,
+        AuditOperationType.PIN_LOCKOUT_RESET,
+        AuditOperationType.PIV_KEY_GENERATED,
+        AuditOperationType.PIV_CERT_IMPORTED,
+        AuditOperationType.PIV_SIGN_REQUEST,
+        AuditOperationType.PIV_KEY_DELETED,
+        AuditOperationType.PASSWORD_CREATED,
+        AuditOperationType.PASSWORD_DELETED,
+        AuditOperationType.BACKUP_CREATED,
+        AuditOperationType.BACKUP_RESTORED,
+        AuditOperationType.AUDIT_LOG_CLEARED,
+        AuditOperationType.AUDIT_LOG_PRUNED
+    )
+
+    /** The entries of one operation type, or every entry when [type] is null. */
+    fun filterByOperation(entries: List<AuditLogEntity>, type: AuditOperationType?): List<AuditLogEntity> =
+        if (type == null) entries else entries.filter { it.operationType == type }
 }

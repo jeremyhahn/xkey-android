@@ -17,6 +17,7 @@ package com.automatethethings.xkey.storage
 import android.util.Log
 import androidx.annotation.VisibleForTesting
 import com.automatethethings.xkey.crypto.FileEncryptor
+import com.automatethethings.xkey.crypto.KeyDeletionException
 import com.automatethethings.xkey.crypto.KeystoreAeadCipher
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.crypto.SoftwareKeyStore
@@ -209,25 +210,39 @@ class KeyStoreSyncManager(
      * A PIV slot alias listed by an earlier sync is removed as well, because
      * [KeystoreManager.resolveKeystoreAlias] never resolves a raw PIV alias.
      *
+     * A row goes only when its key is definitely absent: while the software
+     * key store cannot be read the key may still be in it, so the row stays
+     * (the key keeps listing and can be deleted later) and the failure is
+     * logged as an error.
+     *
      * @return Number of stale entries removed.
      */
     private suspend fun removeStaleEntries(): Int {
         val localKeys = keyDao.getAll().filter { it.source != "xkmsd" }
         var removed = 0
+        var unknown = 0
 
         for (key in localKeys) {
             // Classify by the resolved alias, never the logical id: a general
             // key "xkey_piv_x" lives at xkey_key_xkey_piv_x and resolves, while
             // a raw PIV slot alias row never resolves and so is removed here.
-            // A software ML-DSA key has no Keystore alias; its record counts.
-            if (!keystoreManager.keyMaterialExists(key.keyId)) {
+            // A software ML-DSA key has no Keystore alias; its record counts
+            // (keyMaterialAbsent resolves it through resolveKeystoreAlias).
+            val absent = try {
+                keystoreManager.keyMaterialAbsent(key.keyId)
+            } catch (e: KeyDeletionException) {
+                unknown++
+                Log.e(TAG, "Kept key entry ${key.keyId}: its key store could not be read", e)
+                false
+            }
+            if (absent) {
                 SharePermissionLedger.revoking(key.keyId) { keyDao.deleteByKeyId(key.keyId) }
                 removed++
                 Log.d(TAG, "Removed stale key entry: ${key.keyId}")
             }
         }
 
-        Log.d(TAG, "Removed $removed stale entries")
+        Log.d(TAG, "Removed $removed stale entries, kept $unknown whose key store could not be read")
         return removed
     }
 

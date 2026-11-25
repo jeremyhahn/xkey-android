@@ -103,6 +103,7 @@ class KeyStoreSyncManagerTest {
         coEvery { keyDao.getAll() } returns listOf(listed)
         // KeystoreManager never resolves a raw PIV slot alias.
         every { keystoreManager.resolveKeystoreAlias(pivAlias) } returns null
+        every { keystoreManager.keyMaterialAbsent(pivAlias) } returns true
 
         KeyStoreSyncManager(keystoreManager, credentialDao, keyDao).syncAll()
 
@@ -118,6 +119,7 @@ class KeyStoreSyncManagerTest {
         coEvery { keyDao.getAll() } returns listOf(listed)
         // local.generateKey stores it at the general alias xkey_key_<keyId>.
         every { keystoreManager.resolveKeystoreAlias(generalId) } returns "xkey_key_$generalId"
+        every { keystoreManager.keyMaterialAbsent(generalId) } returns false
 
         KeyStoreSyncManager(keystoreManager, credentialDao, keyDao).syncAll()
 

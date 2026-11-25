@@ -181,9 +181,11 @@ interface OathCredentialDao {
      * Delete an OATH credential by its unique OATH ID.
      *
      * @param oathId The unique OATH identifier of the credential to delete.
+     * @return The number of rows deleted: 0 when no credential had [oathId],
+     *         for example because a concurrent delete removed it first.
      */
     @Query("DELETE FROM oath_credentials WHERE oath_id = :oathId")
-    suspend fun deleteByOathId(oathId: String)
+    suspend fun deleteByOathId(oathId: String): Int
 
     /**
      * Record that [oathId] was deleted on the phone at [deletedAt], so a
@@ -204,11 +206,32 @@ interface OathCredentialDao {
      * [deletedAt] ([recordDeletion]), in one transaction: no sync merge,
      * gather or interruption sees the record without the delete or the
      * delete without the record. The id is recorded even when no row has it.
+     *
+     * @return The number of rows deleted ([deleteByOathId]): 0 when no
+     *         credential had [oathId], for example because a concurrent
+     *         delete removed it first.
      */
     @Transaction
-    suspend fun deleteAndRecordDeletion(oathId: String, deletedAt: Long) {
+    suspend fun deleteAndRecordDeletion(oathId: String, deletedAt: Long): Int {
         recordDeletion(oathId, deletedAt)
-        deleteByOathId(oathId)
+        return deleteByOathId(oathId)
+    }
+
+    /**
+     * Claim the HOTP counter value [expected] ([claimCounter], only when
+     * [hotp]) and record the usage at [timestamp] ([recordUsage]), in one
+     * transaction: a usage write that fails rolls the claim back, so the
+     * counter never advances without its usage and audit row. The one
+     * caller of [claimCounter] and [recordUsage] for code generation.
+     *
+     * @return true if the counter value was claimed (always for TOTP) and
+     *         the usage recorded; false if the counter moved on.
+     */
+    @Transaction
+    suspend fun claimAndRecordUsage(oathId: String, expected: Long, hotp: Boolean, timestamp: Long): Boolean {
+        if (hotp && claimCounter(oathId, expected) == 0) return false
+        recordUsage(oathId, timestamp)
+        return true
     }
 
     /**
