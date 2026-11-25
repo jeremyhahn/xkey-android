@@ -1304,8 +1304,8 @@ class KeystoreManager(
         if (!softwareEd25519Supported()) return false
         if (alias in uncommittedSoftwareRemovals) return true
         return try {
-            ed25519Prefs()?.contains(alias) == true
-        } catch (e: Exception) {
+            ed25519Read(alias) { ed25519Prefs()?.contains(alias) == true }
+        } catch (e: KeyPresenceUnreadableException) {
             if (strict) throw KeyDeletionException("The software key store could not be read", e)
             false
         }

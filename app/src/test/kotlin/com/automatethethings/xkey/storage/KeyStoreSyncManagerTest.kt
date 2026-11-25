@@ -124,6 +124,7 @@ class KeyStoreSyncManagerTest {
 
     @Test
     fun `a row whose key store cannot be read is kept and the sweep goes on`() = runTest {
+        every { Log.e(any(), any<String>(), any()) } returns 0
         val unreadable = mockk<KeyEntity>(relaxed = true)
         every { unreadable.keyId } returns "unreadable-1"
         every { unreadable.source } returns "local"

@@ -461,9 +461,8 @@ class SoftwareKeyStore(
         } catch (e: KeyPresenceUnreadableException) {
             emptySet()
         }
-        val stems = listOf(own) + legacy.sorted()
-        for (stem in stems) deleteRecord(stem)
-        if (stems.any { filePresence(File(dir, "$it.key")) != KeyPresence.ABSENT }) {
+        for (stem in listOf(own) + legacy.sorted()) deleteRecord(stem)
+        if ((legacy + own).any { filePresence(File(dir, "$it.key")) != KeyPresence.ABSENT }) {
             throw KeyDeletionException("Software key material could not be deleted")
         }
     }

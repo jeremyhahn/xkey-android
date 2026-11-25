@@ -79,7 +79,11 @@ class KeyStoreSyncManagerStaleEntryTest {
 
     @Test
     fun `sync keeps a key row while the software key store cannot be read`() = runBlocking<Unit> {
-        val manager = spyk(KeystoreManager(mockk<Context>(relaxed = true), pqcStore = noPqcKeys()))
+        val manager = spyk(KeystoreManager(mockk<Context>(relaxed = true).also {
+            // The ML-DSA store reads the context's files directory: an empty one here.
+            every { it.applicationContext } returns it
+            every { it.filesDir } returns java.nio.file.Files.createTempDirectory("pqc-keys").toFile().apply { deleteOnExit() }
+        }, pqcStore = noPqcKeys()))
         every { manager.softwareEd25519Supported() } returns true
         every { manager.ed25519Prefs() } throws IllegalStateException("master key unreadable")
         val credentialDao = mockk<CredentialMetadataDao>(relaxed = true)
@@ -100,7 +104,11 @@ class KeyStoreSyncManagerStaleEntryTest {
     fun `sync still removes the row of a key absent from a readable store`() = runBlocking<Unit> {
         val prefs = mockk<SharedPreferences>()
         every { prefs.contains(any()) } returns false
-        val manager = spyk(KeystoreManager(mockk<Context>(relaxed = true), pqcStore = noPqcKeys()))
+        val manager = spyk(KeystoreManager(mockk<Context>(relaxed = true).also {
+            // The ML-DSA store reads the context's files directory: an empty one here.
+            every { it.applicationContext } returns it
+            every { it.filesDir } returns java.nio.file.Files.createTempDirectory("pqc-keys").toFile().apply { deleteOnExit() }
+        }, pqcStore = noPqcKeys()))
         every { manager.softwareEd25519Supported() } returns true
         every { manager.ed25519Prefs() } returns prefs
         val credentialDao = mockk<CredentialMetadataDao>(relaxed = true)
@@ -122,7 +130,11 @@ class KeyStoreSyncManagerStaleEntryTest {
         // though the write to disk fails, so the cache alone reads it absent.
         val prefs = FakeSharedPreferences(mapOf("xkey_key_edsync" to "secret"))
         prefs.diskFails = true
-        val manager = spyk(KeystoreManager(mockk<Context>(relaxed = true), pqcStore = noPqcKeys()))
+        val manager = spyk(KeystoreManager(mockk<Context>(relaxed = true).also {
+            // The ML-DSA store reads the context's files directory: an empty one here.
+            every { it.applicationContext } returns it
+            every { it.filesDir } returns java.nio.file.Files.createTempDirectory("pqc-keys").toFile().apply { deleteOnExit() }
+        }, pqcStore = noPqcKeys()))
         every { manager.softwareEd25519Supported() } returns true
         every { manager.ed25519Prefs() } returns prefs
         assertThrows(KeyDeletionException::class.java) { manager.deleteByAlias("xkey_key_edsync") }
@@ -143,7 +155,11 @@ class KeyStoreSyncManagerStaleEntryTest {
     @Test
     fun `sync overlapping a removal whose commit then fails keeps the key row`() {
         val prefs = FakeSharedPreferences(mapOf("xkey_key_edrace" to "secret"))
-        val manager = spyk(KeystoreManager(mockk<Context>(relaxed = true), pqcStore = noPqcKeys()))
+        val manager = spyk(KeystoreManager(mockk<Context>(relaxed = true).also {
+            // The ML-DSA store reads the context's files directory: an empty one here.
+            every { it.applicationContext } returns it
+            every { it.filesDir } returns java.nio.file.Files.createTempDirectory("pqc-keys").toFile().apply { deleteOnExit() }
+        }, pqcStore = noPqcKeys()))
         every { manager.softwareEd25519Supported() } returns true
         every { manager.ed25519Prefs() } returns prefs
         val credentialDao = mockk<CredentialMetadataDao>(relaxed = true)

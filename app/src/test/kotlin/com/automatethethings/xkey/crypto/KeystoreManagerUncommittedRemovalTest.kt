@@ -64,7 +64,11 @@ class KeystoreManagerUncommittedRemovalTest {
         every { keyStore.containsAlias(any()) } returns false
         mockkStatic(KeyStore::class)
         every { KeyStore.getInstance("AndroidKeyStore") } returns keyStore
-        keystoreManager = KeystoreManager(mockk<Context>(relaxed = true), pqcStore = noPqcKeys())
+        keystoreManager = KeystoreManager(mockk<Context>(relaxed = true).also {
+            // The ML-DSA store reads the context's files directory: an empty one here.
+            every { it.applicationContext } returns it
+            every { it.filesDir } returns java.nio.file.Files.createTempDirectory("pqc-keys").toFile().apply { deleteOnExit() }
+        }, pqcStore = noPqcKeys())
     }
 
     @After
