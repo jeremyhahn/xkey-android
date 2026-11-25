@@ -171,14 +171,17 @@ class KeystoreUserVerificationKey(
                 }
         }
 
-        try {
-            return attestedChain(spec().setIsStrongBoxBacked(true).build())
-        } catch (e: Exception) {
-            Log.w(TAG, "StrongBox unavailable for the user verification key, falling back to TEE", e)
-            if (keyStore.containsAlias(alias)) keyStore.deleteEntry(alias)
-        }
+        // Only a StrongBox-unavailable failure takes the TEE path; any other
+        // failure is reported as a generation failure below.
         return try {
-            attestedChain(spec().build())
+            StrongBoxFallback.generate(
+                strongBox = { attestedChain(spec().setIsStrongBoxBacked(true).build()) },
+                onUnavailable = { e ->
+                    Log.w(TAG, "StrongBox unavailable for the user verification key, falling back to TEE", e)
+                    if (keyStore.containsAlias(alias)) keyStore.deleteEntry(alias)
+                },
+                tee = { attestedChain(spec().build()) }
+            )
         } catch (e: KeyGenerationException) {
             throw e
         } catch (e: Exception) {

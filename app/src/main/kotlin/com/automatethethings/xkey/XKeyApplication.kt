@@ -4,11 +4,18 @@ import android.app.Application
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.content.Context
 import android.os.Build
+import androidx.annotation.RequiresApi
 import com.automatethethings.xkey.audit.AuditLogger
+import com.automatethethings.xkey.crypto.KeystorePqcBackend
+import com.automatethethings.xkey.crypto.PqcHardware
+import com.automatethethings.xkey.crypto.PqcSoftwareKeyStore
 import com.automatethethings.xkey.settings.PairedDeviceGrantCleanup
 import com.automatethethings.xkey.settings.PairedDeviceRepository
 import com.automatethethings.xkey.storage.XKeyDatabase
+import com.automatethethings.xkey.ui.ClipboardFocusRetry
+import com.automatethethings.xkey.ui.PromptActivityTracker
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -23,9 +30,17 @@ class XKeyApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        // Pairing and biometric prompts are hosted by whichever screen is in front.
+        registerActivityLifecycleCallbacks(PromptActivityTracker)
         createNotificationChannels()
         initializeAuditLogger()
+        registerPqcSoftwareStore(this)
+        registerPqcHardware()
         registerGrantCleanup()
+        // Finish a copied secret's pending clipboard clear from any screen.
+        registerActivityLifecycleCallbacks(ClipboardFocusRetry)
+        // Media signatures the app may not write into the file (API 30+).
+        com.automatethethings.xkey.media.XmpMetadataHelper.usePrivateStore(this)
     }
 
     /**
@@ -33,6 +48,17 @@ class XKeyApplication : Application() {
      */
     private fun initializeAuditLogger() {
         AuditLogger.initialize(this)
+    }
+
+    /**
+     * Registers the Android Keystore ML-DSA backend and starts its probe on
+     * an application-lifetime IO scope. Startup never waits for it: until
+     * the probe ends no hardware ML-DSA set is offered.
+     */
+    private fun registerPqcHardware() {
+        val backend = KeystorePqcBackend()
+        PqcHardware.backend = backend
+        backend.startProbe(CoroutineScope(SupervisorJob() + Dispatchers.IO))
     }
 
     /**
@@ -77,20 +103,7 @@ class XKeyApplication : Application() {
             }
             notificationManager.createNotificationChannel(serviceChannel)
 
-            // Biometric request channel (high priority for lock screen visibility)
-            val biometricChannel = NotificationChannel(
-                BIOMETRIC_CHANNEL_ID,
-                getString(R.string.biometric_channel_name),
-                NotificationManager.IMPORTANCE_HIGH
-            ).apply {
-                description = getString(R.string.biometric_channel_description)
-                enableVibration(true)
-                vibrationPattern = longArrayOf(0, 250, 250, 250)
-                enableLights(true)
-                lockscreenVisibility = Notification.VISIBILITY_PUBLIC
-                setShowBadge(true)
-            }
-            notificationManager.createNotificationChannel(biometricChannel)
+            notificationManager.createNotificationChannel(biometricChannel(this))
         }
     }
 
@@ -100,5 +113,33 @@ class XKeyApplication : Application() {
 
         /** High-priority channel for biometric authentication requests. */
         const val BIOMETRIC_CHANNEL_ID = "xkey_biometric"
+
+        /**
+         * The biometric request channel: high priority, so it wakes a locked
+         * phone, and private, so the lock screen shows each notification's
+         * public version, which names no relying party.
+         */
+        @RequiresApi(Build.VERSION_CODES.O)
+        internal fun biometricChannel(context: Context): NotificationChannel = NotificationChannel(
+            BIOMETRIC_CHANNEL_ID,
+            context.getString(R.string.biometric_channel_name),
+            NotificationManager.IMPORTANCE_HIGH
+        ).apply {
+            description = context.getString(R.string.biometric_channel_description)
+            enableVibration(true)
+            vibrationPattern = longArrayOf(0, 250, 250, 250)
+            enableLights(true)
+            lockscreenVisibility = Notification.VISIBILITY_PRIVATE
+            setShowBadge(true)
+        }
+
+        /**
+         * Registers the app's software ML-DSA store before any screen runs,
+         * so a PIV key manager built without one (a PIV slot screen reopened
+         * alone after the process died) still finds it.
+         */
+        internal fun registerPqcSoftwareStore(context: Context) {
+            PqcSoftwareKeyStore.registerShared(context)
+        }
     }
 }

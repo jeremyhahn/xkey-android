@@ -23,6 +23,8 @@ import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.automatethethings.xkey.pin.LockoutClock
+import com.automatethethings.xkey.pin.SystemLockoutClock
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -48,9 +50,20 @@ import kotlinx.coroutines.flow.map
  * @property failedUserPinAttempts Number of consecutive failed User PIN attempts.
  * @property maxPinAttempts Maximum allowed failed attempts before lockout.
  * @property lockoutDurationSeconds Duration of lockout in seconds after max attempts exceeded.
- * @property backoffEnabled Whether exponential backoff is enabled for failed attempts.
- * @property soPinLockedUntil Epoch milliseconds until which the SO PIN is locked (0 = not locked).
- * @property userPinLockedUntil Epoch milliseconds until which the User PIN is locked (0 = not locked).
+ * @property backoffEnabled Whether each lockout after the first doubles (see
+ *   [com.automatethethings.xkey.pin.PinLockout]).
+ * @property soPinLockedUntil Informational epoch-ms deadline of the SO PIN
+ *   lockout, for display ([Long.MAX_VALUE] when blocked for good, 0 = not
+ *   locked). The lockout itself runs on the monotonic fields below; this is
+ *   only read to migrate state written before them.
+ * @property userPinLockedUntil As [soPinLockedUntil], for the User PIN.
+ * @property soPinLockoutRemainingMs SO PIN lockout time left as of its anchor.
+ * @property soPinLockoutAnchorElapsedMs `elapsedRealtime` the SO PIN remainder
+ *   was measured at, or -1 when unanchored.
+ * @property soPinLockoutBootId Boot identifier of that anchor.
+ * @property userPinLockoutRemainingMs As [soPinLockoutRemainingMs], for the User PIN.
+ * @property userPinLockoutAnchorElapsedMs As [soPinLockoutAnchorElapsedMs], for the User PIN.
+ * @property userPinLockoutBootId As [soPinLockoutBootId], for the User PIN.
  */
 public data class PinSettingsData(
     val soPinSet: Boolean = false,
@@ -65,7 +78,13 @@ public data class PinSettingsData(
     val lockoutDurationSeconds: Int = 300,
     val backoffEnabled: Boolean = true,
     val soPinLockedUntil: Long = 0,
-    val userPinLockedUntil: Long = 0
+    val userPinLockedUntil: Long = 0,
+    val soPinLockoutRemainingMs: Long = 0,
+    val soPinLockoutAnchorElapsedMs: Long = -1,
+    val soPinLockoutBootId: String? = null,
+    val userPinLockoutRemainingMs: Long = 0,
+    val userPinLockoutAnchorElapsedMs: Long = -1,
+    val userPinLockoutBootId: String? = null
 )
 
 /**
@@ -74,11 +93,18 @@ public data class PinSettingsData(
  * ([com.automatethethings.xkey.pin.PinLockout]).
  *
  * @property failedAttempts Number of consecutive failed vault unlocks.
- * @property lockedUntil Epoch milliseconds until which vault unlocks are refused (0 = not locked).
+ * @property lockedUntil Informational epoch-ms deadline (0 = not locked); only
+ *   read to migrate state written before the monotonic fields.
+ * @property remainingMs Lockout time left as of the anchor.
+ * @property anchorElapsedMs `elapsedRealtime` of the anchor, or -1 when unanchored.
+ * @property anchorBootId Boot identifier of the anchor.
  */
 public data class VaultUnlockAttempts(
     val failedAttempts: Int = 0,
-    val lockedUntil: Long = 0
+    val lockedUntil: Long = 0,
+    val remainingMs: Long = 0,
+    val anchorElapsedMs: Long = -1,
+    val anchorBootId: String? = null
 )
 
 /**
@@ -111,14 +137,19 @@ private val Context.pinSettingsDataStore: DataStore<Preferences> by preferencesD
  * ```
  *
  * @param dataStore The DataStore the settings are persisted in.
+ * @property lockoutClock The monotonic time base the PIN lockout is measured on.
  */
 public class PinSettingsRepository internal constructor(
-    private val dataStore: DataStore<Preferences>
+    private val dataStore: DataStore<Preferences>,
+    public val lockoutClock: LockoutClock = SystemLockoutClock()
 ) {
     /**
      * @param context The Android context used to access DataStore.
      */
-    public constructor(context: Context) : this(context.pinSettingsDataStore)
+    public constructor(context: Context) : this(
+        context.pinSettingsDataStore,
+        SystemLockoutClock(context.applicationContext.contentResolver)
+    )
 
     /**
      * Flow of PIN settings that emits whenever settings change.
@@ -168,6 +199,12 @@ public class PinSettingsRepository internal constructor(
             preferences[KEY_BACKOFF_ENABLED] = settings.backoffEnabled
             preferences[KEY_SO_PIN_LOCKED_UNTIL] = settings.soPinLockedUntil
             preferences[KEY_USER_PIN_LOCKED_UNTIL] = settings.userPinLockedUntil
+            preferences[KEY_SO_PIN_LOCKOUT_REMAINING_MS] = settings.soPinLockoutRemainingMs
+            preferences[KEY_SO_PIN_LOCKOUT_ANCHOR_ELAPSED_MS] = settings.soPinLockoutAnchorElapsedMs
+            preferences[KEY_SO_PIN_LOCKOUT_BOOT_ID] = settings.soPinLockoutBootId ?: ""
+            preferences[KEY_USER_PIN_LOCKOUT_REMAINING_MS] = settings.userPinLockoutRemainingMs
+            preferences[KEY_USER_PIN_LOCKOUT_ANCHOR_ELAPSED_MS] = settings.userPinLockoutAnchorElapsedMs
+            preferences[KEY_USER_PIN_LOCKOUT_BOOT_ID] = settings.userPinLockoutBootId ?: ""
         }
     }
 
@@ -328,7 +365,10 @@ public class PinSettingsRepository internal constructor(
         val preferences = dataStore.data.first()
         return VaultUnlockAttempts(
             failedAttempts = preferences[KEY_FAILED_VAULT_UNLOCK_ATTEMPTS] ?: 0,
-            lockedUntil = preferences[KEY_VAULT_UNLOCK_LOCKED_UNTIL] ?: 0
+            lockedUntil = preferences[KEY_VAULT_UNLOCK_LOCKED_UNTIL] ?: 0,
+            remainingMs = preferences[KEY_VAULT_UNLOCK_REMAINING_MS] ?: 0,
+            anchorElapsedMs = preferences[KEY_VAULT_UNLOCK_ANCHOR_ELAPSED_MS] ?: -1,
+            anchorBootId = preferences[KEY_VAULT_UNLOCK_BOOT_ID]?.ifEmpty { null }
         )
     }
 
@@ -341,6 +381,9 @@ public class PinSettingsRepository internal constructor(
         dataStore.edit { preferences ->
             preferences[KEY_FAILED_VAULT_UNLOCK_ATTEMPTS] = attempts.failedAttempts
             preferences[KEY_VAULT_UNLOCK_LOCKED_UNTIL] = attempts.lockedUntil
+            preferences[KEY_VAULT_UNLOCK_REMAINING_MS] = attempts.remainingMs
+            preferences[KEY_VAULT_UNLOCK_ANCHOR_ELAPSED_MS] = attempts.anchorElapsedMs
+            preferences[KEY_VAULT_UNLOCK_BOOT_ID] = attempts.anchorBootId ?: ""
         }
     }
 
@@ -380,7 +423,13 @@ public class PinSettingsRepository internal constructor(
             lockoutDurationSeconds = preferences[KEY_LOCKOUT_DURATION_SECONDS] ?: 300,
             backoffEnabled = preferences[KEY_BACKOFF_ENABLED] ?: true,
             soPinLockedUntil = preferences[KEY_SO_PIN_LOCKED_UNTIL] ?: 0,
-            userPinLockedUntil = preferences[KEY_USER_PIN_LOCKED_UNTIL] ?: 0
+            userPinLockedUntil = preferences[KEY_USER_PIN_LOCKED_UNTIL] ?: 0,
+            soPinLockoutRemainingMs = preferences[KEY_SO_PIN_LOCKOUT_REMAINING_MS] ?: 0,
+            soPinLockoutAnchorElapsedMs = preferences[KEY_SO_PIN_LOCKOUT_ANCHOR_ELAPSED_MS] ?: -1,
+            soPinLockoutBootId = preferences[KEY_SO_PIN_LOCKOUT_BOOT_ID]?.ifEmpty { null },
+            userPinLockoutRemainingMs = preferences[KEY_USER_PIN_LOCKOUT_REMAINING_MS] ?: 0,
+            userPinLockoutAnchorElapsedMs = preferences[KEY_USER_PIN_LOCKOUT_ANCHOR_ELAPSED_MS] ?: -1,
+            userPinLockoutBootId = preferences[KEY_USER_PIN_LOCKOUT_BOOT_ID]?.ifEmpty { null }
         )
     }
 
@@ -400,5 +449,14 @@ public class PinSettingsRepository internal constructor(
         val KEY_USER_PIN_LOCKED_UNTIL = longPreferencesKey("user_pin_locked_until")
         val KEY_FAILED_VAULT_UNLOCK_ATTEMPTS = intPreferencesKey("failed_vault_unlock_attempts")
         val KEY_VAULT_UNLOCK_LOCKED_UNTIL = longPreferencesKey("vault_unlock_locked_until")
+        val KEY_SO_PIN_LOCKOUT_REMAINING_MS = longPreferencesKey("so_pin_lockout_remaining_ms")
+        val KEY_SO_PIN_LOCKOUT_ANCHOR_ELAPSED_MS = longPreferencesKey("so_pin_lockout_anchor_elapsed_ms")
+        val KEY_SO_PIN_LOCKOUT_BOOT_ID = stringPreferencesKey("so_pin_lockout_boot_id")
+        val KEY_USER_PIN_LOCKOUT_REMAINING_MS = longPreferencesKey("user_pin_lockout_remaining_ms")
+        val KEY_USER_PIN_LOCKOUT_ANCHOR_ELAPSED_MS = longPreferencesKey("user_pin_lockout_anchor_elapsed_ms")
+        val KEY_USER_PIN_LOCKOUT_BOOT_ID = stringPreferencesKey("user_pin_lockout_boot_id")
+        val KEY_VAULT_UNLOCK_REMAINING_MS = longPreferencesKey("vault_unlock_remaining_ms")
+        val KEY_VAULT_UNLOCK_ANCHOR_ELAPSED_MS = longPreferencesKey("vault_unlock_anchor_elapsed_ms")
+        val KEY_VAULT_UNLOCK_BOOT_ID = stringPreferencesKey("vault_unlock_boot_id")
     }
 }

@@ -15,6 +15,7 @@
 package com.automatethethings.xkey.bootstrap
 
 import android.util.Log
+import com.automatethethings.xkey.ble.X25519
 import com.automatethethings.xkey.settings.BootstrapMethod
 import com.automatethethings.xkey.settings.BootstrapSettingsData
 import kotlinx.coroutines.Dispatchers
@@ -89,6 +90,7 @@ class BootstrapClient(
         private const val MAX_FRAME_SIZE = 65535
         private const val KEY_SIZE = 32
         private const val TAG_SIZE = 16
+        private const val MAX_CAUSE_DEPTH = 16
 
         /**
          * Upper bound on certificates accepted from a bootstrap bundle. A trust
@@ -388,6 +390,17 @@ class BootstrapClient(
                 certificates = derCerts,
                 method = BootstrapMethod.NOISE
             )
+        } catch (e: BootstrapException) {
+            throw e
+        } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // A tampered or truncated exchange surfaces from the AEAD, the
+            // stream or the JSON parser; report it as the method's failure.
+            throw NoiseBootstrapException(
+                "Noise exchange with $host:$port failed: ${e.javaClass.simpleName}",
+                e
+            )
         } finally {
             socket.close()
         }
@@ -426,6 +439,13 @@ class BootstrapClient(
         } catch (e: SPKIException) {
             throw e
         } catch (e: Exception) {
+            // The TLS stack wraps the trust manager's SPKIException (JSSE in an
+            // SSLException), so look for it before reporting a transport failure.
+            generateSequence(e.cause) { it.cause }
+                .take(MAX_CAUSE_DEPTH)
+                .filterIsInstance<SPKIException>()
+                .firstOrNull()
+                ?.let { throw it }
             throw DirectException("SPKI fetch failed from $url", cause = e)
         }
 
@@ -562,15 +582,16 @@ class BootstrapClient(
                     throw SPKIException(expectedPin)
                 }
 
-                for (cert in chain) {
-                    val actualPin = computeSPKIPin(cert)
-                    if (actualPin == expectedPin) {
+                // A pin on chain[i] counts only when the leaf really chains up to
+                // it: the pinned certificate is public, so a server could
+                // otherwise append it after a leaf of its own.
+                for (index in chain.indices) {
+                    if (computeSPKIPin(chain[index]) == expectedPin && leafChainsTo(chain, index)) {
                         return // Pin matched
                     }
                 }
 
-                val actualPin = if (chain.isNotEmpty()) computeSPKIPin(chain[0]) else null
-                throw SPKIException(expectedPin, actualPin)
+                throw SPKIException(expectedPin, computeSPKIPin(chain[0]))
             }
 
             override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf()
@@ -592,6 +613,25 @@ class BootstrapClient(
         val digest = MessageDigest.getInstance("SHA-256")
         val hash = digest.digest(spki)
         return bytesToHex(hash)
+    }
+
+    /**
+     * True when every certificate from the leaf up to `chain[index]` names the
+     * next one as its issuer and carries a signature that verifies under the
+     * next one's key. A pin on the leaf itself (index 0) needs no signature.
+     */
+    private fun leafChainsTo(chain: Array<X509Certificate>, index: Int): Boolean {
+        for (i in 0 until index) {
+            val child = chain[i]
+            val parent = chain[i + 1]
+            if (child.issuerX500Principal != parent.subjectX500Principal) return false
+            try {
+                child.verify(parent.publicKey)
+            } catch (_: Exception) {
+                return false
+            }
+        }
+        return true
     }
 
     /**
@@ -822,119 +862,11 @@ class BootstrapClient(
                 .array()
         }
 
-        private fun x25519ScalarMultBase(scalar: ByteArray): ByteArray {
-            val basePoint = ByteArray(32)
-            basePoint[0] = 9
-            return x25519ScalarMultPure(scalar, basePoint)
-        }
+        private fun x25519ScalarMultBase(scalar: ByteArray): ByteArray = X25519.scalarMultBase(scalar)
 
-        private fun x25519(privateKey: ByteArray, publicKey: ByteArray): ByteArray {
-            return try {
-                val privKeySpec = java.security.spec.PKCS8EncodedKeySpec(wrapX25519PrivateKey(privateKey))
-                val pubKeySpec = java.security.spec.X509EncodedKeySpec(wrapX25519PublicKey(publicKey))
-
-                val keyFactory = java.security.KeyFactory.getInstance("X25519")
-                val privKey = keyFactory.generatePrivate(privKeySpec)
-                val pubKey = keyFactory.generatePublic(pubKeySpec)
-
-                val keyAgreement = javax.crypto.KeyAgreement.getInstance("X25519")
-                keyAgreement.init(privKey)
-                keyAgreement.doPhase(pubKey, true)
-                keyAgreement.generateSecret()
-            } catch (e: Exception) {
-                x25519ScalarMultPure(privateKey, publicKey)
-            }
-        }
-
-        private fun x25519ScalarMultPure(k: ByteArray, u: ByteArray): ByteArray {
-            val p = java.math.BigInteger.ONE.shiftLeft(255).subtract(java.math.BigInteger.valueOf(19))
-
-            val kClamped = k.copyOf()
-            kClamped[0] = (kClamped[0].toInt() and 248).toByte()
-            kClamped[31] = (kClamped[31].toInt() and 127).toByte()
-            kClamped[31] = (kClamped[31].toInt() or 64).toByte()
-
-            val uInt = decodeLittleEndian(u).mod(p)
-
-            var x1 = uInt
-            var x2 = java.math.BigInteger.ONE
-            var z2 = java.math.BigInteger.ZERO
-            var x3 = uInt
-            var z3 = java.math.BigInteger.ONE
-
-            var swap = java.math.BigInteger.ZERO
-
-            for (t in 254 downTo 0) {
-                val kT = kClamped[t / 8].toInt().ushr(t % 8).and(1)
-                val kTBig = java.math.BigInteger.valueOf(kT.toLong())
-
-                swap = swap.xor(kTBig)
-                val (cx2, cx3) = cswap(swap, x2, x3)
-                val (cz2, cz3) = cswap(swap, z2, z3)
-                x2 = cx2; x3 = cx3; z2 = cz2; z3 = cz3
-                swap = kTBig
-
-                val a = x2.add(z2).mod(p)
-                val aa = a.multiply(a).mod(p)
-                val b = x2.subtract(z2).mod(p)
-                val bb = b.multiply(b).mod(p)
-                val e = aa.subtract(bb).mod(p)
-                val c = x3.add(z3).mod(p)
-                val d = x3.subtract(z3).mod(p)
-                val da = d.multiply(a).mod(p)
-                val cb = c.multiply(b).mod(p)
-                x3 = da.add(cb).mod(p).pow(2).mod(p)
-                z3 = x1.multiply(da.subtract(cb).mod(p).pow(2)).mod(p)
-                x2 = aa.multiply(bb).mod(p)
-                val a24 = java.math.BigInteger.valueOf(121665)
-                z2 = e.multiply(aa.add(a24.multiply(e))).mod(p)
-            }
-
-            val (fx2, _) = cswap(swap, x2, x3)
-            val (fz2, _) = cswap(swap, z2, z3)
-
-            val result = fx2.multiply(fz2.modPow(p.subtract(java.math.BigInteger.valueOf(2)), p)).mod(p)
-            return encodeLittleEndian(result)
-        }
-
-        private fun decodeLittleEndian(b: ByteArray): java.math.BigInteger {
-            return java.math.BigInteger(1, b.reversedArray())
-        }
-
-        private fun encodeLittleEndian(n: java.math.BigInteger): ByteArray {
-            var bytes = n.toByteArray()
-            if (bytes.size > 32 && bytes[0] == 0.toByte()) {
-                bytes = bytes.copyOfRange(1, bytes.size)
-            }
-            val result = ByteArray(32)
-            val offset = 32 - bytes.size
-            System.arraycopy(bytes, 0, result, offset, bytes.size)
-            return result.reversedArray()
-        }
-
-        private fun cswap(
-            swap: java.math.BigInteger,
-            a: java.math.BigInteger,
-            b: java.math.BigInteger
-        ): Pair<java.math.BigInteger, java.math.BigInteger> {
-            return if (swap == java.math.BigInteger.ONE) Pair(b, a) else Pair(a, b)
-        }
-
-        private fun wrapX25519PrivateKey(raw: ByteArray): ByteArray {
-            val header = byteArrayOf(
-                0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05,
-                0x06, 0x03, 0x2b, 0x65, 0x6e, 0x04, 0x22, 0x04, 0x20
-            )
-            return header + raw
-        }
-
-        private fun wrapX25519PublicKey(raw: ByteArray): ByteArray {
-            val header = byteArrayOf(
-                0x30, 0x2a, 0x30, 0x05,
-                0x06, 0x03, 0x2b, 0x65, 0x6e, 0x03, 0x21, 0x00
-            )
-            return header + raw
-        }
+        /** DH through the shared helper, which refuses an all-zero result. */
+        private fun x25519(privateKey: ByteArray, publicKey: ByteArray): ByteArray =
+            X25519.dh(privateKey, publicKey)
 
         private fun chacha20Poly1305Encrypt(
             key: ByteArray,

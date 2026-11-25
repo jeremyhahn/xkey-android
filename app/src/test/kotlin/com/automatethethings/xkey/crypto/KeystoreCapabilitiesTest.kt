@@ -61,6 +61,23 @@ class KeystoreCapabilitiesTest {
     }
 
     @Test
+    fun `every release lists P-521, AES-192, HMAC-SHA384 and every RSA hash`() {
+        for (sdk in 28..37) {
+            val algorithms = KeystoreCapabilities.supportedAlgorithms(sdk)
+            for (name in listOf("ES512", "AES192", "HMAC-SHA384", "RS256", "RS384", "RS512")) {
+                assertTrue("API $sdk lists $name", algorithms.contains(name))
+            }
+        }
+    }
+
+    @Test
+    fun `every listed algorithm is one local generateKey parses`() {
+        for (name in KeystoreCapabilities.BASE_ALGORITHMS) {
+            com.automatethethings.xkey.protocol.CoseAlgorithms.fromName(name)
+        }
+    }
+
+    @Test
     fun `every release lists the Keystore algorithms available since minSdk`() {
         for (sdk in 28..37) {
             val algorithms = KeystoreCapabilities.supportedAlgorithms(sdk)
@@ -71,6 +88,48 @@ class KeystoreCapabilitiesTest {
         }
         for (sdk in 28..37) {
             assertEquals(KeystoreCapabilities.BASE_ALGORITHMS, KeystoreCapabilities.supportedAlgorithms(sdk))
+        }
+    }
+
+    @Test
+    fun `every release lists the three ML-DSA parameter sets`() {
+        for (sdk in 28..37) {
+            val algorithms = KeystoreCapabilities.supportedAlgorithms(sdk)
+            for (name in listOf("ML-DSA-44", "ML-DSA-65", "ML-DSA-87")) {
+                assertTrue("API $sdk lists $name", algorithms.contains(name))
+            }
+        }
+    }
+
+    @Test
+    fun `hardwareAlgorithms is empty with no hardware backend`() {
+        val saved = PqcHardware.backend
+        try {
+            PqcHardware.backend = null
+            assertEquals(emptyList<String>(), KeystoreCapabilities.hardwareAlgorithms())
+        } finally {
+            PqcHardware.backend = saved
+        }
+    }
+
+    @Test
+    fun `hardwareAlgorithms lists only the sets the backend makes, in order`() {
+        val saved = PqcHardware.backend
+        try {
+            PqcHardware.backend = object : PqcHardwareBackend {
+                override fun supportedParameterSets() =
+                    setOf(MlDsaParameterSet.ML_DSA_87, MlDsaParameterSet.ML_DSA_44)
+                override fun generate(
+                    alias: String,
+                    set: MlDsaParameterSet,
+                    authDurationSeconds: Int,
+                    preferStrongBox: Boolean
+                ): ByteArray = throw UnsupportedOperationException()
+                override fun jcaSignatureAlgorithm(set: MlDsaParameterSet) = set.wireName
+            }
+            assertEquals(listOf("ML-DSA-44", "ML-DSA-87"), KeystoreCapabilities.hardwareAlgorithms())
+        } finally {
+            PqcHardware.backend = saved
         }
     }
 }

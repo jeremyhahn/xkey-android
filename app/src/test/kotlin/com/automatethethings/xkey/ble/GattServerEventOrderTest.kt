@@ -56,7 +56,7 @@ import org.junit.Before
 import org.junit.Test
 
 /**
- * Each connection's GATT events are handled in the order they arrived (#63).
+ * Each connection's GATT events are handled in the order they arrived.
  * A write carrying the desktop's answer to a phone-initiated request, then a
  * disconnect, delivers the answer: the disconnect settles only what is still
  * unanswered, after the write is drained.
@@ -101,6 +101,7 @@ class GattServerEventOrderTest {
 
     @Before
     fun setUp() {
+        NoiseTestKeyStore.install()
         mockkStatic(Log::class)
         every { Log.v(any(), any<String>()) } returns 0
         every { Log.d(any(), any<String>()) } returns 0

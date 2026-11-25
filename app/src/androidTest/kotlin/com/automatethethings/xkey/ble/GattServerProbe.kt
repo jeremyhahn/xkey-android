@@ -190,6 +190,11 @@ class GattServerProbe(
         invoke(adoptPairingMethod)
     }
 
+    /** Marks the established session confirmed, as an approved pairing.confirm leaves it. */
+    fun confirmPairing() {
+        write("pairingConfirmed", true)
+    }
+
     fun rejectUnpaired(plaintext: ByteArray): ByteArray? =
         invoke(rejectUnpairedMethod, plaintext) as ByteArray?
 

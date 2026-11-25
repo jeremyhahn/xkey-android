@@ -14,13 +14,19 @@
  */
 package com.automatethethings.xkey.crypto
 
+import org.bouncycastle.jce.provider.BouncyCastleProvider
 import java.io.ByteArrayOutputStream
 import java.math.BigInteger
 import java.security.KeyPair
 import java.security.KeyPairGenerator
+import java.security.MessageDigest
+import java.security.PrivateKey
+import java.security.Signature
 import java.security.interfaces.ECPublicKey
 import java.security.interfaces.RSAPublicKey
 import java.security.spec.ECGenParameterSpec
+import java.security.spec.MGF1ParameterSpec
+import java.security.spec.PSSParameterSpec
 
 /**
  * Builders for the TPM wire structures these tests need.
@@ -172,6 +178,40 @@ object TpmTestStructures {
         pcrDigest: ByteArray = ByteArray(32) { it.toByte() },
         magic: Int = TpmAttest.TPM_GENERATED,
         type: Int = TpmAttest.ST_ATTEST_QUOTE
+    ): ByteArray = quoteAttestWithSelection(
+        qualifiedSigner = qualifiedSigner,
+        extraData = extraData,
+        selection = pcrSelection(listOf(TpmAlg.SHA256 to (0..7).toSet())),
+        pcrDigest = pcrDigest,
+        magic = magic,
+        type = type
+    )
+
+    /**
+     * A quote over [pcrIndices] in [bank] whose signed digest is [pcrDigest];
+     * [pcrDigest] (the function) computes the digest a TPM would sign.
+     */
+    fun quoteAttest(
+        qualifiedSigner: ByteArray,
+        extraData: ByteArray,
+        bank: Int,
+        pcrIndices: Set<Int>,
+        pcrDigest: ByteArray
+    ): ByteArray = quoteAttestWithSelection(
+        qualifiedSigner = qualifiedSigner,
+        extraData = extraData,
+        selection = pcrSelection(listOf(bank to pcrIndices)),
+        pcrDigest = pcrDigest
+    )
+
+    /** A quote carrying [selection], an encoded TPML_PCR_SELECTION, verbatim. */
+    fun quoteAttestWithSelection(
+        qualifiedSigner: ByteArray,
+        extraData: ByteArray,
+        selection: ByteArray,
+        pcrDigest: ByteArray,
+        magic: Int = TpmAttest.TPM_GENERATED,
+        type: Int = TpmAttest.ST_ATTEST_QUOTE
     ): ByteArray {
         val out = ByteArrayOutputStream()
         out.writeU32(magic)
@@ -183,13 +223,78 @@ object TpmTestStructures {
         out.writeU32(2)                      // restartCount
         out.write(byteArrayOf(1))            // safe
         out.write(ByteArray(8))              // firmwareVersion
-        out.writeU32(1)                      // one PCR selection
-        out.writeU16(TpmAlg.SHA256)
-        out.write(byteArrayOf(3))            // sizeofSelect
-        out.write(byteArrayOf(0xFF.toByte(), 0, 0))
+        out.write(selection)
         out.write2B(pcrDigest)
         return out.toByteArray()
     }
+
+    /**
+     * A TPML_PCR_SELECTION with one TPMS_PCR_SELECTION per (bank, indices)
+     * entry; PCR n is bit n % 8 of bitmap byte n / 8. [count] overrides the
+     * declared count.
+     */
+    fun pcrSelection(
+        selections: List<Pair<Int, Set<Int>>>,
+        sizeOfSelect: Int = 3,
+        count: Int = selections.size
+    ): ByteArray {
+        val out = ByteArrayOutputStream()
+        out.writeU32(count)
+        selections.forEach { (bank, indices) ->
+            out.writeU16(bank)
+            out.write(sizeOfSelect)
+            val bitmap = ByteArray(sizeOfSelect)
+            indices.forEach { bitmap[it / 8] = (bitmap[it / 8].toInt() or (1 shl (it % 8))).toByte() }
+            out.write(bitmap)
+        }
+        return out.toByteArray()
+    }
+
+    /**
+     * The pcrDigest a TPM signs: the [hashAlg] digest of the PCR values
+     * concatenated in ascending index order.
+     */
+    fun pcrDigest(hashAlg: Int, values: Map<Int, ByteArray>): ByteArray {
+        val md = MessageDigest.getInstance(requireNotNull(TpmAlg.digestName(hashAlg)))
+        values.toSortedMap().values.forEach { md.update(it) }
+        return md.digest()
+    }
+
+    /** An RSA IAK that signs with RSASSA-PSS under [schemeHash]. */
+    fun rsaPssIak(keys: KeyPair, schemeHash: Int = TpmAlg.SHA256): TpmPublicArea =
+        TpmPublicArea.parse(
+            rsaPublicArea(
+                keys.public as RSAPublicKey, IAK_ATTRIBUTES,
+                scheme = TpmAlg.RSAPSS, schemeHash = schemeHash
+            )
+        )
+
+    /** A P-384 IAK named with SHA-384 that signs with ECDSA over SHA-384. */
+    fun p384Iak(keys: KeyPair): TpmPublicArea =
+        TpmPublicArea.parse(
+            eccPublicArea(
+                keys.public as ECPublicKey, IAK_ATTRIBUTES,
+                nameAlg = TpmAlg.SHA384, schemeHash = TpmAlg.SHA384,
+                curveId = 0x0004, coordinateSize = 48
+            )
+        )
+
+    /**
+     * An RSASSA-PSS signature with MGF1 over [digestName]. [saltLength]
+     * defaults to the digest length; Bouncy Castle is named explicitly because
+     * the JDK has no `SHA256withRSA/PSS`.
+     */
+    fun signRsaPss(
+        key: PrivateKey,
+        data: ByteArray,
+        digestName: String = "SHA-256",
+        saltLength: Int = MessageDigest.getInstance(digestName).digestLength
+    ): ByteArray =
+        Signature.getInstance("${digestName.replace("-", "")}withRSA/PSS", BouncyCastleProvider()).apply {
+            setParameter(PSSParameterSpec(digestName, "MGF1", MGF1ParameterSpec(digestName), saltLength, 1))
+            initSign(key)
+            update(data)
+        }.sign()
 
     /**
      * Builds the TPMS_ATTEST a TPM2_Certify produces.

@@ -41,6 +41,7 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 
@@ -97,7 +98,19 @@ class GenerationEchoTest {
             keystoreManager = keystoreManager,
             biometricLauncher = null,
             sessionAuthManager = null,
-            pairedDeviceRepository = null
+            pairedDeviceRepository = pairedDevices
+        )
+        // Key-use methods answer only a paired desktop.
+        handler.setConnectedDevicePublicKeyHex(PEER)
+    }
+
+    private val PEER = "aa01"
+
+    private val pairedDevices = mockk<com.automatethethings.xkey.settings.PairedDeviceRepository> {
+        every { lookupDevice(PEER) } returns com.automatethethings.xkey.settings.DeviceLookup.Paired(
+            mockk<com.automatethethings.xkey.settings.PairedDeviceData>(relaxed = true) {
+                every { requireAttestationForKeyUse } returns false
+            }
         )
     }
 
@@ -238,11 +251,11 @@ class GenerationEchoTest {
     // -----------------------------------------------------------------
 
     @Test
-    fun `a request missing its id echoes the generation with id 0`() = runTest {
+    fun `a request missing its id echoes the generation with a null id`() = runTest {
         val response = answer("""{"generation":48,"method":"ping"}""")
 
         assertEquals("48", rawGeneration(response))
-        assertEquals(0L, JSONObject(response).getLong("id"))
+        assertTrue(JSONObject(response).isNull("id"))
         assertEquals(ErrorCodes.INTERNAL_ERROR, errorCode(response))
     }
 
@@ -290,7 +303,7 @@ class GenerationEchoTest {
 
     @Test
     fun `Response toJsonString writes the generation as a number`() {
-        val text = Response.success(1, JSONObject(), generation = ULong.MAX_VALUE).toJsonString()
+        val text = Response.success(RpcId.of(1), JSONObject(), generation = ULong.MAX_VALUE).toJsonString()
 
         assertEquals(UINT64_MAX, rawGeneration(text))
         assertEquals(ULong.MAX_VALUE, Response.fromJson(text).generation)

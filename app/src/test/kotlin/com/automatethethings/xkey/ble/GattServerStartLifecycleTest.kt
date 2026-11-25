@@ -63,6 +63,7 @@ class GattServerStartLifecycleTest {
 
     @Before
     fun setUp() {
+        NoiseTestKeyStore.install()
         every { context.getSystemService(Context.BLUETOOTH_SERVICE) } returns manager
         every { manager.adapter } returns adapter
         every { adapter.isEnabled } returns true

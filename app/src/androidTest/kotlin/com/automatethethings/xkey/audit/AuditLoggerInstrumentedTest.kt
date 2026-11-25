@@ -38,11 +38,9 @@ import org.junit.runner.RunWith
  * exactly those rows in `@After` — the shared `audit_logs` table is left with the
  * same contents it had before, and no test asserts a table-wide count.
  *
- * The retention policy itself (`deleteOlderThan(now - 90d)` +
- * `deleteExceedingCount(10_000)`) is private and only runs inside
- * [AuditLogger.initialize] on a cold process, so it cannot be invoked from a
- * test that shares the process with an already-initialised logger; its query
- * semantics are pinned in `AuditLogDaoTest` instead.
+ * The retention policy (`deleteOlderThan(now - 90d)` +
+ * `deleteExceedingCount(10_000)`) runs on every [AuditLogger.initialize] call;
+ * `AuditRetentionTest` drives it, and `AuditLogDaoTest` pins its queries.
  */
 @RunWith(AndroidJUnit4::class)
 class AuditLoggerInstrumentedTest {

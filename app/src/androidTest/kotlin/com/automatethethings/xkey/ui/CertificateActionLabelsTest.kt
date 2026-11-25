@@ -99,7 +99,7 @@ class CertificateActionLabelsTest {
         openContextMenu(scenario, serial, DELETE_CN)
 
         onView(withText(R.string.cert_delete_title)).inRoot(isPlatformPopup()).perform(click())
-        onView(withText(R.string.cert_delete_confirm)).inRoot(isDialog()).perform(click())
+        DialogFlowSupport.clickInDialog(R.string.cert_delete_confirm)
 
         assertShownTextInTree(scenario, context.getString(R.string.cert_delete_success))
         awaitCondition("The certificate row should have been deleted") {

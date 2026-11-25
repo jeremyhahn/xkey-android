@@ -1,9 +1,9 @@
 # Exportable symmetric keys architecture
 
-> **Status: REFERENCE** · Last verified: 2026-11-12
-> As-built description of software-backed (exportable) AES and HMAC keys: how `local.generateKey` with `exportable` creates them, where their material lives, and when it may leave the phone.
+> Status: reference. Last checked against main on 2026-11-23.
+> This page describes software-backed (exportable) AES and HMAC keys: how `local.generateKey` with `exportable` creates them, where their material lives, and when it may leave the phone.
 
-## Summary
+## Overview
 
 Keys made in the Android Keystore never expose their material. A caller that
 needs a symmetric key it can share or sync passes `exportable: true` to
@@ -105,7 +105,7 @@ Hardware (Keystore) keys returned by `local.importSharedKey` carry
 
 ## Related features
 
-- [Key sharing](../key-sharing/) — sharing policies and the peer check used by `local.importSharedKey`.
-- [Hardware-backed keys](../hardware-backed-keys/) — the non-exportable Keystore path.
-- [Noise pairing](../noise-pairing/) — the encrypted channel the material crosses.
-- [Protected memory](../protected-memory/architecture.md)
+- [Key sharing](../key-sharing/): sharing policies and the peer check used by `local.importSharedKey`.
+- [Hardware-backed keys](../hardware-backed-keys/): the non-exportable Keystore path.
+- [Noise pairing](../noise-pairing/): the encrypted channel the material crosses.
+- [Protected memory](../protected-memory/architecture.md): how key material is held in memory.

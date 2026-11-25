@@ -300,9 +300,7 @@ class MediaSigningServiceSigningTest {
                 } else null
             }
         assumeTrue("this device's MediaStore exposes no file path", path != null)
-        // The service writes the signature through the raw path, and the EXIF
-        // writer stages it through a sibling temp file. A sandbox that allows
-        // neither is the environment deciding the outcome, not the service.
+        // A sandbox that blocks the raw path and the EXIF temp file decides the outcome, not the service.
         assumeTrue(
             "the MediaStore file is not writable through its path",
             runCatching {

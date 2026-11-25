@@ -44,7 +44,7 @@ import kotlinx.coroutines.withTimeoutOrNull
  * request worker, the teardown a disconnect launched) runs on to its end on
  * its own thread. If the test has unmocked `Log` by then, its next `Log`
  * call throws, and kotlinx-coroutines-test reports that exception in
- * whichever `runTest` comes next, as `UncaughtExceptionsBeforeTest` (#63).
+ * whichever `runTest` comes next, as `UncaughtExceptionsBeforeTest`.
  */
 internal fun awaitScopeFinished(owner: Any, timeoutMs: Long = 5_000L) {
     val scope = try {
@@ -82,7 +82,7 @@ internal fun trackScope(owner: Any): TrackingDispatcher {
 /**
  * A dispatcher that knows when the coroutines it runs have nothing left to
  * do, so a test waits on what the server does rather than for a settle
- * window (#160).
+ * window.
  *
  * It counts the steps it has been handed and not yet finished. A callback,
  * a `Mutex.unlock` or a `complete` dispatches the coroutine it resumes
@@ -93,7 +93,7 @@ internal fun trackScope(owner: Any): TrackingDispatcher {
  *
  * It also holds the scope's timers (`delay`, `withTimeout`): a timer fires
  * only when the test moves [now] past it with [advanceTimeBy], never on the
- * wall clock (#252). So what a test sees before it advances was caused by
+ * wall clock. So what a test sees before it advances was caused by
  * the events it delivered, not by a wait expiring, however slow the runner;
  * a wall-clock bound in [awaitIdle] or [eventually] only stops a hung test.
  */

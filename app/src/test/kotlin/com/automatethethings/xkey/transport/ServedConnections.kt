@@ -28,7 +28,7 @@ import kotlinx.coroutines.withTimeout
 /**
  * The phone's side of the connections a test serves, and the scope `serve`
  * runs in. [end] closes every accepted socket, so a `serve` blocked on a read
- * returns, and waits for the scope's coroutines to finish (#64): nothing is
+ * returns, and waits for the scope's coroutines to finish: nothing is
  * mid-serve, still logging, when the test unmocks `Log`.
  */
 internal class ServedConnections(private val timeoutMs: Long = 10_000L) {

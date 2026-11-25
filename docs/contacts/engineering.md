@@ -1,103 +1,66 @@
-# Contact Management
+# Contacts
 
-> **Status: REFERENCE** · Last verified: 2026-10-09
-> As-built description of xKey's contact/recipient key management.
+> **Status: REFERENCE** · Last verified: 2026-11-24
+> How the phone stores other people's public keys and where it uses them.
+> The table itself is in [architecture.md](architecture.md).
 
-This document describes the contact/recipient key management system used by
-xKey for file encryption and signature verification.
+A contact is a public key with a name on it. The app reads contacts in two
+places:
 
-## Overview
+- `FileOperationActivity` lists them as encryption recipients, next to your
+  own encryption keys.
+- `VerifiedMediaViewerActivity` and `FileOperationActivity` look up a
+  signature's key fingerprint in contacts to name the signer and check the
+  signature (see [signer lookup](#signer-lookup)).
 
-Contacts store public keys of other people or devices. They are used to:
+The screen is `ContactManagementActivity`.
 
-- **Encrypt files for a recipient**: Select a contact's public key as the
-  encryption target in `FileOperationActivity`.
-- **Verify signatures**: Resolve a key fingerprint to a known contact name
-  in `VerifiedMediaViewerActivity`.
-- **Co-signing identity**: Display signer names for known contacts.
+## Parsing a key
 
-## ContactEntity Schema
+Every import in the app goes through `ContactKeyParser` (in `crypto/`, plain
+JVM, unit-tested). It takes DER or PEM bytes and returns the key's DER
+encoding, an algorithm and a fingerprint, or nothing.
 
-```kotlin
-@Entity(tableName = "contacts", indices = [
-    Index(value = ["public_key_fingerprint"], unique = true),
-    Index(value = ["name"]),
-    Index(value = ["algorithm"])
-])
-data class ContactEntity(
-    @PrimaryKey(autoGenerate = true) val id: Long = 0,
-    val name: String,
-    @ColumnInfo(name = "public_key_der") val publicKeyDer: ByteArray,
-    @ColumnInfo(name = "public_key_fingerprint") val publicKeyFingerprint: String,
-    val algorithm: String,
-    @ColumnInfo(name = "imported_at") val importedAt: Long,
-    val source: String,
-    val notes: String? = null
-)
-```
+- DER is tried first; if that fails the bytes are read as PEM text. The
+  `-----` header and footer lines are dropped and the Base64 body may wrap.
+- EC keys are named by curve: P-256 is `ES256`, P-384 is `ES384`, P-521 is
+  `ES512`. The curve is matched on its full parameters, not its size, so a
+  256-bit curve like secp256k1 is refused.
+- RSA keys of any size are `RS256`.
+- Anything else is refused.
 
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | Long | Auto-generated primary key |
-| `name` | String | Human-readable contact name |
-| `public_key_der` | ByteArray | DER-encoded public key (X.509 SubjectPublicKeyInfo) |
-| `public_key_fingerprint` | String | SHA-256 hex digest of `public_key_der` |
-| `algorithm` | String | Key algorithm: `ES256`, `ES384`, `RS256`, etc. |
-| `imported_at` | Long | Unix timestamp (ms) of import time |
-| `source` | String | Import method: `file`, `qr`, `ble`, `paste` |
-| `notes` | String? | Optional user notes |
+The algorithm stored is always the one detected from the key. A QR payload
+can carry an `algorithm` field, and `ContactKeyParser.resolveAlgorithm`
+ignores it.
 
-## Fingerprint Computation
+The fingerprint is the lowercase hex SHA-256 of the DER bytes, 64 characters
+(`ContactKeyParser.fingerprint`). The screen shows it as uppercase pairs
+joined by colons, cut short in the list and in full in the detail dialog.
 
-The fingerprint uniquely identifies a public key and is computed as:
+## Ways in
 
-```
-fingerprint = lowercase_hex(SHA-256(public_key_der_bytes))
-```
+The add button opens a bottom sheet with three choices. Each one ends in the
+same name prompt and the same insert (`insertContact`), which also records a
+`CONTACT_IMPORTED` audit entry.
 
-This produces a 64-character hex string. Example:
+**Import from File.** A system file picker (`OpenDocument`, any type). The
+file's bytes go to `ContactKeyParser`. Source `file`.
 
-```
-a1b2c3d4e5f67890abcdef1234567890abcdef1234567890abcdef1234567890
-```
+**Scan QR Code.** Asks for the camera permission, then opens a camera preview
+in a dialog (`QrCodeScannerHelper`: CameraX with ML Kit). The decoded text is
+handled by `ContactImportCandidate.fromScannedPayload`. Text starting with `{`
+is read as an xKey contact envelope; anything else is read as PEM. A payload
+with no usable key shows `contact_qr_invalid`. Source `qr`.
 
-The fingerprint is used for:
+**Paste Public Key.** A text box for a PEM key. Source `paste`.
 
-- **Deduplication**: Unique index on `public_key_fingerprint` prevents
-  importing the same key twice.
-- **Signer resolution**: `ContactDao.getByFingerprint()` maps a fingerprint
-  from a `SignatureEntry` to a contact name.
-- **Display**: Abbreviated fingerprint shown in verification badges.
+A paired desktop can also push a key with `local.sharePublicKey`. That path
+lives in `RequestHandler`, skips the name prompt (the name is the sent
+`label`, else the `key_id`), stores whatever `algorithm` the desktop sent
+(`unknown` if none), and uses source `shared`. A key already in contacts is
+left alone and records nothing.
 
-Computation is performed by `MediaHasher.hashBytes()`:
-
-```kotlin
-fun hashBytes(data: ByteArray): String {
-    val digest = MessageDigest.getInstance("SHA-256")
-    return digest.digest(data).joinToString("") { "%02x".format(it) }
-}
-```
-
-## Import Methods
-
-### File Import (DER/PEM)
-
-1. User taps FAB in `ContactManagementActivity`, selects "Import from File"
-2. `ActivityResultContracts.OpenDocument("*/*")` opens system file picker
-3. File is read via `ContentResolver.openInputStream()`
-4. Parse as DER (raw bytes) or PEM (Base64 between header/footer)
-5. Detect algorithm from the parsed `PublicKey` type (EC curve, RSA size)
-6. Prompt for contact name
-7. Compute fingerprint, insert into Room
-
-### QR Code Scan
-
-1. User selects "Scan QR Code" from the import bottom sheet
-2. `QrCodeScannerHelper` opens CameraX preview with ML Kit barcode scanner
-3. A decoded string that starts with `{` is read as a JSON contact envelope;
-   any other text is treated as the key material itself
-
-**QR Payload Format**:
+### The QR envelope
 
 ```json
 {
@@ -110,133 +73,80 @@ fun hashBytes(data: ByteArray): String {
 }
 ```
 
-The field names mirror the `local.sharePublicKey` wire parameters.
+The field names match the `local.sharePublicKey` parameters.
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `type` | string | Always `"xkey-contact"` |
-| `v` | int | Payload version (`1` in this build; other values are still read) |
-| `label` | string | Suggested contact name |
-| `algorithm` | string | Algorithm hint |
-| `key_id` | string | Key identifier on the exporting device |
-| `public_key_pem` | string | PEM-encoded public key; the only field an importer needs |
+| Field | Type | Use on import |
+|-------|------|---------------|
+| `type` | string | Must be `xkey-contact` or the envelope is not recognised |
+| `v` | int | This build writes `1`; any value is accepted |
+| `label` | string | Pre-fills the name prompt |
+| `algorithm` | string | Ignored; the key decides |
+| `key_id` | string | Ignored |
+| `public_key_pem` | string | The key. The only field an importer needs |
 
-4. Parse `public_key_pem` with `parsePEM`; a scan that is not an envelope is
-   parsed as PEM directly. An unparseable key shows
-   `R.string.contact_qr_invalid`
-5. Prompt for name (pre-filled from `label`)
-6. Compute fingerprint, insert into Room
+## Showing your own key
 
-### Manual Paste (PEM)
+The screen's menu has "Show My Public Key QR". It lists your keys that the
+Android Keystore can return a public key for (`loadOwnPublicKeys`, via
+`KeystoreManager.getPublicKeyPEM`), so symmetric keys and keys held on a
+paired desktop are left out. With no such key, a dialog says so. The chosen
+key is written into the envelope above and drawn with ZXing's
+`QRCodeWriter`, on a white square that does not follow the dark theme,
+because scanners want dark modules on a light background. The dialog also
+shows the algorithm and fingerprint so the other person can compare.
 
-1. User selects "Paste PEM Key" from the import bottom sheet
-2. Dialog with `EditText` is shown
-3. User pastes PEM-encoded public key
-4. Parse PEM: strip `-----BEGIN PUBLIC KEY-----` / `-----END PUBLIC KEY-----`
-   headers, Base64-decode the body
-5. Detect algorithm, prompt for name
-6. Compute fingerprint, insert into Room
+## Duplicates
 
-### BLE Exchange
+`public_key_fingerprint` has a unique index and `ContactDao.insert` uses
+`OnConflictStrategy.ABORT`. Importing a key that is already stored throws
+`SQLiteConstraintException`, which the screen turns into "Contact with this
+key already exists". The same DER bytes always give the same fingerprint, so
+the same key cannot be stored twice under two names.
 
-When paired devices exchange public keys during a co-sign session or manual
-key share, the received public key can be imported as a contact.
+## Signer lookup
 
-## Export
-
-Users can export their own public key as a QR code for others to scan:
-
-1. Toolbar action in `ContactManagementActivity`
-2. User selects which of their keys to export
-3. `KeystoreManager.getPublicKeyDER(keyId)` retrieves the DER public key
-4. Build QR payload JSON with name, algorithm, and Base64 key
-5. `QrCodeGenerator` renders QR bitmap from the JSON string
-6. Display QR in a dialog for the other party to scan
-
-## Deduplication
-
-The unique index on `public_key_fingerprint` prevents duplicate imports:
-
-```sql
-CREATE UNIQUE INDEX index_contacts_public_key_fingerprint
-    ON contacts (public_key_fingerprint)
-```
-
-If a user attempts to import a key that already exists (same DER bytes produce
-the same SHA-256 fingerprint), the Room insert will throw a `SQLiteConstraintException`.
-The UI catches this and shows a "Contact already exists" message.
-
-## Key Resolution Flow
-
-When verifying a signature, xKey resolves the signer's key fingerprint to
-a known identity:
+`SignerVerification.verify` (in `media/`) is the one rule both the media
+viewer and the file screen use for each signature entry:
 
 ```mermaid
 graph TB
-    Start[SignatureEntry.keyFingerprint] --> KeyDao{"KeyDao<br/>getByPublicKeyFingerprint()"}
-    KeyDao -->|Found| LocalKey[Local Key<br/>name = KeyEntity.label<br/>publicKey = KeyEntity.publicKeyDer]
-    KeyDao -->|Not found| ContactDao{"ContactDao<br/>getByFingerprint()"}
-    ContactDao -->|Found| Contact[Contact<br/>name = ContactEntity.name<br/>publicKey = ContactEntity.publicKeyDer]
-    ContactDao -->|Not found| Unknown[Unknown Signer<br/>name = fingerprint prefix<br/>publicKey = null]
-
-    LocalKey --> Verify{Verify Signature}
-    Contact --> Verify
-    Unknown --> CannotVerify[Cannot verify<br/>no public key available]
-
-    Verify -->|Valid| Verified[Verified Signer]
-    Verify -->|Invalid| Failed[Failed Verification]
+    Start[SignatureEntry.keyFingerprint] --> C{"ContactDao<br/>getByFingerprint()"}
+    C -->|found| Contact[Named by the contact<br/>checked with its public key]
+    C -->|not found| K{"Own keys whose<br/>SHA-256 public key matches"}
+    K -->|found| Local[Named by the key label<br/>checked with its public key]
+    K -->|not found| Unknown[UNKNOWN<br/>embedded name or fingerprint prefix]
+    Contact --> V{Content hash and<br/>signature check}
+    Local --> V
+    V -->|pass| Verified[VERIFIED]
+    V -->|fail| Failed[FAILED]
 ```
 
-Note: For unknown signers, verification cannot be performed because the public
-key is not available. The UI shows a yellow badge indicating the signature
-exists but the signer is not recognized.
+Contacts are checked first. Own keys only match on the hash of the public key
+the phone holds, never on a key id from the file. If the file's content hash
+does not match, every signer fails, known or not. When a matched signer's
+embedded name differs from the contact or key name, the row is named by the
+stored name, and the media viewer adds a line with the embedded name as a
+claim.
 
-## ContactDao Operations
+## ContactDao
 
-```kotlin
-@Dao
-interface ContactDao {
-    @Insert
-    suspend fun insert(contact: ContactEntity)
+| Method | Query |
+|--------|-------|
+| `insert(contact): Long` | Insert, abort on conflict |
+| `getAll()` / `observeAll()` | All contacts, ordered by name |
+| `getByFingerprint(fp)` | One contact or null |
+| `searchByName(query)` | Case-insensitive substring match, ordered by name |
+| `deleteByFingerprint(fp): Int` | Delete by fingerprint |
+| `deleteById(id): Int` | Delete by id |
+| `countAll(): Long` / `observeCount()` | Row count |
 
-    @Query("SELECT * FROM contacts ORDER BY name ASC")
-    suspend fun getAll(): List<ContactEntity>
+## The screen
 
-    @Query("SELECT * FROM contacts ORDER BY name ASC")
-    fun observeAll(): Flow<List<ContactEntity>>
+`ContactManagementActivity` builds its views in code. From the top: a header,
+a summary card with the contact count, the list (or an empty state when there
+are none), and the add button, which hides while you scroll.
 
-    @Query("SELECT * FROM contacts WHERE public_key_fingerprint = :fingerprint")
-    suspend fun getByFingerprint(fingerprint: String): ContactEntity?
-
-    @Query("SELECT * FROM contacts WHERE name LIKE '%' || :query || '%'")
-    suspend fun searchByName(query: String): List<ContactEntity>
-
-    @Query("DELETE FROM contacts WHERE public_key_fingerprint = :fingerprint")
-    suspend fun deleteByFingerprint(fingerprint: String)
-
-    @Query("DELETE FROM contacts WHERE id = :id")
-    suspend fun deleteById(id: Long)
-
-    @Query("SELECT COUNT(*) FROM contacts")
-    suspend fun countAll(): Int
-}
-```
-
-## UI Design
-
-`ContactManagementActivity` follows the `KeyManagementActivity` pattern:
-
-- **Gradient header** with icon and title
-- **Summary card** showing total contact count
-- **RecyclerView** list with contact cards (name, algorithm, fingerprint prefix)
-- **FAB** opening a bottom sheet with import options
-- **Toolbar action** for exporting own public key as QR
-
-Tapping a contact opens a detail dialog showing:
-
-- Full name
-- Algorithm
-- Full fingerprint (selectable for copy)
-- Import date and source
-- Notes (if any)
-- Delete button
+Each list card shows the name, algorithm, the start of the fingerprint and
+the import date. Tapping one opens a dialog with the full fingerprint, the
+algorithm, the source and the import date, plus a delete button. Delete asks
+again, then removes the row by fingerprint and records `CONTACT_DELETED`.

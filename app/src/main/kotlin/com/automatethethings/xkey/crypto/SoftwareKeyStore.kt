@@ -133,11 +133,20 @@ class SoftwareKeyStore(
         return File(dir, "${fileId(keyId)}.key").exists()
     }
 
-    /** Delete a software key by id. */
+    /**
+     * Delete a software key by id; a key that is not stored deletes quietly.
+     *
+     * @throws KeyDeletionException if the material file is still there
+     *   afterwards: the key was not deleted, and no caller may report it so.
+     *   A metadata file left behind lists nothing without its material.
+     */
     fun delete(keyId: String) {
         migrateLegacyRecords()
         val id = fileId(keyId)
-        File(dir, "$id.key").delete()
+        val keyFile = File(dir, "$id.key")
+        if (!keyFile.delete() && keyFile.exists()) {
+            throw KeyDeletionException("Software key material could not be deleted")
+        }
         File(dir, "$id.meta").delete()
     }
 
@@ -171,7 +180,7 @@ class SoftwareKeyStore(
     }
 
     companion object {
-        private const val KEY_ALIAS = "xkey_software_key_store"
+        private const val KEY_ALIAS = KeystoreAeadCipher.SOFTWARE_KEY_STORE_ALIAS
 
         /** A filename stem already produced by [fileId]. */
         private val DIGEST_NAME = Regex("[0-9a-f]{64}")

@@ -17,10 +17,13 @@ package com.automatethethings.xkey.usb
 import android.util.Log
 import com.automatethethings.xkey.crypto.KeystoreAeadCipher
 import com.automatethethings.xkey.password.PassphraseHasher
+import com.automatethethings.xkey.password.InMemoryPasswordDeletions
 import com.automatethethings.xkey.password.PasswordDao
+import com.automatethethings.xkey.password.PasswordDeletionQueries
 import com.automatethethings.xkey.password.PasswordEntity
 import com.automatethethings.xkey.password.PasswordRepository
 import com.automatethethings.xkey.password.PasswordVault
+import com.automatethethings.xkey.pin.FakeLockoutClock
 import com.automatethethings.xkey.password.PasswordVaultFactorRecord
 import com.automatethethings.xkey.password.PasswordVaultFactorStore
 import com.automatethethings.xkey.password.VaultUnlockAttemptStore
@@ -66,8 +69,8 @@ import java.util.Base64
  * struct, written out by hand: fields in struct order, `omitempty` fields
  * dropped, and no `params` key for a nil-params call. It enters through
  * [UsbAccessoryServer.handlePlaintext], the dispatch the USB message loop
- * runs each decrypted message through, on a server wired as `XKeyGattService`
- * wires it. Pairing is not enforced here: that gate runs before dispatch and
+ * runs a paired desktop's decrypted messages through, on a server wired as
+ * `XKeyGattService` wires it. The pairing gate runs before this dispatch and
  * is tested on its own.
  *
  * Each `result` must decode as Go's `encoding/json` decodes it into the
@@ -91,7 +94,7 @@ class UsbWireContractTest {
     private lateinit var server: UsbAccessoryServer
     private var nextId = 1L
 
-    private class InMemoryPasswordDao : PasswordDao {
+    private class InMemoryPasswordDao : PasswordDao, PasswordDeletionQueries by InMemoryPasswordDeletions() {
         val rows = linkedMapOf<String, PasswordEntity>()
         var failing = false
         private var rowId = 0L
@@ -215,7 +218,7 @@ class UsbWireContractTest {
                 update(salt)
                 digest(passphrase.toByteArray(Charsets.UTF_8))
             }
-        })
+        }, clock = FakeLockoutClock())
         handler = mockk(relaxed = true)
         // As XKeyGattService wires USB: the password store, then the seal store.
         server = usbServer(

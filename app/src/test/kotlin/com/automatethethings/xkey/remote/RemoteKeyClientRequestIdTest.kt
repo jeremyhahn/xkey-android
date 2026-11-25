@@ -15,6 +15,7 @@
 package com.automatethethings.xkey.remote
 
 import com.automatethethings.xkey.protocol.RequestHandler
+import com.automatethethings.xkey.protocol.RpcId
 import io.mockk.mockk
 import io.mockk.unmockkAll
 import kotlinx.coroutines.test.runTest
@@ -56,7 +57,7 @@ class RemoteKeyClientRequestIdTest {
         first.pivListSlots()
         second.pivListSlots()
 
-        val ids = sender.sent.map { it.id }
+        val ids = sender.sent.map { it.id.longValueOrNull()!! }
         assertEquals(ids.toString(), ids.size, ids.toSet().size)
     }
 
@@ -64,6 +65,6 @@ class RemoteKeyClientRequestIdTest {
     fun `a fresh router starts its ids at the base value`() = runTest {
         RemoteKeyClient(desktopOf(sender, router)).pivListSlots()
 
-        assertEquals(1_000_000L, sender.lastRequest.id)
+        assertEquals(RpcId.of(1_000_000L), sender.lastRequest.id)
     }
 }

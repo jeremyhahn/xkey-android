@@ -35,7 +35,8 @@ import org.junit.runner.RunWith
  *
  * The policy test applies the two DAO calls in the order
  * `AuditLogger.applyRetentionPolicy` runs them, with the same constants
- * ([AuditLogger.DEFAULT_RETENTION_MS], [AuditLogger.MAX_ENTRIES]).
+ * ([AuditLogger.DEFAULT_RETENTION_MS], [AuditLogger.MAX_ENTRIES]); one more
+ * drives [AuditLogger.initialize] itself against the app database.
  */
 @RunWith(AndroidJUnit4::class)
 class AuditRetentionTest {
@@ -188,5 +189,53 @@ class AuditRetentionTest {
 
         assertEquals(0 to 0, applyRetentionPolicy(now))
         assertEquals(2L, dao.getCount())
+    }
+
+    // -------------------------------------------------------------------------
+    // The retention policy, as AuditLogger.initialize runs it
+    // -------------------------------------------------------------------------
+
+    /**
+     * [AuditLogger.initialize] itself prunes the app database: rows past the
+     * retention period go, a row a day inside it and a new row stay. Every
+     * call applies the policy, so this holds even though the application
+     * already initialised the logger in this process.
+     */
+    @Test
+    fun initializeRemovesEntriesPastTheRetentionPeriod() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val appDao = XKeyDatabase.getInstance(context).auditLogDao()
+        val run = System.nanoTime()
+        val oldKeyId = "retention-old-$run"
+        val edgeKeyId = "retention-edge-$run"
+        val recentKeyId = "retention-recent-$run"
+        val now = System.currentTimeMillis()
+        val day = 24L * 60 * 60 * 1000
+        try {
+            runBlocking {
+                appDao.insert(entry(now - AuditLogger.DEFAULT_RETENTION_MS - day, oldKeyId))
+                appDao.insert(entry(now - 2 * AuditLogger.DEFAULT_RETENTION_MS, oldKeyId))
+                appDao.insert(entry(now - AuditLogger.DEFAULT_RETENTION_MS + day, edgeKeyId))
+                appDao.insert(entry(now, recentKeyId))
+            }
+            assertEquals(2, runBlocking { appDao.getByKeyId(oldKeyId) }.size)
+
+            AuditLogger.initialize(context)
+
+            val deadline = System.currentTimeMillis() + 5_000L
+            while (runBlocking { appDao.getByKeyId(oldKeyId) }.isNotEmpty() &&
+                System.currentTimeMillis() < deadline
+            ) {
+                Thread.sleep(100)
+            }
+            assertTrue(
+                "rows past the retention period should be removed",
+                runBlocking { appDao.getByKeyId(oldKeyId) }.isEmpty()
+            )
+            assertEquals(1, runBlocking { appDao.getByKeyId(edgeKeyId) }.size)
+            assertEquals(1, runBlocking { appDao.getByKeyId(recentKeyId) }.size)
+        } finally {
+            runBlocking { listOf(oldKeyId, edgeKeyId, recentKeyId).forEach { appDao.deleteByKeyId(it) } }
+        }
     }
 }

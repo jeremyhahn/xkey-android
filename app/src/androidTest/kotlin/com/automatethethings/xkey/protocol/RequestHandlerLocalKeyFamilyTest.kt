@@ -24,6 +24,7 @@ import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.crypto.SoftwareKeyStore
 import com.automatethethings.xkey.settings.AttestationBiometricPolicy
 import com.automatethethings.xkey.settings.BiometricSettingsData
+import com.automatethethings.xkey.settings.PairedDeviceRepository
 import com.automatethethings.xkey.settings.UserVerificationPolicy
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.entity.SharingPolicyType
@@ -72,8 +73,9 @@ import javax.crypto.spec.PSource
  * - `local.generateKey` for a FIDO2 key (which also emits a COSE public key and
  *   an audit record) and for the 512-bit software HMAC size.
  *
- * Every key is per-run and removed in [tearDown]; other suites assert on empty
- * or exactly-counted stores.
+ * Calls are served for a per-run peer paired in [PairedDeviceRepository], since
+ * key use needs a paired peer. Every key and the peer are per-run and removed
+ * in [tearDown]; other suites assert on empty or exactly-counted stores.
  */
 @RunWith(AndroidJUnit4::class)
 class RequestHandlerLocalKeyFamilyTest {
@@ -89,6 +91,12 @@ class RequestHandlerLocalKeyFamilyTest {
         /** Source token this suite tags its filter fixtures with. */
         private val filterSource = "keyfamily-$runId"
 
+        /** The peer this suite serves its calls for: 32 bytes of hex, unique per run. */
+        private val peerKeyHex =
+            ("fd" + java.lang.Long.toHexString(System.nanoTime())).padEnd(64, '0')
+
+        private lateinit var pairedDevices: PairedDeviceRepository
+
         private val nextRequestId = AtomicLong(1)
 
         /** Every key id this suite persists, torn down in [tearDown]. */
@@ -99,12 +107,15 @@ class RequestHandlerLocalKeyFamilyTest {
         fun setUp() {
             context = ApplicationProvider.getApplicationContext()
             softwareKeys = SoftwareKeyStore(context)
+            pairedDevices = PairedDeviceRepository(context)
             handler = RequestHandler(
                 context = context,
                 keystoreManager = KeystoreManager(context),
                 biometricLauncher = null,
-                sessionAuthManager = SessionAuthManager()
+                sessionAuthManager = SessionAuthManager(),
+                pairedDeviceRepository = pairedDevices
             )
+            pairedDevices.addDevice(peerKeyHex, "KeyFamilyTest Desktop $runId")
         }
 
         @JvmStatic
@@ -124,16 +135,19 @@ class RequestHandlerLocalKeyFamilyTest {
                     runCatching { db.keyDao().deleteByKeyId(keyId) }
                 }
             }
+            pairedDevices.removeDevice(peerKeyHex)
         }
     }
 
-    /** Headless baseline: no UI, so no biometric prompt is reachable. */
+    /** Headless baseline served for the paired peer: no UI, so no biometric prompt is reachable. */
     @Before
     fun resetHandlerState() {
         handler.setSessionId(null)
         handler.setMessageSender(null)
         handler.setActivity(null)
         handler.updateSettings(headlessSettings())
+        // setSessionId(null) clears the peer, so the paired peer is set last.
+        handler.setConnectedDevicePublicKeyHex(peerKeyHex)
     }
 
     /**
@@ -364,6 +378,8 @@ class RequestHandlerLocalKeyFamilyTest {
         val keyId = generateKey("policy-$runId", KeyTypes.SECRET, "AES256")
         val widen = JSONObject().put("keyId", keyId).put("shareable", true)
 
+        // The anonymous caller: the shared fixture's paired peer is cleared.
+        handler.setConnectedDevicePublicKeyHex(null)
         assertEquals(ErrorCodes.OPERATION_DENIED, call("local.setKeyPolicy", widen).errorCode())
         assertStaysPrivate(keyId)
 
@@ -681,10 +697,12 @@ class RequestHandlerLocalKeyFamilyTest {
     }
 
     /**
-     * A credential `k` exists, then general keys named `k` are generated: the
-     * result and the stored row report each general key's own level, not the
-     * credential's. The credential's KeyInfo read fails, so a lookup that
-     * resolved to xkey_credential_k would turn the call into an error.
+     * A credential `k` exists: local.generateKey refuses `k` with KEY_EXISTS,
+     * because it refuses an ID any key store holds, the credential Keystore
+     * namespace included (docs/plans/144.md, #271). No general key is made and
+     * the credential is left in place. A general key on a non-colliding id
+     * still reports its own level while every credential KeyInfo read fails,
+     * so a lookup that resolved to an xkey_credential_ alias would be an error.
      */
     @Test
     fun generateKeyReportsTheGeneralKeyLevelWhenACredentialSharesItsId() {
@@ -693,7 +711,8 @@ class RequestHandlerLocalKeyFamilyTest {
             context = context,
             keystoreManager = keystoreManager,
             biometricLauncher = null,
-            sessionAuthManager = SessionAuthManager()
+            sessionAuthManager = SessionAuthManager(),
+            pairedDeviceRepository = pairedDevices
         )
         collidingHandler.updateSettings(headlessSettings())
         listOf(
@@ -702,39 +721,61 @@ class RequestHandlerLocalKeyFamilyTest {
             Pair(KeyTypes.SIGNING, "ES256")
         ).forEach { (keyType, algorithm) ->
             val keyId = "collide-${algorithm.lowercase()}-$runId"
+            val freeKeyId = "nocollide-${algorithm.lowercase()}-$runId"
             createdKeyIds.add(keyId)
+            createdKeyIds.add(freeKeyId)
             runBlocking { keystoreManager.generateKey(keyId, requireBiometric = false, requireStrongBox = false) }
+            val real = keystoreManager.keyInfoReader
             try {
-                val real = keystoreManager.keyInfoReader
                 keystoreManager.keyInfoReader = { alias, key ->
-                    if (alias == "xkey_credential_$keyId") {
+                    if (alias.startsWith("xkey_credential_")) {
                         throw java.security.spec.InvalidKeySpecException("credential KeyInfo unreadable")
                     }
                     real(alias, key)
                 }
-                val request = Request(
-                    nextRequestId.getAndIncrement(),
-                    "local.generateKey",
-                    JSONObject()
-                        .put("keyId", keyId)
-                        .put("keyType", keyType)
-                        .put("algorithm", algorithm)
-                        .put("requireUserVerification", false)
-                        .put("preferStrongBox", false)
-                )
-                val result = runBlocking { collidingHandler.handleRequest(request) }.ok()
-                keystoreManager.keyInfoReader = real
 
-                val level = keystoreManager.generalKeySecurityLevel(keyId)
+                val refused = runBlocking {
+                    collidingHandler.handleRequest(generateKeyRequest(keyId, keyType, algorithm))
+                }
+                assertEquals(
+                    algorithm + ": " + refused.toJsonString(),
+                    ErrorCodes.KEY_EXISTS,
+                    refused.errorCode()
+                )
+                assertNull(
+                    "$algorithm: no general key is created for a credential's id",
+                    keystoreManager.generalKeySecurityLevel(keyId)
+                )
+                assertTrue(
+                    "$algorithm: the credential must still be present",
+                    keystoreManager.keyExists(keyId)
+                )
+
+                val result = runBlocking {
+                    collidingHandler.handleRequest(generateKeyRequest(freeKeyId, keyType, algorithm))
+                }.ok()
+                val level = keystoreManager.generalKeySecurityLevel(freeKeyId)
                     ?: throw AssertionError("$algorithm: the general key must have a level")
                 assertEquals(algorithm, level.wire, result.getString("securityLevel"))
                 assertNotEquals(algorithm, "strongbox", result.getString("securityLevel"))
-                assertFalse(algorithm, storedKey(keyId).strongBoxBacked)
+                assertFalse(algorithm, storedKey(freeKeyId).strongBoxBacked)
             } finally {
+                keystoreManager.keyInfoReader = real
                 keystoreManager.deleteKey(keyId)
             }
         }
     }
+
+    private fun generateKeyRequest(keyId: String, keyType: String, algorithm: String) = Request(
+        nextRequestId.getAndIncrement(),
+        "local.generateKey",
+        JSONObject()
+            .put("keyId", keyId)
+            .put("keyType", keyType)
+            .put("algorithm", algorithm)
+            .put("requireUserVerification", false)
+            .put("preferStrongBox", false)
+    )
 
     /**
      * A generated key whose KeyInfo cannot be read is an error: nothing is
@@ -752,7 +793,8 @@ class RequestHandlerLocalKeyFamilyTest {
             context = context,
             keystoreManager = keystoreManager,
             biometricLauncher = null,
-            sessionAuthManager = SessionAuthManager()
+            sessionAuthManager = SessionAuthManager(),
+            pairedDeviceRepository = pairedDevices
         )
         failingHandler.updateSettings(headlessSettings())
         listOf(
@@ -807,6 +849,40 @@ class RequestHandlerLocalKeyFamilyTest {
 
         assertEquals(512, result.getInt("keySizeBits"))
         assertEquals(512, storedKey(keyId).keySizeBits)
+    }
+
+    /** RS256 with keySizeBits 4096 makes, returns and stores a 4096-bit Keystore key. */
+    @Test
+    fun anRs256KeyWithKeySizeBits4096IsA4096BitKey() {
+        assertRsaKeyOfSize(4096)
+    }
+
+    /** RS256 with keySizeBits 3072 makes, returns and stores a 3072-bit Keystore key. */
+    @Test
+    fun anRs256KeyWithKeySizeBits3072IsA3072BitKey() {
+        assertRsaKeyOfSize(3072)
+    }
+
+    private fun assertRsaKeyOfSize(bits: Int) {
+        val keyId = "rsa-hw-$bits-$runId"
+        createdKeyIds.add(keyId)
+        val result = call(
+            "local.generateKey",
+            JSONObject()
+                .put("keyId", keyId)
+                .put("keyType", KeyTypes.SIGNING)
+                .put("algorithm", "RS256")
+                .put("keySizeBits", bits)
+                .put("requireUserVerification", false)
+                .put("preferStrongBox", false)
+        ).ok()
+
+        val der = java.util.Base64.getDecoder().decode(result.getString("publicKeyDer"))
+        val publicKey = java.security.KeyFactory.getInstance("RSA")
+            .generatePublic(java.security.spec.X509EncodedKeySpec(der)) as java.security.interfaces.RSAPublicKey
+        assertEquals(bits, publicKey.modulus.bitLength())
+        assertEquals(bits, result.getInt("keySizeBits"))
+        assertEquals(bits, storedKey(keyId).keySizeBits)
     }
 
     /** An exportable key lives in app memory and stays "software". */

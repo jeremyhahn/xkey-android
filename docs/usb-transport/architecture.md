@@ -1,18 +1,24 @@
 # USB transport architecture
 
-> **Status: REFERENCE** · Last verified: 2026-11-12
-> As-built description of the USB accessory (AOA) transport: the phone is the USB accessory, the desktop is the host, and both speak the same framed Noise XX pairing protocol as the TCP transport.
+> **Status: REFERENCE** · Last verified: 2026-11-23
+> The USB accessory (AOA) transport. The phone is the USB accessory and the desktop is the host; both speak the same framed Noise XX pairing protocol as the TCP transport.
 
 ## Summary
 
 When a desktop running go-xkms opens the phone in Android Open Accessory mode,
 Android delivers `USB_ACCESSORY_ATTACHED` to `MainActivity`, which hands the
-accessory to `XKeyGattService`. If the **Native USB Mode** setting is on, the
+accessory to `XKeyGattService`. If the Native USB Mode setting is on (Settings,
+off by default), the
 service builds a `UsbAccessoryServer`, opens the accessory's file descriptor
 and runs the shared `StreamPairingSession` responder over it. Every frame is a
 2-byte big-endian length followed by one Noise message (`StreamMessageFraming`),
 byte-identical to TCP. USB alone also serves the password-store and seal-store
 method families, ahead of the `RequestHandler` that BLE and TCP share.
+
+The manifest declares `android.hardware.usb.accessory` with
+`required="false"`: a phone without accessory support still installs the app
+and uses BLE. No ADB or developer option is needed, unlike
+[tcp-pairing](../tcp-pairing/architecture.md).
 
 ## Components
 
@@ -182,7 +188,7 @@ sequenceDiagram
   the identity exchange and the whole Noise handshake; on expiry the streams
   are closed and the connection ends.
 - Before pairing is confirmed every method except `pairing.confirm` answers
-  `ErrorCodes.PAIRING_REQUIRED` (-32025). `pairing.confirm` answers
+  `ErrorCodes.PAIRING_REQUIRED` (-32051). `pairing.confirm` answers
   `ErrorCodes.PAIRING_REJECTED` (-32017) when there is no authenticated peer,
   when its `publicKeyHex` differs from the Noise peer key, or when the user
   rejects the SAS prompt.
