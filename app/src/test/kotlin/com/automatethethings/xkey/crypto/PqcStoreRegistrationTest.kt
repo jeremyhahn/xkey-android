@@ -80,7 +80,7 @@ class PqcStoreRegistrationTest {
         XKeyApplication.registerPqcSoftwareStore(context)
         val registered = PqcSoftwareKeyStore.shared
 
-        PqcSoftwareKeyStore(context, mockk(relaxed = true))
+        PqcSoftwareKeyStore(context, mockk<KeystoreAeadCipher>(relaxed = true))
 
         assertSame(registered, PqcSoftwareKeyStore.shared)
     }

@@ -123,10 +123,11 @@ class PqcSoftwareKeyStoreBindingTest {
         val root = listOf(File("src/main/kotlin"), File("app/src/main/kotlin")).first { it.isDirectory }
         val text = File(root, "com/automatethethings/xkey/crypto/PqcSoftwareKeyStore.kt").readText()
         val fn = Regex("""\bfun\s+(?:<[^>]*>\s*)?([A-Za-z0-9_]+)\s*\(""")
-        val openers = Regex("""cipher\.decrypt\(""").findAll(text).map { call ->
-            fn.findAll(text.substring(0, call.range.first)).lastOrNull()?.groupValues?.get(1)
+        fun owners(call: String) = Regex(call).findAll(text).map { match ->
+            fn.findAll(text.substring(0, match.range.first)).lastOrNull()?.groupValues?.get(1)
         }.toSet()
-        assertEquals(setOf("openRecord"), openers)
+        assertEquals(setOf("openRecord"), owners("""keyring\.open\("""))
+        assertEquals("only a keyring's open decrypts", setOf("open"), owners("""cipher\.decrypt\("""))
 
         val start = text.indexOf("fun <T> openRecord(")
         assertTrue("openRecord is the one opener", start >= 0)

@@ -25,6 +25,8 @@ import java.io.File
 import java.io.IOException
 import java.nio.ByteBuffer
 import java.security.GeneralSecurityException
+import java.security.KeyStore
+import java.security.KeyStoreException
 import java.security.SecureRandom
 import org.bouncycastle.crypto.generators.MLDSAKeyPairGenerator
 import org.bouncycastle.crypto.params.MLDSAKeyGenerationParameters
@@ -44,8 +46,9 @@ class PqcKeyRecordException(message: String) : GeneralSecurityException(message)
  * alias under `filesDir/pqc_keys`.
  *
  * The PKCS#8 private key is sealed with a non-exportable Keystore
- * AES-256-GCM key ([KeystoreAeadCipher], alias [WRAP_KEY_ALIAS]) before it
- * reaches the disk. The sealed plaintext binds the key to its alias and
+ * AES-256-GCM key of its own ([PqcWrapKeyring]) before it reaches the disk.
+ * Deleting or replacing a key removes that Keystore key first, so a copy of
+ * the old record put back, with any generation file, never opens again. The sealed plaintext binds the key to its alias and
  * parameter set, so a record copied under another alias, or holding another
  * record's sealed blob, is refused. The sealed plaintext also carries the
  * key's user-authentication policy, which [sign] enforces for every caller.
@@ -54,12 +57,14 @@ class PqcKeyRecordException(message: String) : GeneralSecurityException(message)
  *
  * Signatures are pure ML-DSA (FIPS 204, empty context) over the message.
  */
-class PqcSoftwareKeyStore(
+class PqcSoftwareKeyStore internal constructor(
     private val context: Context,
-    cipher: KeystoreAeadCipher? = null
+    private val keyring: PqcWrapKeyring
 ) {
-    // Built on first use: KeystoreAeadCipher opens AndroidKeyStore when constructed.
-    private val cipher: KeystoreAeadCipher by lazy { cipher ?: KeystoreAeadCipher(WRAP_KEY_ALIAS) }
+    /** The app's store: per-key Keystore wrap keys, or one injected [cipher] in tests. */
+    constructor(context: Context, cipher: KeystoreAeadCipher? = null) :
+        this(context, if (cipher != null) SingleCipherKeyring(cipher) else KeystoreWrapKeyring())
+
     private val random = SecureRandom()
 
     /** The file a key under [alias] lives in. */
@@ -76,25 +81,34 @@ class PqcSoftwareKeyStore(
         set: MlDsaParameterSet,
         authDurationSeconds: Int = NO_USER_AUTHENTICATION
     ): ByteArray {
+        // The replaced key's wrap key goes first, so its record cannot be put back.
+        if (fileFor(alias).exists()) delete(alias)
         val generator = MLDSAKeyPairGenerator()
         generator.init(MLDSAKeyGenerationParameters(random, bcParameters(set)))
         val pair = generator.generateKeyPair()
         val spki = SubjectPublicKeyInfoFactory.createSubjectPublicKeyInfo(pair.public).encoded
         val pkcs8 = PrivateKeyInfoFactory.createPrivateKeyInfo(pair.private).encoded
-        // A damaged generation file must not block a new key; the new key's generation replaces it.
+        // A damaged or missing generation file must not block a new key; the new key's generation replaces it.
         val generation = (runCatching { storedGeneration(alias) }.getOrNull() ?: 0L) + 1
         val plaintext = sealedPlaintext(
             alias, set, spki, generation, authDurationSeconds.coerceAtLeast(NO_USER_AUTHENTICATION), pkcs8
         )
         pkcs8.fill(0)
+        val wrapId = keyring.newId()
         val sealed = try {
-            cipher.encrypt(plaintext)
+            keyring.seal(wrapId, plaintext)
         } finally {
             plaintext.fill(0)
         }
-        write(fileFor(alias), Record(alias, set, spki, sealed).encode())
-        // Written after the record: a failed write here leaves a record newer than the stored generation, which opens.
-        write(generationFileFor(alias), ByteBuffer.allocate(8).putLong(generation).array())
+        try {
+            write(fileFor(alias), Record(alias, set, spki, wrapId, sealed).encode())
+            write(generationFileFor(alias), ByteBuffer.allocate(8).putLong(generation).array())
+        } catch (e: IOException) {
+            // A key whose record or generation was not stored is revoked, so no half-written key opens later.
+            runCatching { keyring.destroy(wrapId) }
+            runCatching { removeFile(fileFor(alias)) }
+            throw e
+        }
         return spki
     }
 
@@ -102,10 +116,14 @@ class PqcSoftwareKeyStore(
     internal fun generationFileFor(alias: String): File =
         File(File(context.filesDir, DIR), SyncCodec.sha256Hex(alias.toByteArray(Charsets.UTF_8)) + ".gen")
 
-    /** The generation a record under [alias] must reach to open, or 0 when none is stored. */
+    /**
+     * The generation a record under [alias] must reach to open.
+     *
+     * @throws PqcKeyRecordException when none is stored: a missing file is never read as 0.
+     */
     private fun storedGeneration(alias: String): Long {
         val file = generationFileFor(alias)
-        if (!file.exists()) return 0
+        if (!file.exists()) throw PqcKeyRecordException("ML-DSA generation is missing")
         val bytes = try {
             file.readBytes()
         } catch (e: IOException) {
@@ -176,7 +194,8 @@ class PqcSoftwareKeyStore(
 
     /**
      * Opens [record] for [alias] and passes its sealed policy and private key
-     * to [use]: the one place a sealed key is opened. Refuses a record sealed
+     * to [use]: the one place a sealed key is opened. Refuses a record whose
+     * wrap key was removed, a record with no stored generation, one sealed
      * for another alias or set, one whose clear public key is not the sealed
      * one or not its private key's, and one older than the alias's stored
      * generation. Every plaintext is zeroed before it returns.
@@ -189,7 +208,7 @@ class PqcSoftwareKeyStore(
         use: (authDurationSeconds: Int, key: MLDSAPrivateKeyParameters) -> T
     ): T {
         val plaintext = try {
-            cipher.decrypt(record.sealed)
+            keyring.open(record.wrapId, record.sealed)
         } catch (e: GeneralSecurityException) {
             if (e is PqcKeyRecordException) throw e
             throw PqcKeyRecordException("ML-DSA record does not open")
@@ -231,22 +250,35 @@ class PqcSoftwareKeyStore(
 
     /**
      * Deletes the key under [alias]; true when there was one, false when
-     * there was none. The alias's generation moves past the deleted record, so
-     * that record cannot be put back.
+     * there was none. The record's own Keystore wrap key is removed, so no
+     * copy of the record put back opens, and the alias's generation moves
+     * past the deleted record.
      *
-     * @throws IOException when a record exists and cannot be removed: the
-     *   key is still usable, so a caller must keep its slot row or metadata.
+     * @throws IOException when a record exists and cannot be removed or its
+     *   wrap key cannot be revoked: the key is still usable, so a caller must
+     *   keep its slot row or metadata. Also when the generation cannot be
+     *   advanced after the key was revoked: the key no longer signs, and the
+     *   delete is not reported done.
      */
     @Synchronized
     fun delete(alias: String): Boolean {
         val file = fileFor(alias)
         if (!file.exists()) return false
+        val bytes = file.readBytes()
+        val record = runCatching { Record.decode(bytes) }.getOrNull()?.takeIf { it.alias == alias }
         if (!removeFile(file) && file.exists()) throw IOException("Cannot delete ML-DSA key")
-        // Advanced past the removed record, so a copy of it put back does not open; the key is gone either way.
-        runCatching {
-            val generation = (runCatching { storedGeneration(alias) }.getOrNull() ?: 0L) + 1
-            write(generationFileFor(alias), ByteBuffer.allocate(8).putLong(generation).array())
+        if (record != null) {
+            try {
+                keyring.destroy(record.wrapId)
+            } catch (e: Exception) {
+                // The wrap key is still there, so the record goes back and the key stays usable.
+                runCatching { write(file, bytes) }
+                throw IOException("Cannot revoke ML-DSA key", e)
+            }
         }
+        // Advanced past the removed record; a failure is reported, never ignored.
+        val generation = (runCatching { storedGeneration(alias) }.getOrNull() ?: 0L) + 1
+        write(generationFileFor(alias), ByteBuffer.allocate(8).putLong(generation).array())
         return true
     }
 
@@ -279,7 +311,7 @@ class PqcSoftwareKeyStore(
     }
 
     /**
-     * The on-disk record: the alias, set and public key in the clear, and the
+     * The on-disk record: the alias, set, public key and wrap key id in the clear, and the
      * sealed `alias || set || public key || generation || user-authentication
      * policy || PKCS#8`, so the clear fields are checked against the sealed ones.
      */
@@ -288,6 +320,7 @@ class PqcSoftwareKeyStore(
         val alias: String,
         val set: MlDsaParameterSet,
         val spki: ByteArray,
+        val wrapId: String,
         val sealed: ByteArray
     ) {
         fun encode(): ByteArray {
@@ -298,6 +331,7 @@ class PqcSoftwareKeyStore(
                 out.writeUTF(set.wireName)
                 out.writeInt(spki.size)
                 out.write(spki)
+                out.writeUTF(wrapId)
                 out.writeInt(sealed.size)
                 out.write(sealed)
             }
@@ -313,9 +347,11 @@ class PqcSoftwareKeyStore(
                 val set = MlDsaParameterSet.fromWireName(input.readUTF())
                     ?: throw IOException("Unknown ML-DSA parameter set")
                 val spki = readSized(input)
+                val wrapId = input.readUTF()
+                if (!PqcWrapKeyring.isWrapId(wrapId)) throw IOException("Bad ML-DSA wrap key id")
                 val sealed = readSized(input)
                 if (input.read() != -1) throw IOException("Trailing bytes in ML-DSA record")
-                Record(alias, set, spki, sealed)
+                Record(alias, set, spki, wrapId, sealed)
             }
 
             private fun readSized(input: DataInputStream): ByteArray {
@@ -327,7 +363,7 @@ class PqcSoftwareKeyStore(
     }
 
     companion object {
-        /** The Keystore AES-GCM key that seals every software ML-DSA private key. */
+        /** The shared Keystore AES-GCM key earlier builds sealed with; kept internal, no record uses it. */
         const val WRAP_KEY_ALIAS = KeystoreAeadCipher.PQC_WRAP_ALIAS
 
         /**
@@ -374,9 +410,9 @@ class PqcSoftwareKeyStore(
 
         private const val DIR = "pqc_keys"
         private const val MAX_FIELD = 64 * 1024
-        // Version 2 seals the public key, generation and user-authentication policy;
+        // Version 3 seals each key under its own Keystore wrap key, named in the record;
         // earlier records (never released) do not open and are not migrated.
-        private val MAGIC = byteArrayOf('X'.code.toByte(), 'P'.code.toByte(), 'Q'.code.toByte(), '2'.code.toByte())
+        private val MAGIC = byteArrayOf('X'.code.toByte(), 'P'.code.toByte(), 'Q'.code.toByte(), '3'.code.toByte())
 
         /** Throws unless [userAuthenticatedAt] meets [authDurationSeconds]. */
         private fun requireUserAuthentication(authDurationSeconds: Int, userAuthenticatedAt: Long?) {
@@ -427,5 +463,77 @@ class PqcSoftwareKeyStore(
             if (size < 0 || size > buffer.remaining()) throw PqcKeyRecordException("ML-DSA record is damaged")
             return ByteArray(size).also { buffer.get(it) }
         }
+    }
+}
+
+/**
+ * The wrap keys software ML-DSA records are sealed under, one per record:
+ * removing a record's wrap key revokes every copy of that record.
+ */
+internal interface PqcWrapKeyring {
+    /** A fresh id for a new wrap key; [seal] makes the key on first use. */
+    fun newId(): String
+
+    /** Seals [plaintext] under wrap key [id]. */
+    fun seal(id: String, plaintext: ByteArray): ByteArray
+
+    /** @throws GeneralSecurityException when wrap key [id] was removed or [sealed] does not open under it. */
+    fun open(id: String, sealed: ByteArray): ByteArray
+
+    /** Removes wrap key [id]; @throws GeneralSecurityException when it is still there. */
+    fun destroy(id: String)
+
+    companion object {
+        private val random = SecureRandom()
+
+        /** 16 random bytes as lowercase hex. */
+        fun randomId(): String = ByteArray(16).also { random.nextBytes(it) }.joinToString("") { "%02x".format(it) }
+
+        /** Whether [id] has the form [randomId] makes. */
+        fun isWrapId(id: String): Boolean = id.length == 32 && id.all { it in '0'..'9' || it in 'a'..'f' }
+    }
+}
+
+/** One AndroidKeyStore AES-256-GCM key per record, under [KeystoreAeadCipher.PQC_WRAP_ALIAS_PREFIX] and its id. */
+internal class KeystoreWrapKeyring : PqcWrapKeyring {
+    private val keyStore: KeyStore by lazy { KeyStore.getInstance("AndroidKeyStore").apply { load(null) } }
+
+    override fun newId(): String = PqcWrapKeyring.randomId()
+
+    override fun seal(id: String, plaintext: ByteArray): ByteArray {
+        val wrapAlias = KeystoreAeadCipher.PQC_WRAP_ALIAS_PREFIX + id
+        return KeystoreAeadCipher(wrapAlias).encrypt(plaintext)
+    }
+
+    override fun open(id: String, sealed: ByteArray): ByteArray {
+        val wrapAlias = KeystoreAeadCipher.PQC_WRAP_ALIAS_PREFIX + id
+        // Checked first: the cipher would make a fresh key under a removed alias.
+        if (!keyStore.containsAlias(wrapAlias)) throw PqcKeyRecordException("ML-DSA key was deleted")
+        val cipher = KeystoreAeadCipher(wrapAlias)
+        return cipher.decrypt(sealed)
+    }
+
+    override fun destroy(id: String) {
+        val wrapAlias = KeystoreAeadCipher.PQC_WRAP_ALIAS_PREFIX + id
+        keyStore.deleteEntry(wrapAlias)
+        if (keyStore.containsAlias(wrapAlias)) throw KeyStoreException("ML-DSA wrap key was not removed")
+    }
+}
+
+/** Seals every record with one injected [cipher]; removed ids stay refused for this instance's life. Tests only. */
+internal class SingleCipherKeyring(private val cipher: KeystoreAeadCipher) : PqcWrapKeyring {
+    private val removed = mutableSetOf<String>()
+
+    override fun newId(): String = PqcWrapKeyring.randomId()
+
+    override fun seal(id: String, plaintext: ByteArray): ByteArray = cipher.encrypt(plaintext)
+
+    override fun open(id: String, sealed: ByteArray): ByteArray {
+        if (synchronized(removed) { id in removed }) throw PqcKeyRecordException("ML-DSA key was deleted")
+        return cipher.decrypt(sealed)
+    }
+
+    override fun destroy(id: String) {
+        synchronized(removed) { removed += id }
     }
 }
