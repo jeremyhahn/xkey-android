@@ -681,13 +681,12 @@ class RequestHandlerLocalKeyFamilyTest {
     }
 
     /**
-     * A credential `k` exists, then general keys named `k` are generated: the
-     * result and the stored row report each general key's own level, not the
-     * credential's. The credential's KeyInfo read fails, so a lookup that
-     * resolved to xkey_credential_k would turn the call into an error.
+     * A credential `k` exists, then general keys named `k` are requested: each
+     * is refused as KEY_EXISTS, no general key is made, and the credential
+     * stays as it was.
      */
     @Test
-    fun generateKeyReportsTheGeneralKeyLevelWhenACredentialSharesItsId() {
+    fun generateKeyRefusesAnIdACredentialAlreadyHolds() {
         val keystoreManager = KeystoreManager(context)
         val collidingHandler = RequestHandler(
             context = context,
@@ -705,13 +704,6 @@ class RequestHandlerLocalKeyFamilyTest {
             createdKeyIds.add(keyId)
             runBlocking { keystoreManager.generateKey(keyId, requireBiometric = false, requireStrongBox = false) }
             try {
-                val real = keystoreManager.keyInfoReader
-                keystoreManager.keyInfoReader = { alias, key ->
-                    if (alias == "xkey_credential_$keyId") {
-                        throw java.security.spec.InvalidKeySpecException("credential KeyInfo unreadable")
-                    }
-                    real(alias, key)
-                }
                 val request = Request(
                     nextRequestId.getAndIncrement(),
                     "local.generateKey",
@@ -722,14 +714,11 @@ class RequestHandlerLocalKeyFamilyTest {
                         .put("requireUserVerification", false)
                         .put("preferStrongBox", false)
                 )
-                val result = runBlocking { collidingHandler.handleRequest(request) }.ok()
-                keystoreManager.keyInfoReader = real
+                val response = runBlocking { collidingHandler.handleRequest(request) }
 
-                val level = keystoreManager.generalKeySecurityLevel(keyId)
-                    ?: throw AssertionError("$algorithm: the general key must have a level")
-                assertEquals(algorithm, level.wire, result.getString("securityLevel"))
-                assertNotEquals(algorithm, "strongbox", result.getString("securityLevel"))
-                assertFalse(algorithm, storedKey(keyId).strongBoxBacked)
+                assertEquals(algorithm, ErrorCodes.KEY_EXISTS, response.errorCode())
+                assertFalse("$algorithm: no general key is made", keystoreManager.generalKeyExists(keyId))
+                assertTrue("$algorithm: the credential is left in place", keystoreManager.keyExists(keyId))
             } finally {
                 keystoreManager.deleteKey(keyId)
             }

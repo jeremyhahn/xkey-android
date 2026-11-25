@@ -524,11 +524,11 @@ class RequestHandlerErrorPathTest {
         }
     }
 
-    /** Deleting something that is already gone is a success, not an error. */
+    /** Deleting something that is already gone is a success, not an error, and claims no deletion. */
     @Test
     fun deletingAnUnknownKeyIsIdempotent() {
         val response = call("local.deleteKey", JSONObject().put("keyId", "never-existed-$runId"))
-        assertTrue(response.ok().getBoolean("deleted"))
+        assertFalse("a delete that removes nothing must not report deleted=true", response.ok().getBoolean("deleted"))
     }
 
     @Test
@@ -1249,7 +1249,7 @@ class RequestHandlerErrorPathTest {
             ErrorCodes.INVALID_PARAMS,
             call(
                 "local.pinChange",
-                JSONObject().put("pinType", "USER_PIN").put("newPin", "1")
+                JSONObject().put("pinType", "USER_PIN").put("currentPin", "123456").put("newPin", "1")
             ).errorCode()
         )
         assertEquals(
