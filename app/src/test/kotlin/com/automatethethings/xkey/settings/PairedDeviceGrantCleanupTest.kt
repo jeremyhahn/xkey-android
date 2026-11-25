@@ -92,6 +92,9 @@ class PairedDeviceGrantCleanupTest {
         val PEER_A = "a".repeat(64)
         val PEER_B = "b".repeat(64)
         val PEER_C = "c".repeat(64)
+
+        /** Peer A's radio: a re-pairing over it under a new key replaces A. */
+        const val ADDRESS_A = "00:00:5E:00:53:0A"
     }
 
     /** The `key_sharing_policies` table. */
@@ -128,7 +131,7 @@ class PairedDeviceGrantCleanupTest {
         scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
         cleanup = PairedDeviceGrantCleanup({ dao }, { repo }, scope)
         PairedDeviceRepository.addRemovalListener(cleanup)
-        repo.addDevice(PEER_A, "desktop-a")
+        repo.addDevice(PEER_A, "desktop-a", ADDRESS_A)
         repo.addDevice(PEER_B, "desktop-b")
     }
 
@@ -155,7 +158,7 @@ class PairedDeviceGrantCleanupTest {
     /** A re-pairing under a new key evicts the old entry: the old key's grants go with it. */
     @Test
     fun evictionByRePairingDropsTheEvictedPeersGrants() {
-        repo.addDevice(PEER_C, "desktop-a")
+        repo.addDevice(PEER_C, "desktop-a", ADDRESS_A)
 
         assertEquals(listOf("k-1" to PEER_B), peersWithGrants())
         verify(exactly = 1) { AuditLogger.logPeerGrantsDropped(PEER_A, 2) }
@@ -292,7 +295,7 @@ class PairedDeviceGrantCleanupTest {
     @Test
     fun evictionAndClearRecordPendingRevocations() {
         heldCleanup(repo)
-        repo.addDevice(PEER_C, "desktop-a")
+        repo.addDevice(PEER_C, "desktop-a", ADDRESS_A)
         assertEquals(setOf(PEER_A), repo.pendingRevocations())
 
         repo.clear()

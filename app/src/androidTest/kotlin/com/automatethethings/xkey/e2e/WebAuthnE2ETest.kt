@@ -22,6 +22,8 @@ import androidx.test.uiautomator.By
 import androidx.test.uiautomator.UiDevice
 import androidx.test.uiautomator.Until
 import android.util.Log
+import com.automatethethings.xkey.DeviceSettings
+import com.automatethethings.xkey.SettingsShell
 import com.automatethethings.xkey.credential.CredentialProviderSettingsRepository
 import com.automatethethings.xkey.storage.XKeyDatabase
 import kotlinx.coroutines.runBlocking
@@ -315,15 +317,17 @@ class WebAuthnE2ETest {
     private fun registerAsCredentialProvider() {
         val context = ApplicationProvider.getApplicationContext<android.content.Context>()
         val service = "${context.packageName}/$CREDENTIAL_SERVICE_CLASS"
-        val current = device.executeShellCommand("settings get secure credential_service").trim()
-        if (current.contains(service)) return
+        // A failed read throws rather than being taken as "no providers", which
+        // would replace the owner's provider list with this app alone.
+        val settings = DeviceSettings(SettingsShell { device.executeShellCommand(it) })
+        val existing = settings.read("secure", "credential_service")
+        if (existing != null && existing.contains(service)) return
 
-        val existing = current.takeIf { it.isNotEmpty() && it != "null" }
         val updated = if (existing == null) service else "$existing:$service"
         // Unquoted: `settings put` stores the argument verbatim, so quotes would
         // become part of the value and the framework would not match any provider.
-        device.executeShellCommand("settings put secure credential_service $updated")
-        device.executeShellCommand("settings put secure credential_service_primary $service")
+        settings.write("secure", "credential_service", updated)
+        settings.write("secure", "credential_service_primary", service)
     }
 
     /**

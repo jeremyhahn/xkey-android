@@ -16,6 +16,7 @@ package com.automatethethings.xkey.remote
 
 import android.util.Log
 import com.automatethethings.xkey.ca.DeviceIdentity
+import com.automatethethings.xkey.crypto.DeviceAttestationKey
 import com.automatethethings.xkey.crypto.FileEncryptor
 import com.automatethethings.xkey.crypto.KeystoreUserVerificationKey
 import com.automatethethings.xkey.crypto.SoftwareKey
@@ -186,10 +187,11 @@ class RemoteShareClient(
          * caller owns the buffer and must zero it.
          */
         fun encodeWithSecret(id: Long, method: String, params: JSONObject, field: String, secret: ByteArray): ByteArray {
+            require(!params.has(field)) { "params already hold $field" }
             val head = Request(id, method, params).toJsonString()
             check(head.endsWith("}}")) { "unexpected request shape" }
             val prefix = head.substring(0, head.length - 2).toByteArray(Charsets.UTF_8)
-            val sep = (if (params.length() == 0) "\"" else ",\"") + field + "\":\""
+            val sep = (if (params.length() == 0) "" else ",") + JSONObject.quote(field) + ":\""
             val sepBytes = sep.toByteArray(Charsets.UTF_8)
             val encoded = Base64.getEncoder().encode(secret)
             try {
@@ -220,7 +222,7 @@ class RemoteShareClient(
             val exportable = result.opt("exportable") as? Boolean ?: malformed("exportable is not a boolean")
             val keySize = when (val v = result.opt("key_size")) {
                 null, JSONObject.NULL -> 0
-                is Int -> v
+                is Int -> if (v < 0) malformed("key_size is negative") else v
                 else -> malformed("key_size is not an integer")
             }
             val publicKeyPem = optBytes(result, "public_key_pem")?.toString(Charsets.UTF_8)
@@ -308,13 +310,14 @@ object DesktopShareGate {
     }
 
     /**
-     * The phone's own identity keys: DeviceIdentity's enrollment keys and the
-     * user-verification key. Their writers replace them outside
+     * The phone's own identity keys: DeviceIdentity's enrollment keys, the
+     * user-verification key and the device attestation key. Their writers replace them outside
      * [SharePermissionLedger], so a share could not tell a retired key from
      * the current one; they are never shared.
      */
     fun isIdentityKey(keyId: String): Boolean =
-        keyId.startsWith(DeviceIdentity.ALIAS_PREFIX) || keyId == KeystoreUserVerificationKey.ALIAS
+        keyId.startsWith(DeviceIdentity.ALIAS_PREFIX) || keyId == KeystoreUserVerificationKey.ALIAS ||
+            keyId == DeviceAttestationKey.ALIAS
 
     /**
      * FileEncryptor's ephemeral agreement keys, deleted when their one

@@ -949,13 +949,12 @@ class FileOperationActivity : AppCompatActivity() {
                 )
 
                 // Determine if we can embed in EXIF or need sidecar
-                val mimeType = contentResolver.getType(uri) ?: ""
                 val fileName = getFileName(uri) ?: "file"
 
-                if (mimeType.startsWith("image/jpeg") || mimeType.startsWith("image/jpg")) {
-                    // Copy to a staging file, write EXIF, then copy back. The MIME
+                if (MediaHasher.isJpegUri(contentResolver, uri)) {
+                    // Copy to a staging file, write EXIF, then copy back. The JPEG
                     // type makes it a .jpg, so the EXIF write lands in it.
-                    val tempFile = staging.stage(fileName, mimeType) { staged ->
+                    val tempFile = staging.stage(fileName, MediaHasher.JPEG_MIME_TYPE) { staged ->
                         contentResolver.openInputStream(uri)?.use { input ->
                             FileOutputStream(staged).use { output ->
                                 input.copyTo(output)

@@ -1,32 +1,5 @@
 #!/usr/bin/env bash
-# Build one devcontainer image, then point its tag at the ID the build wrote.
-#
-#   usage: scripts/build-image.sh [--keep-name] <tag> <iidfile|-> <docker build command...>
-#
-# The command is run with `-t <name> --iidfile <iidfile> .` appended.
-#
-# Concurrent cold builds of one tag: `docker build -t <tag>` names the image
-# as its last step, and
-# BuildKit's exporter names it by an update, then a create when the update
-# finds no such name. A change to an image's inputs is a tag no runner has, so
-# the jobs that build it at once on one daemon (image, lint-gates,
-# integration) all miss, all create, and every create after the first fails
-# `image "<tag>": already exists`, after a whole build.
-#
-# So no build names <tag>. A build is tagged <tag>-build-<random>, a name no
-# other build writes, in <tag>'s repository (the reaper's family rule covers
-# it), and writes its ID to <iidfile> (`-`: a temporary file). Then
-# `docker tag` points <tag> at that ID; it replaces a name another job wrote,
-# so the last job's build is the one <tag> names. A job takes only the ID its
-# own build wrote, never one read back from <tag>. A failed build leaves <tag>
-# where it was.
-#
-# --keep-name (IMAGE_FRESH=true, whose stages run on the ID in <iidfile>)
-# keeps the build's own name, so the image keeps a name until its stages lease
-# it even when a later build moves <tag> off it; the reaper removes the name
-# REAP_IMAGE_MIN_AGE after its last use. Without it (a developer's make, a
-# pull request's run, both of which read <tag> back) the build's name is
-# removed once <tag> is set.
+# Build under a unique name, then point <tag> at the built ID, so concurrent builds of one tag succeed. Usage: scripts/build-image.sh [--keep-name] <tag> <iidfile|-> <docker build command...>
 set -euo pipefail
 
 keep=false
@@ -67,12 +40,7 @@ drop_name() {
 	[ "${keep}" = true ] || docker image rm "${name}" > /dev/null || echo "$0: could not remove the build's own name ${name}" >&2
 }
 
-# Concurrent re-tags of one tag: the containerd image store re-tags a name as a delete, then a
-# create, so when two jobs re-tag <tag> at once the second create can fail
-# `image "<tag>": already exists`. Docker has no atomic re-tag, so that error
-# alone is retried, up to tag_tries tries with a jittered back-off (under 10 s
-# in all), each pointing <tag> at this build's own ID again. Any other error
-# fails at once.
+# A concurrent re-tag can fail `already exists`; retry only that, with jittered back-off.
 tag_tries=5
 backoff_ms=${BUILD_IMAGE_TAG_BACKOFF_MS:-500}
 try=1

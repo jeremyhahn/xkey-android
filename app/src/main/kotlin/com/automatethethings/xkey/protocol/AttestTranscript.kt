@@ -20,7 +20,7 @@ import java.util.Locale
 
 /**
  * The byte layouts of device attestation protocol **version 2** — the
- * challenge-response model ruled by the owner on 2026-08-24 (go-xkms#129).
+ * challenge-response model (go-xkms#129).
  *
  * Version 1 asked this device to mint a key whose Android attestation challenge
  * *was* the pairing nonce, and the desktop compared that nonce against the

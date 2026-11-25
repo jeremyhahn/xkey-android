@@ -15,6 +15,7 @@
 
 package com.automatethethings.xkey.transport
 
+import com.automatethethings.xkey.ble.NoiseTestKeyStore
 import android.app.KeyguardManager
 import android.app.NotificationManager
 import android.content.Context
@@ -46,7 +47,7 @@ import org.junit.Test
 
 /**
  * The connected peer identity on the [RequestHandler] every transport shares
- * belongs to the session that set it (#134).
+ * belongs to the session that set it.
  *
  * A USB detach and reattach gives the reattached desktop a new
  * [StreamPairingSession], on a new server, while the detached session may
@@ -70,6 +71,7 @@ class PeerIdentityTeardownTest {
 
     @Before
     fun setUp() {
+        NoiseTestKeyStore.install()
         mockkStatic(Log::class)
         every { Log.v(any(), any<String>()) } returns 0
         every { Log.d(any(), any<String>()) } returns 0

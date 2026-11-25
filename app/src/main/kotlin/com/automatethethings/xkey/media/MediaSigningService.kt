@@ -42,6 +42,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -81,22 +82,41 @@ internal object AutoSignHash {
         MediaHasher.hashCanonical(data, mimeType)
 
     /**
-     * [contentHash] over the content at [uri], typed by the resolver. Media
-     * other than JPEG is hashed whole by streaming ([MediaHasher.hashUri]):
+     * [contentHash] over the content at [uri], typed by [mimeType] (the
+     * resolver's type unless given). Content [MediaHasher.isJpeg] says is not
+     * a JPEG, by the type or its first bytes, is hashed whole by streaming:
      * its signature goes to a sidecar, and for it the canonical hash is the
      * whole-file hash. A JPEG above [limit] bytes throws [TooLargeException].
      */
     fun contentHashUri(
         contentResolver: ContentResolver,
         uri: Uri,
-        limit: Int = MAX_CANONICAL_JPEG_BYTES
+        limit: Int = MAX_CANONICAL_JPEG_BYTES,
+        mimeType: String? = contentResolver.getType(uri)
     ): String {
-        val mimeType = contentResolver.getType(uri)
-        if (!MediaHasher.isCanonicalisedJpeg(mimeType)) return MediaHasher.hashUri(contentResolver, uri)
-        val bytes = contentResolver.openInputStream(uri)?.use { readAtMost(it, limit) }
+        val input = contentResolver.openInputStream(uri)?.buffered()
             ?: throw IllegalArgumentException("Cannot open URI: $uri")
-        return contentHash(bytes, mimeType)
+        return input.use { stream ->
+            stream.mark(MediaHasher.JPEG_HEAD_SIZE)
+            val head = MediaHasher.readFully(stream, MediaHasher.JPEG_HEAD_SIZE)
+            stream.reset()
+            if (MediaHasher.isJpeg(mimeType, head = head)) {
+                contentHash(readAtMost(stream, limit), MediaHasher.JPEG_MIME_TYPE)
+            } else {
+                MediaHasher.hashStream(stream)
+            }
+        }
     }
+
+    /**
+     * The type to hash the file at [filePath] as, decided the way
+     * [XmpMetadataHelper.writeSignature] decides where its signature goes: a
+     * file [MediaHasher.isJpegFile] says is a JPEG gets the signature
+     * embedded, so it is hashed canonically as a JPEG; any other file gets a
+     * sidecar, so it is hashed whole (null).
+     */
+    fun hashTypeForPath(filePath: String): String? =
+        if (MediaHasher.isJpegFile(filePath)) MediaHasher.JPEG_MIME_TYPE else null
 
     /** All of [input], or [TooLargeException] as soon as it passes [limit] bytes. */
     private fun readAtMost(input: java.io.InputStream, limit: Int): ByteArray {
@@ -180,6 +200,9 @@ class MediaSigningService : Service() {
         super.onDestroy()
         unregisterObservers()
         releaseWakeLock()
+        // Cancelling the scope, not only the jobs in flight, means a change
+        // already dispatched to an observer starts no new signing after this.
+        serviceScope.cancel()
         signingJobs.forEach { it.cancel() }
         signingJobs.clear()
         Log.i(TAG, "Media signing service stopped")
@@ -243,9 +266,24 @@ class MediaSigningService : Service() {
                     return@launch
                 }
 
+                // The signature lives in the file's own metadata or beside it,
+                // so without a path there is nowhere to put it. Leaving the URI
+                // unprocessed lets a later event retry it; recording it as
+                // auto-signed would put a claim in the audit log that nothing
+                // backs. The path also decides where the signature goes, and
+                // so which hash it must carry.
+                val filePath = getFilePathFromUri(uri) ?: run {
+                    Log.w(TAG, "No file path for $uri; cannot persist a signature")
+                    return@launch
+                }
+
                 // Hash the media content
                 val contentHash = try {
-                    AutoSignHash.contentHashUri(contentResolver, uri)
+                    AutoSignHash.contentHashUri(
+                        contentResolver,
+                        uri,
+                        mimeType = AutoSignHash.hashTypeForPath(filePath)
+                    )
                 } catch (e: AutoSignHash.TooLargeException) {
                     // Refused, not failed: record it once so a repeated
                     // MediaStore event does not audit it again.
@@ -297,14 +335,6 @@ class MediaSigningService : Service() {
                     signatures = listOf(entry)
                 )
 
-                // The signature lives in the file's own metadata, so without a
-                // path there is nowhere to put it. Leaving the URI unprocessed
-                // lets a later event retry it; recording it as auto-signed would
-                // put a claim in the audit log that nothing backs.
-                val filePath = getFilePathFromUri(uri) ?: run {
-                    Log.w(TAG, "No file path for $uri; cannot persist a signature")
-                    return@launch
-                }
                 XmpMetadataHelper.writeSignature(filePath, data)
 
                 processedUris.add(uriString)

@@ -116,7 +116,7 @@ class KeystoreManagerUserAuthTest {
     fun `sign prompts when the silent sign fails with the Keystore auth error`() = runBlocking {
         every { silent.sign() } throws authRequiredAtSign()
 
-        val result = keystoreManager.sign("c", ByteArray(32), biometricHelper)
+        val result = keystoreManager.sign("c", UserKeyKind.CREDENTIAL, ByteArray(32), biometricHelper)
 
         assertArrayEquals(promptSignature, result)
         coVerify(exactly = 1) { biometricHelper.authenticate(any(), any(), any(), any(), any()) }
@@ -130,7 +130,7 @@ class KeystoreManagerUserAuthTest {
             keystoreError(android.security.KeyStoreException.ERROR_USER_AUTHENTICATION_REQUIRED)
         )
 
-        val result = keystoreManager.sign("c", ByteArray(32), biometricHelper)
+        val result = keystoreManager.sign("c", UserKeyKind.CREDENTIAL, ByteArray(32), biometricHelper)
 
         assertArrayEquals(promptSignature, result)
         coVerify(exactly = 1) { biometricHelper.authenticate(any(), any(), any(), any(), any()) }
@@ -140,7 +140,7 @@ class KeystoreManagerUserAuthTest {
     fun `sign prompts on UserNotAuthenticatedException from initSign`() = runBlocking {
         every { silent.initSign(any<PrivateKey>()) } throws userNotAuthenticated()
 
-        val result = keystoreManager.sign("c", ByteArray(32), biometricHelper)
+        val result = keystoreManager.sign("c", UserKeyKind.CREDENTIAL, ByteArray(32), biometricHelper)
 
         assertArrayEquals(promptSignature, result)
         coVerify(exactly = 1) { biometricHelper.authenticate(any(), any(), any(), any(), any()) }
@@ -172,7 +172,7 @@ class KeystoreManagerUserAuthTest {
     fun `sign authenticates a time-window key before initSign when init refuses`() = runBlocking {
         timeWindowKeyRefusingUntilAuthenticated { userNotAuthenticated() }
 
-        val result = keystoreManager.sign("c", ByteArray(32), biometricHelper)
+        val result = keystoreManager.sign("c", UserKeyKind.CREDENTIAL, ByteArray(32), biometricHelper)
 
         assertArrayEquals(promptSignature, result)
         coVerify(exactly = 1) { biometricHelper.authenticateWithoutCrypto(any(), any(), any(), any()) }
@@ -188,7 +188,7 @@ class KeystoreManagerUserAuthTest {
             )
         }
 
-        val result = keystoreManager.sign("c", ByteArray(32), biometricHelper)
+        val result = keystoreManager.sign("c", UserKeyKind.CREDENTIAL, ByteArray(32), biometricHelper)
 
         assertArrayEquals(promptSignature, result)
         coVerify(exactly = 1) { biometricHelper.authenticateWithoutCrypto(any(), any(), any(), any()) }
@@ -203,7 +203,7 @@ class KeystoreManagerUserAuthTest {
         keystoreManager.keyInfoReader = { _, _ -> keyInfo }
         every { silent.sign() } throws authRequiredAtSign()
 
-        val result = keystoreManager.sign("c", ByteArray(32), biometricHelper)
+        val result = keystoreManager.sign("c", UserKeyKind.CREDENTIAL, ByteArray(32), biometricHelper)
 
         assertArrayEquals(promptSignature, result)
         coVerify(exactly = 1) { biometricHelper.authenticate(any(), any(), any(), any(), any()) }
@@ -258,7 +258,7 @@ class KeystoreManagerUserAuthTest {
         }
 
         assertThrows("API $sdk, KeyInfo readable: $keyInfoReadable", ApprovedKeyChangedException::class.java) {
-            runBlocking { manager.sign("c", ByteArray(32), helper) }
+            runBlocking { manager.sign("c", UserKeyKind.CREDENTIAL, ByteArray(32), helper) }
         }
         coVerify(exactly = 1) { helper.authenticateWithoutCrypto(any(), any(), any(), any()) }
     }
@@ -281,7 +281,7 @@ class KeystoreManagerUserAuthTest {
         )
 
         assertThrows(SigningException::class.java) {
-            runBlocking { keystoreManager.sign("c", ByteArray(32), biometricHelper) }
+            runBlocking { keystoreManager.sign("c", UserKeyKind.CREDENTIAL, ByteArray(32), biometricHelper) }
         }
         coVerify(exactly = 0) { biometricHelper.authenticate(any(), any(), any(), any(), any()) }
     }
@@ -291,7 +291,7 @@ class KeystoreManagerUserAuthTest {
         every { silent.sign() } throws authRequiredAtSign()
 
         assertThrows(BiometricRequiredException::class.java) {
-            runBlocking { keystoreManager.signWithoutBiometric("c", ByteArray(32)) }
+            runBlocking { keystoreManager.signWithoutBiometric("c", UserKeyKind.CREDENTIAL, ByteArray(32)) }
         }
     }
 
@@ -300,7 +300,7 @@ class KeystoreManagerUserAuthTest {
         every { silent.initSign(any<PrivateKey>()) } throws userNotAuthenticated()
 
         assertThrows(BiometricRequiredException::class.java) {
-            runBlocking { keystoreManager.signWithoutBiometric("c", ByteArray(32)) }
+            runBlocking { keystoreManager.signWithoutBiometric("c", UserKeyKind.CREDENTIAL, ByteArray(32)) }
         }
     }
 

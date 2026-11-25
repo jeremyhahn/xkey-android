@@ -25,38 +25,34 @@ object XmpMetadataHelper {
     private const val XKEY_SIGNATURE_PREFIX = "XKEY_SIG:"
 
     fun writeSignature(filePath: String, data: ContentAuthenticityData) {
-        val mimeType = getMimeType(filePath)
-        when {
-            mimeType.startsWith("image/jpeg") || mimeType.startsWith("image/jpg") -> {
-                writeExifSignature(filePath, data)
-            }
-            else -> {
-                writeSidecarSignature(filePath, data)
-            }
+        if (MediaHasher.isJpegFile(filePath)) {
+            writeExifSignature(filePath, data)
+        } else {
+            writeSidecarSignature(filePath, data)
         }
     }
 
     fun readSignature(filePath: String): ContentAuthenticityData? {
-        val mimeType = getMimeType(filePath)
-        return when {
-            mimeType.startsWith("image/jpeg") || mimeType.startsWith("image/jpg") -> {
-                readExifSignature(filePath) ?: readSidecarSignature(filePath)
-            }
-            else -> {
-                readSidecarSignature(filePath)
-            }
+        return if (MediaHasher.isJpegFile(filePath)) {
+            readExifSignature(filePath) ?: readSidecarSignature(filePath)
+        } else {
+            readSidecarSignature(filePath)
         }
     }
 
+    /**
+     * The signature embedded in the content at [uri]. The content is a JPEG
+     * when [mimeType] or its first bytes say so ([MediaHasher.isJpeg]).
+     */
     fun readSignatureFromUri(contentResolver: ContentResolver, uri: Uri, mimeType: String?): ContentAuthenticityData? {
-        val type = mimeType ?: ""
-        if (type.startsWith("image/jpeg") || type.startsWith("image/jpg")) {
-            try {
-                contentResolver.openInputStream(uri)?.use { inputStream ->
-                    return readExifSignatureFromStream(inputStream)
-                }
-            } catch (_: Exception) { }
-        }
+        try {
+            contentResolver.openInputStream(uri)?.buffered()?.use { stream ->
+                stream.mark(MediaHasher.JPEG_HEAD_SIZE)
+                val head = MediaHasher.readFully(stream, MediaHasher.JPEG_HEAD_SIZE)
+                stream.reset()
+                if (MediaHasher.isJpeg(mimeType, head = head)) return readExifSignatureFromStream(stream)
+            }
+        } catch (_: Exception) { }
         return null
     }
 
@@ -111,19 +107,6 @@ object XmpMetadataHelper {
             ContentAuthenticityData.fromJsonString(sidecarFile.readText())
         } catch (_: Exception) {
             null
-        }
-    }
-
-    private fun getMimeType(filePath: String): String {
-        val lower = filePath.lowercase()
-        return when {
-            lower.endsWith(".jpg") || lower.endsWith(".jpeg") -> "image/jpeg"
-            lower.endsWith(".png") -> "image/png"
-            lower.endsWith(".webp") -> "image/webp"
-            lower.endsWith(".mp4") -> "video/mp4"
-            lower.endsWith(".mkv") -> "video/x-matroska"
-            lower.endsWith(".mov") -> "video/quicktime"
-            else -> "application/octet-stream"
         }
     }
 }

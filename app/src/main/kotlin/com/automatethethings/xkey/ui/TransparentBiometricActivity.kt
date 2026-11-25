@@ -182,10 +182,7 @@ class TransparentBiometricActivity : FragmentActivity() {
     }
 
     override fun onDestroy() {
-        // Going away unanswered (the task swiped away, the activity
-        // destroyed by the system) cancels the request, so its caller, and
-        // every request queued behind it, does not wait forever. A
-        // configuration change recreates the activity for the same request.
+        // Going away unanswered cancels the request; a configuration change keeps it.
         if (!hasFinished && !isChangingConfigurations && requestId.isNotEmpty()) {
             sendErrorResult(
                 errorCode = BiometricPrompt.ERROR_CANCELED,

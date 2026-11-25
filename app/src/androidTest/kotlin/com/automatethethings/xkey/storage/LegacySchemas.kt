@@ -27,8 +27,8 @@ package com.automatethethings.xkey.storage
  * shape a user of that app version would have, including the
  * `room_master_table` identity hash Room checks when it opens the file.
  *
- * Versions 3..14 are present: 3..13 from their exported schema JSONs, and 14,
- * never exported, from 15's (see its entry). Schemas 1 and 2 predate
+ * Versions 3..15 are present: 3..14 from their exported schema JSONs, and 15,
+ * never exported, from 16's (see its entry). Schemas 1 and 2 predate
  * `exportSchema`, so migrations 1->2 and 2->3 cannot be reproduced faithfully
  * and are not covered.
  */
@@ -38,7 +38,7 @@ object LegacySchemas {
     const val OLDEST = 3
 
     /** The schema version the app currently ships. */
-    const val CURRENT = 15
+    const val CURRENT = 16
 
     /** Every version that can serve as a migration starting point. */
     val TESTABLE_VERSIONS: List<Int> get() = SCHEMAS.keys.sorted()
@@ -405,10 +405,10 @@ object LegacySchemas {
             "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
             "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'e02480570d8c7a895d2410493d8e9e08')"
         ),
-        // Never exported: 13 plus the key_policies table MIGRATION_13_14 adds
-        // (#193), transcribed from 15.json, which only adds key_deletions. Room
-        // checks no identity hash when it upgrades, so 15's is a stand-in.
-        14 to listOf(
+        // Never exported: 14 plus the key_policies table MIGRATION_14_15 adds
+        // (#193), transcribed from 16.json, which only adds key_deletions. Room
+        // checks no identity hash when it upgrades, so this hash is a stand-in.
+        15 to listOf(
             "CREATE TABLE IF NOT EXISTS `credential_metadata` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `credential_id` TEXT NOT NULL, `rp_id` TEXT NOT NULL, `rp_name` TEXT NOT NULL, `user_id` TEXT NOT NULL, `user_name` TEXT NOT NULL, `user_display_name` TEXT NOT NULL, `public_key_cose` BLOB NOT NULL, `sign_count` INTEGER NOT NULL, `created_at` INTEGER NOT NULL, `last_used_at` INTEGER NOT NULL, `is_discoverable` INTEGER NOT NULL)",
             "CREATE UNIQUE INDEX IF NOT EXISTS `index_credential_metadata_credential_id` ON `credential_metadata` (`credential_id`)",
             "CREATE INDEX IF NOT EXISTS `index_credential_metadata_rp_id` ON `credential_metadata` (`rp_id`)",
@@ -452,6 +452,8 @@ object LegacySchemas {
             "CREATE UNIQUE INDEX IF NOT EXISTS `index_passwords_password_id` ON `passwords` (`password_id`)",
             "CREATE INDEX IF NOT EXISTS `index_passwords_name` ON `passwords` (`name`)",
             "CREATE INDEX IF NOT EXISTS `index_passwords_source` ON `passwords` (`source`)",
+            "CREATE TABLE IF NOT EXISTS `password_deletions` (`password_id` TEXT NOT NULL, `deleted_at` INTEGER NOT NULL, PRIMARY KEY(`password_id`))",
+            "CREATE TABLE IF NOT EXISTS `oath_deletions` (`oath_id` TEXT NOT NULL, `deleted_at` INTEGER NOT NULL, PRIMARY KEY(`oath_id`))",
             "CREATE TABLE IF NOT EXISTS `key_policies` (`key_id` TEXT NOT NULL, `key_instance` INTEGER NOT NULL, `sharing_policy` TEXT NOT NULL, `pending_policy` TEXT, `denial` TEXT, `clear_grants` INTEGER NOT NULL, PRIMARY KEY(`key_id`), FOREIGN KEY(`key_instance`) REFERENCES `keys`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
             "CREATE UNIQUE INDEX IF NOT EXISTS `index_key_policies_key_instance` ON `key_policies` (`key_instance`)",
             "CREATE TRIGGER IF NOT EXISTS `keys_policy_revision_forward` AFTER UPDATE OF `sharing_policy`, `policy_revision` ON `keys` FOR EACH ROW WHEN NEW.`policy_revision` <= OLD.`policy_revision` BEGIN UPDATE `keys` SET `policy_revision` = OLD.`policy_revision` + 1 WHERE `id` = NEW.`id`; END",
@@ -461,6 +463,39 @@ object LegacySchemas {
     ).let {
         // Migration 10->11 rewrites data only, so schema 11 is schema 10 verbatim
         // (11.json differs from 10.json in its version number alone).
-        it + (11 to it.getValue(10))
+        val v13 = schema13(it.getValue(12))
+        it + (11 to it.getValue(10)) + (13 to v13) + (14 to schema14(v13))
     }
+
+    /**
+     * Schema 14 (14.json) is schema 13 plus the `password_deletions` and
+     * `oath_deletions` tables MIGRATION_13_14 adds.
+     */
+    private fun schema14(v13: List<String>): List<String> = v13.map { sql ->
+        if (sql.startsWith("INSERT OR REPLACE INTO room_master_table")) {
+            "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '3b471be17fd6159b87f6cac1077041a7')"
+        } else {
+            sql
+        }
+    } + listOf(
+        "CREATE TABLE IF NOT EXISTS `password_deletions` (`password_id` TEXT NOT NULL, `deleted_at` INTEGER NOT NULL, PRIMARY KEY(`password_id`))",
+        "CREATE TABLE IF NOT EXISTS `oath_deletions` (`oath_id` TEXT NOT NULL, `deleted_at` INTEGER NOT NULL, PRIMARY KEY(`oath_id`))"
+    )
+
+    /**
+     * Schema 13 is schema 12 with `keys.policy_revision` (13.json differs from
+     * 12.json in that column and the identity hash alone), plus the trigger
+     * MIGRATION_12_13 creates, which Room's schema does not carry.
+     */
+    private fun schema13(v12: List<String>): List<String> = v12.map { sql ->
+        when {
+            sql.startsWith("CREATE TABLE IF NOT EXISTS `keys` ") -> sql.replace(
+                "`sharing_policy` TEXT NOT NULL, ",
+                "`sharing_policy` TEXT NOT NULL, `policy_revision` INTEGER NOT NULL DEFAULT 0, "
+            )
+            sql.startsWith("INSERT OR REPLACE INTO room_master_table") ->
+                "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'e02480570d8c7a895d2410493d8e9e08')"
+            else -> sql
+        }
+    } + XKeyDatabase.CREATE_POLICY_REVISION_TRIGGER
 }

@@ -1,51 +1,5 @@
-# revert-red-main v1.3: a timeout-minutes on its job, so a hung run ends itself.
-# v1.2: AGENT_DOMAIN and AGENT_LOGIN are repository Actions variables; no
-# login or domain is written here.
-# v1.1: REVERT_STEPS names ci.yml's `make lint-gates` step.
-# v1: red on main reverts the merge and puts the PR back up.
-# This file is kept in step with a shared template; change both together.
-# (adapted: the CUSTOMIZE (xkey-android) blocks below make every recovery
-# step resumable and idempotent, and REVERT_STEPS names the Android stages.)
-#
-# A PR merges on the PR tier (lint, build, unit test, race); main then runs
-# the full tier. When main's full tier goes red because
-# of a merge, this workflow:
-#   1. opens a PR `revert/<sha12>` that reverts the merge commit onto main's
-#      tip, as the repository's own agent (AGENT_TOKEN). Every change reaches
-#      main through a PR: nothing is pushed to main and nothing
-#      is force-pushed. automerge.yml merges it when its PR tier is green;
-#   2. puts the change back up for its author, as a draft so automerge does
-#      not merge it again before it is fixed. A merged PR cannot be reopened
-#      on Gitea, so a directly merged PR #N comes back as a new draft PR
-#      `reland/N` from its recorded head, titled "WIP: Reland #N: <title>". A
-#      merge train closes the PRs it carries without merging them, so each
-#      carried PR is reopened itself, its branch restored at the head the
-#      train recorded and its title prefixed "WIP: ";
-#   3. reopens the issues the merged PR closed, and comments on every PR it
-#      touched with the failing run. Every PR it puts back up carries, as the
-#      first line of its body, and every issue it reopens carries, as a
-#      comment, one line naming the red run and the failed job, so nobody
-#      has to find out why it came back.
-#
-# It reverts only a failure it can pin on the merge; anything else is left to
-# a maintainer:
-#   - the run is a push to main (not dispatch or a PR) whose
-#     conclusion is failure, read again from the API by run id;
-#   - a job failed in a step named in REVERT_STEPS, the deterministic stages.
-#     security, deps-check and trivy can turn red on main with no merge at
-#     fault (a new advisory, a new upstream release), so they never revert;
-#     neither does a failure in a setup step (checkout, image build, reap);
-#   - no failed job's log carries an INFRA_MARKERS line (a runner, Docker,
-#     disk or OOM fault: a red job with no findings is a rerun);
-#   - the parent commit's `CI / CI Gate (push)` is success, so main was green
-#     before this merge and the merge is the culprit;
-#   - the merge is not itself a revert (head branch revert/*), and main does
-#     not already carry a revert of it.
-# A cancelled run never reaches it (conclusion cancelled, not failure).
-#
-# Runs only from the base branch's definition (workflow_run), like
-# automerge.yml; it fetches refs and runs no PR code. Gitea only: the
-# github.com mirror takes no merges.
+# When main's full tier goes red because of a merge, opens a revert PR, puts the change back up as a draft and reopens its issues.
+# It reverts only a deterministic-stage failure on a merge whose parent was green; runs from the base definition and runs no PR code.
 
 name: Revert Red Main
 
@@ -82,24 +36,9 @@ jobs:
           AGENT_LOGIN: ${{ vars.AGENT_LOGIN }}
           AGENT_DOMAIN: ${{ vars.AGENT_DOMAIN }}
           GATE_CONTEXT: 'CI / CI Gate (push)'
-          # CUSTOMIZE: the step names of the repo's deterministic stages, an
-          # extended regex over ci.yml's step names. Add the repo's CUSTOMIZE
-          # lint, build, unit, race and integration-class steps; never a
-          # security, deps-check, trivy or setup step.
-          # CUSTOMIZE (xkey-android): v1.27 split lint: `make lint` is Android
-          # lint and `make lint-gates` the repository's own gates (actionlint
-          # and the script tests), each a deterministic stage.
-          # ci.yml's Android stages; no build tags or
-          # go-objstore step, the JVM suite in place of integration-test, and
-          # the runBlocking gate in place of the go-objstore one.
+          # Extended regex over ci.yml's deterministic step names; never a security, deps-check, trivy or setup step.
           REVERT_STEPS: '^(make lint|make lint-gates|make build|make coverage.*|make it-jvm-test.*|Soak.*|No runBlocking in production sources)$'
-          # CUSTOMIZE (xkey-android): the closing-link grammar of automerge.yml's
-          # links(), verbatim: close/fix/resolve and their -s/-d/-es/-ed forms,
-          # any case, an optional colon, any whitespace before #N. The reopen
-          # step and the reland copy both read it through closes(), so
-          # `Fixes: #123` and `Closes  #123` are not missed.
-          # scripts/closing-links-test.sh holds the fixtures and checks it
-          # still matches links().
+          # automerge.yml's closing-link grammar; scripts/closing-links-test.sh holds its fixtures.
           CLOSING_LINK: '(?i)(?:^|[^A-Za-z0-9_])(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):?\s+#([0-9]+)'
           INFRA_MARKERS: 'Cannot connect to the Docker daemon|no space left on device|signal: killed|exit status 137|exit code 137|OOMKilled|toomanyrequests|lost communication with the server|The runner has received a shutdown signal'
         run: |
@@ -118,28 +57,16 @@ jobs:
           }
           die() { echo "::error::$*"; exit 1; }
           leave() { echo "not reverting: $*"; exit 0; }
-          # CUSTOMIZE (xkey-android): a rerun on the same red merge resumes the
-          # run and posts nothing twice. Every comment ends
-          # in a marker naming the merge and the comment's kind, and is skipped
-          # when the issue or PR already carries it. did and found collect what
-          # this run did and what an earlier run had done, for the summary.
+          # Each comment ends in a marker and is skipped when present, so a rerun posts nothing twice.
           did="" found=""
-          # CUSTOMIZE (xkey-android): incomplete lists the recovery steps this
-          # run owed and could not do: a failed reland,
-          # reopen, branch push, fetch, PR or issue read, issue reopen or
-          # comment. Each one is recorded and the run goes on to the next
-          # item; after the summary the run exits 1, so a red recovery is
-          # visible and its rerun retries what is left. Not `failed`, which
-          # holds the red jobs' ids.
+          # Recovery steps this run could not do; the run exits 1 after the summary so a rerun retries them.
           incomplete=""
           noted() { # did|found item -> the item appended to that list
             printf -v "$1" '%s' "${!1}${!1:+, }$2"
           }
           comment() { # issue-or-pr kind body
             local m="<!-- revert-red-main ${short:-} $2 -->" c
-            # CUSTOMIZE (xkey-android): only a read of the comments says the
-            # marker is absent; a failed read posts
-            # nothing, so a rerun does not post it twice.
+            # Only a successful read says the marker is absent; a failed read posts nothing.
             c=$(api GET "/issues/$1/comments") || true
             if [ "$c" != 200 ]; then
               echo "cannot read the comments of #$1 (HTTP $c)"; incomplete="$incomplete comment#$1"; return 0
@@ -180,9 +107,7 @@ jobs:
           conclusion=$(jq -r '.conclusion // ""' /tmp/api.json)
           sha=$(jq -r '.head_sha // ""' /tmp/api.json)
           run_url=$(jq -r '.html_url // ""' /tmp/api.json)
-          # CUSTOMIZE (xkey-android): an explicit if, not `A && B || C`, which
-          # is SC2015 to shellcheck and fails `make actionlint` (run 61048).
-          # Same behaviour: leave unless the run is a push and on main.
+          # An explicit if, not `A && B || C` (SC2015): leave unless the run is a push on main.
           if [ "$event" != push ] || [ "$branch" != main ]; then
             leave "run $RED_RUN is $event on $branch, not a push to main"
           fi
@@ -222,11 +147,7 @@ jobs:
           parents=$(jq -r '.parents | length' /tmp/api.json)
           parent=$(jq -r '.parents[0].sha // ""' /tmp/api.json)
           [ -n "$parent" ] || leave "$short has no parent"
-          # CUSTOMIZE (xkey-android): a status code other than 200 or 404 is a
-          # failed read, never an absence: a failed read
-          # of the parent's statuses or of the merge's PR fails the run, so
-          # its rerun decides, and only a 404 sends the PR lookup to the
-          # commit message.
+          # A status other than 200 or 404 is a failed read and fails the run; only a 404 sends the lookup to the commit message.
           code=$(api GET "/commits/$parent/statuses?limit=100")
           [ "$code" = 200 ] || die "cannot read the statuses of ${parent:0:12} (HTTP $code)"
           gate=$(jq -r --arg c "$GATE_CONTEXT" \
@@ -264,16 +185,7 @@ jobs:
           git -C "$repo" fetch -q --no-tags "$GIT_URL" "+refs/heads/main:refs/red/main" "+refs/pull/$pr/head:refs/red/pr" \
             || die "cannot fetch main and #$pr"
           git -C "$repo" merge-base --is-ancestor "$sha" refs/red/main || leave "$short is not on main"
-          # CUSTOMIZE (xkey-android): resume a partial run instead of stopping
-          # at its own branch. The newest PR from
-          # revert/<short>, which must be this agent's, is reused while open,
-          # and owns the branch; merged, the revert is done and the run goes
-          # on to the drafts and issues an earlier run may have left undone;
-          # closed unmerged, it was refused and a maintainer decides. With
-          # no PR, an existing revert/<short> is reused only when it is the
-          # revert of this merge: one commit whose message names the merge, on
-          # a parent main carried, with the tree the revert onto that parent
-          # builds. Anything else by that name is never overwritten.
+          # Resume a partial run: reuse this merge's open revert PR or its exact revert branch; never overwrite anything else by that name.
           paged "/pulls?state=all" /tmp/pulls.json
           rpr="" rstate="" rmerged="" rlogin=""
           read -r rpr rstate rmerged rlogin <<< "$(headpr "revert/$short")" || true
@@ -286,9 +198,7 @@ jobs:
           if [ "$rmerged" = true ]; then
             noted found "revert PR #$rpr merged"
           else
-            # git's own --grep, not `git log | grep -q`: grep -q exits at the
-            # first match, git dies of SIGPIPE, and pipefail makes the pipe
-            # false, so the template's check never fires on a real history.
+            # git --grep, not `git log | grep -q`, which SIGPIPEs git under pipefail.
             if [ -n "$(git -C "$repo" log -1 --format=%H --grep="^This reverts commit $sha" refs/red/main)" ]; then
               leave "main already carries a revert of $short"
             fi
@@ -348,18 +258,7 @@ jobs:
             *) carried=("$pr $(jq -r '.head.sha' /tmp/pr.json)") ;;
           esac
           relanded=""
-          # CUSTOMIZE (xkey-android): each put-back resumes.
-          # A merged PR whose reland/<n> already has a PR keeps that PR; an
-          # existing reland/<n> at the recorded head is not pushed again, and at
-          # another commit it is left alone. A carried PR an earlier run
-          # reopened (its body carries the marker, or it is open with a WIP
-          # title) is not patched again. Comments go through comment(), so each
-          # kind is posted once.
-          # CUSTOMIZE (xkey-android): a failed step adds to incomplete and the
-          # loop goes on; only a success writes what the
-          # rerun reads as done (the body's $mark, the reland PR, the open
-          # issue), never a *-failed comment. `moved` and `reland-taken` are
-          # refusals, left to a maintainer, not failures.
+          # Each put-back resumes: existing relands and reopened PRs are kept; a failed step adds to incomplete and the loop goes on.
           mark="<!-- revert-red-main $short -->"
           for c in "${carried[@]}"; do
             read -r n h <<< "$c"
@@ -383,10 +282,7 @@ jobs:
             git -C "$repo" fetch -q --no-tags "$GIT_URL" "+refs/pull/$n/head:refs/red/c$n" || { echo "cannot fetch #$n"; incomplete="$incomplete fetch#$n"; continue; }
             [ "$(git -C "$repo" rev-parse "refs/red/c$n")" = "$h" ] || { comment "$n" moved "$note This PR's head moved from $h; not reopened."; continue; }
             if [ "$cmerged" = true ]; then
-              # Merged: Gitea cannot reopen it, so a new draft PR from its head.
-              # CUSTOMIZE (xkey-android): only a 404 says reland/<n> is absent
-              # and may be pushed; a failed read is
-              # recorded and the item skipped.
+              # A merged PR cannot be reopened: open a new draft from its head; only a 404 lets reland/<n> be pushed.
               code=$(api GET "/branches/reland/$n")
               if [ "$code" = 200 ] && [ "$(jq -r '.commit.id' /tmp/api.json)" = "$h" ]; then
                 noted found "branch reland/$n"
@@ -399,8 +295,7 @@ jobs:
               else
                 echo "cannot push reland/$n"; incomplete="$incomplete reland-push#$n"; continue
               fi
-              # CUSTOMIZE (xkey-android): every closing link closes() finds,
-              # one `Closes #N` line each, not the lines one grammar matched.
+              # One `Closes #N` line per closing link closes() finds.
               refs=""
               for i in $(jq -r '.body // ""' /tmp/c.json | closes "$n"); do refs="$refs${refs:+$'\n'}Closes #$i"; done
               cbody=$(printf '%s\n\nRelands #%s. Fix the failure, then drop the WIP prefix to merge.\n\n%s' \
@@ -415,13 +310,7 @@ jobs:
                 comment "$n" reland-failed "$note The draft reland PR could not be opened (HTTP $code)."
               fi
             else
-              # Closed by the train: restore its branch at the recorded head
-              # and reopen it as a draft.
-              # CUSTOMIZE (xkey-android): a branch an earlier run restored at
-              # the recorded head is not pushed again, so a rerun after a
-              # failed reopen only reopens. A read other
-              # than 200 or 404 is recorded and the item skipped, neither
-              # pushed nor reopened.
+              # Closed by the train: restore its branch at the recorded head and reopen it as a draft; a failed read skips the item.
               code=$(api GET "/branches/$cref")
               if [ "$code" = 200 ] && [ "$(jq -r '.commit.id' /tmp/api.json)" = "$h" ]; then
                 noted found "branch $cref"
@@ -443,13 +332,7 @@ jobs:
               fi
             fi
           done
-          # CUSTOMIZE (xkey-android): the issues closes() finds, links()'s
-          # grammar. An issue already open is not reopened again, and its
-          # comment is posted once.
-          # CUSTOMIZE (xkey-android): only a 404 from the PR endpoint makes a
-          # number an issue. Gitea serves PRs on the issue
-          # endpoint too, so a failed PR read would send a carried PR to the
-          # issue reopen without its WIP title: it is recorded and skipped.
+          # Reopen the issues closes() finds, once each; only a 404 from the PR endpoint makes a number an issue.
           for i in $(jq -r '.body // ""' /tmp/pr.json | closes "$pr"); do
             code=$(api GET "/pulls/$i")
             [ "$code" = 200 ] && continue   # a carried PR, handled above
@@ -466,8 +349,7 @@ jobs:
           done
           comment "$pr" "summary$relanded" "$note Back up as draft:${relanded:- none}."
           echo "reverted $short (#$pr) in #$rpr; drafts:${relanded:- none}; did: ${did:-nothing}; found done: ${found:-nothing}; failed:${incomplete:- nothing}"
-          # CUSTOMIZE (xkey-android): every item was tried; a step left undone
-          # fails the run, and its rerun retries it.
+          # A step left undone fails the run so its rerun retries it.
           if [ -n "$incomplete" ]; then
             echo "::error::recovery incomplete:$incomplete"
             exit 1

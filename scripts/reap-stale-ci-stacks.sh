@@ -1,82 +1,6 @@
 #!/usr/bin/env bash
-# Remove this repo's stopped CI leftovers on the runner host.
-#
-#   usage: scripts/reap-stale-ci-stacks.sh <prefix> [min-age-seconds]
-#
-# For a runner host that outlives its jobs (a self-hosted runner or a
-# developer machine); a GitHub-hosted runner is fresh per job and needs none
-# of it. An integration job's `if: always()` teardown runs only while the job
-# process lives. When the host or its Docker daemon dies mid-job, the job is
-# gone and so is its teardown: the compose stack stays behind, exited, with
-# its networks and volumes. Nothing else removes them.
-#
-# What it removes, on the Docker host the job talks to:
-#   - a compose project (label com.docker.compose.project) whose name starts
-#     with <prefix>, when EVERY container in it is stale; then the project's
-#     networks and volumes (same label);
-#   - a container outside compose whose name starts with <prefix>, when stale,
-#     with its anonymous volumes.
-#   - images. The integration image is named by its content, <prefix>it:<hash>
-#     (`make -s it-image`), and every job and run of that tree on this host
-#     reuses it, so no job removes it. This removes a <prefix>it image idle
-#     for at least REAP_IMAGE_MIN_AGE seconds, default 7200 (2 h: the longest
-#     full-tier run plus headroom), so an image a run still needs is not old
-#     enough. `docker image rm` without force refuses an image a container
-#     (running or stopped) uses, so a live stack's image is never removed.
-#     A job may hold a lease on an image: a created, never started container
-#     named <prefix>lease-<run>-.... A lease a dead job leaves is stale like
-#     any other container outside compose, and goes after <min-age-seconds>;
-#     its image goes on the reap after that.
-#   - An image's age runs from the later of its `.Created` and its last tag
-#     time (`.Metadata.LastTagTime`). A rebuild from a full cache keeps the
-#     old `.Created` but re-tags the image, so creation time alone would make
-#     a just-rebuilt image look stale to a parallel job's reaper.
-#   - REAP_IMAGE_REPOS (<repo>-toolchain, whose tags are <hash> and
-#     pr-<hash>) names more image repositories to reap by the same rule as
-#     <prefix>it. Each family's untagged images go too: a trusted run builds
-#     fresh every time (Makefile IMAGE_FRESH), so its build moves the tag off
-#     the last one, which no tag lookup finds again. `make docker-build`
-#     labels every image ci.image.repository=<repository>, and an untagged
-#     image is reaped only under one of these names.
-#   - An image is removed only when no container, running or created, uses
-#     its ID, checked before the removal: `docker image rm <tag>` of an image
-#     with two tags (a pr- tag a run took from the trusted one) only untags
-#     it, even while a lease holds it. A run's reuse of a tag moves its tag
-#     time (the Makefile re-tags it), so the age is the image's last use: an
-#     image in use is kept, an idle one goes REAP_IMAGE_MIN_AGE after its
-#     last use. An old trusted tag is only a cache (no trusted run reuses
-#     it), so age is its only test. The log line names the lease or stage
-#     that keeps an image.
-#   - A lease (any <prefix> container) may carry ci.lease.expires, a Unix
-#     time: past it, the lease is stale even before <min-age-seconds>.
-#   - The image loop runs under the daemon's image lock, so a job cannot take
-#     a lease between the reaper's in-use check and its `docker image rm`.
-#     The lock is a created, never-started container named
-#     <prefix>image-lock, from <prefix>image-lock:base (an empty image this
-#     script imports when it is missing); the daemon refuses a second
-#     container of that name, so there is one holder at a time. A lock
-#     created more than 600 s ago is a dead holder's and is removed by its
-#     id. The reaper waits up to REAP_LOCK_WAIT seconds (default 60) for it,
-#     and without it removes no image that run. The in-use list is read after
-#     the lock is taken. The tag time is read as a string: on Docker 29
-#     `{{.Metadata.LastTagTime.Unix}}` is a template error, and an inspect
-#     without an id would have removed the tag whatever its age or lease. An
-#     image the inspect gives no id for is kept.
-#
-# Stale: exited or dead and finished at least <min-age-seconds> ago, or
-# created and never started at least that long ago. A project with any
-# container running, paused, restarting or removing is never touched.
-#
-# <min-age-seconds> defaults to 11100: a 3 h job timeout plus 5 min,
-# so no job that could still own the stack is alive. Pass the job's own
-# timeout-minutes * 60 plus a margin only if you know every runner's timeout.
-#
-# The prefix is the repo's own (`xkey-android-ci-`): the name the job
-# gives its compose project, without the run id. Never a prefix another repo's
-# projects could start with.
-#
-# A failed removal is reported and skipped: the reaper never fails the job.
-# REAP_DRY_RUN=1 prints what would be removed and removes nothing.
+# Remove this repo's stale CI compose stacks, containers, leases and idle images on a long-lived runner host, under the daemon image lock. Usage: scripts/reap-stale-ci-stacks.sh <prefix> [min-age-seconds]
+# REAP_DRY_RUN=1 prints what would go; a failed removal never fails the job.
 set -u
 
 prefix=${1:-}
@@ -213,9 +137,7 @@ reap_image() {
     return 0 ;;
   esac
   t=$(date -d "$created" +%s 2>/dev/null) || return 0
-  # Go prints the tag time as "2026-10-21 00:35:47.26 +0000 UTC"; date -d
-  # takes it without the fraction and the zone name. A never-tagged image
-  # reports the zero time, a large negative number.
+  # date -d takes the tag time without fraction and zone; a never-tagged image reports a large negative time.
   tagged=$(docker image inspect -f '{{.Metadata.LastTagTime}}' "$1" 2>/dev/null | sed -E 's/\.[0-9]+//; s/ [A-Z]+$//')
   tagged=$(date -d "$tagged" +%s 2>/dev/null) || tagged=
   case $tagged in ''|*[!0-9]*) ;; *) [ "$tagged" -le "$t" ] || t=$tagged ;; esac

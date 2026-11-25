@@ -115,7 +115,7 @@ class KeyRecordedSizeIntegrityTest {
         val key = createKey(
             "Size Integrity OAEP 4096 $runId",
             PURPOSE_ENCRYPTION,
-            algorithmIndex = 1,
+            algorithm = "RSA-OAEP 4096",
             timeoutMs = RSA_TIMEOUT_MS
         )
 
@@ -135,7 +135,7 @@ class KeyRecordedSizeIntegrityTest {
         val key = createKey(
             "Size Integrity OAEP 2048 $runId",
             PURPOSE_ENCRYPTION,
-            algorithmIndex = 0,
+            algorithm = "RSA-OAEP 2048",
             timeoutMs = RSA_TIMEOUT_MS
         )
 
@@ -149,7 +149,7 @@ class KeyRecordedSizeIntegrityTest {
      */
     @Test
     fun signingKey_recordsTheCurveFieldSize() {
-        val key = createKey("Size Integrity ES384 $runId", PURPOSE_SIGNING, algorithmIndex = 1)
+        val key = createKey("Size Integrity ES384 $runId", PURPOSE_SIGNING, algorithm = "ECDSA P-384")
 
         assertEquals("ES384", key.algorithm)
         assertEquals(384, key.keySizeBits)
@@ -178,7 +178,7 @@ class KeyRecordedSizeIntegrityTest {
     private fun createKey(
         label: String,
         purposeIndex: Int,
-        algorithmIndex: Int,
+        algorithm: String,
         timeoutMs: Long = CREATE_TIMEOUT_MS
     ): KeyEntity {
         val before = runBlocking { keyDao.getAll() }.map { it.keyId }.toSet()
@@ -191,7 +191,10 @@ class KeyRecordedSizeIntegrityTest {
             .inRoot(isDialog())
             .perform(replaceText(label), closeSoftKeyboard())
         selectSpinnerItem(PURPOSE_SPINNER, purposeIndex)
-        selectSpinnerItem(ALGORITHM_SPINNER, algorithmIndex)
+        onView(nthMatch(isAssignableFrom(Spinner::class.java), ALGORITHM_SPINNER))
+            .inRoot(isDialog())
+            .perform(selectSpinnerItemByText(algorithm))
+        waitForIdle()
         // The emulator has no enrolled biometric, so an auth-bound key cannot be
         // generated there; the switch defaults to on and has to be cleared.
         onView(isAssignableFrom(MaterialSwitch::class.java))

@@ -15,6 +15,7 @@
 
 package com.automatethethings.xkey.tcp
 
+import com.automatethethings.xkey.ble.NoiseTestKeyStore
 import android.content.Context
 import android.util.Log
 import com.automatethethings.xkey.audit.AuditLogger
@@ -61,7 +62,7 @@ import org.junit.Test
  * A [ConnectedDesktop] from [TcpHsmServer.connectedDesktop] sends only on
  * the connection whose handshake authenticated its key: once desktop A has
  * gone and paired desktop B holds the server, a send captured for A fails
- * and B receives nothing (ruling 554, #141).
+ * and B receives nothing.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class TcpConnectedDesktopBindingTest {
@@ -79,6 +80,7 @@ class TcpConnectedDesktopBindingTest {
 
     @Before
     fun setUp() {
+        NoiseTestKeyStore.install()
         mockkStatic(Log::class)
         every { Log.v(any(), any<String>()) } returns 0
         every { Log.d(any(), any<String>()) } returns 0

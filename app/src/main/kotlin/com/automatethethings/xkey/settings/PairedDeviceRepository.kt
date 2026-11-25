@@ -278,13 +278,14 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
         var stillPending = false
         val evicted = synchronized(storeLock) {
             val devices = storedDevices().toMutableList()
-            // Remove stale entries for this device. A re-pairing device will have a new Noise
-            // static key, so we match by publicKeyHex, BLE address, OR device name to ensure
-            // the old entry is replaced rather than duplicated.
+            // Remove stale entries for this device: the same key, or the same BLE radio
+            // re-pairing under a new Noise static key. The device name is no identity: two
+            // desktops can share a host name, and matching on it would silently unpair the
+            // other one and revoke its grants. The pairing carries nothing else stable, so a
+            // TCP or USB re-pairing under a new key adds a second entry the user can remove.
             val evicted = devices.filter {
                 it.publicKeyHex == publicKeyHex ||
-                    (bleAddress != null && it.bleAddress == bleAddress) ||
-                    it.deviceName == deviceName
+                    (bleAddress != null && it.bleAddress == bleAddress)
             }
             devices.removeAll(evicted)
             devices.add(PairedDeviceData(

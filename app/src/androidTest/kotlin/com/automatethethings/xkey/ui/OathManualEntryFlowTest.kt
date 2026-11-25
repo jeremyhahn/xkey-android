@@ -44,8 +44,8 @@ import org.junit.runner.RunWith
  * [AddOathDialog].
  *
  * The activity does not pass the typed values to the repository directly: it
- * assembles an `otpauth://` URI and re-parses it. That URI used to be built by
- * string concatenation, so any `&`, `?`, `#`, or `=` in the issuer or the
+ * assembles an `otpauth://` URI and re-parses it. Built by string
+ * concatenation, any `&`, `?`, `#`, or `=` in the issuer or the
  * account — all of them ordinary in a company name or an email address — was
  * read back as URI structure. An issuer of `Corp & Co` truncated itself at the
  * ampersand and everything after it in the URI became garbage, and a `#`
@@ -145,8 +145,7 @@ class OathManualEntryFlowTest {
 
     @Test
     fun manualEntry_withAnIssuer_storesTheAccountWithoutTheIssuer() {
-        // The label separator was encoded as %3A with the rest of the label,
-        // so the importer stored "GitHub:alice@..." as the account (#156).
+        // The %3A label separator must split issuer from account.
         val account = "alice-$runId@example.com"
 
         ActivityScenario.launch(OathActivity::class.java)

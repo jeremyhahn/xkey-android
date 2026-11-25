@@ -51,8 +51,7 @@ import org.junit.runner.RunWith
  * suite covers:
  *
  * 1. The xkms endpoint persists on focus loss, like every other text field on
- *    the screen. It used to be written only as a side effect of "Fetch CA
- *    Bundle", so typing a URL and navigating away lost it.
+ *    the screen, not only on "Fetch CA Bundle".
  * 2. The screen *observes* the biometric settings instead of reading them once
  *    in `onCreate`, so a change made by another writer (the credential-provider
  *    flow, another screen, a paired desktop) is reflected while it is open.
@@ -108,7 +107,7 @@ class SettingsPersistenceAndDisclosureFlowTest {
 
     /**
      * Leaving the field is what commits it. Pressing "Fetch CA Bundle" is a
-     * network action the user may never take, and it used to be the only writer.
+     * network action the user may never take.
      */
     @Test
     fun xkmsEndpoint_persistsOnFocusLoss() {

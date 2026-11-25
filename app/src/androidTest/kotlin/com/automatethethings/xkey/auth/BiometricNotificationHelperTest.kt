@@ -31,6 +31,8 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.rule.GrantPermissionRule
 import com.automatethethings.xkey.R
 import com.automatethethings.xkey.XKeyApplication
+import com.automatethethings.xkey.ui.PROMPT_TIMEOUT_MS
+import com.automatethethings.xkey.ui.assumeNoEnrolledStrongBiometric
 import com.automatethethings.xkey.ui.TransparentBiometricActivity
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -119,7 +121,7 @@ class BiometricNotificationHelperTest {
     private fun posted(): StatusBarNotification? =
         notificationManager.activeNotifications.firstOrNull { it.id == notificationId }
 
-    private fun awaitPosted(timeoutMs: Long = 5_000L): StatusBarNotification {
+    private fun awaitPosted(timeoutMs: Long = PROMPT_TIMEOUT_MS): StatusBarNotification {
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
             posted()?.let { return it }
@@ -128,7 +130,7 @@ class BiometricNotificationHelperTest {
         throw AssertionError("no notification with id $notificationId was posted")
     }
 
-    private fun awaitGone(timeoutMs: Long = 5_000L) {
+    private fun awaitGone(timeoutMs: Long = PROMPT_TIMEOUT_MS) {
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
             if (posted() == null) return
@@ -275,7 +277,7 @@ class BiometricNotificationHelperTest {
     private fun postedUnder(key: String): StatusBarNotification? =
         notificationManager.activeNotifications.firstOrNull { it.id == notificationId && it.tag == key }
 
-    private fun awaitGoneUnder(key: String, timeoutMs: Long = 5_000L) {
+    private fun awaitGoneUnder(key: String, timeoutMs: Long = PROMPT_TIMEOUT_MS) {
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
             if (postedUnder(key) == null) return
@@ -378,7 +380,7 @@ class BiometricNotificationHelperTest {
         }
     }
 
-    private fun awaitPostedUnder(key: String, timeoutMs: Long = 5_000L): StatusBarNotification {
+    private fun awaitPostedUnder(key: String, timeoutMs: Long = PROMPT_TIMEOUT_MS): StatusBarNotification {
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
             postedUnder(key)?.let { return it }
@@ -420,6 +422,7 @@ class BiometricNotificationHelperTest {
      */
     @Test
     fun theNotificationOfALiveDirectPromptReachesItInsteadOfStartingAnother() {
+        assumeNoEnrolledStrongBiometric()
         val app = context as Application
         val created = AtomicInteger()
         val createdAtSend = AtomicInteger(-1)
@@ -441,7 +444,7 @@ class BiometricNotificationHelperTest {
         try {
             val failure = runBlocking(Dispatchers.Main) {
                 runCatching {
-                    withTimeout(15_000L) {
+                    withTimeout(PROMPT_TIMEOUT_MS) {
                         launcher.requestAuthentication(
                             title = "Approve",
                             subtitle = "example.com",

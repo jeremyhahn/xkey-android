@@ -1,12 +1,12 @@
 # Request generation echo architecture
 
-> **Status: REFERENCE** · Last verified: 2026-11-12
-> As-built description of how the phone copies a request's top-level `generation` into every response it sends, the phone half of the go-xkms#128 change.
+> **Status: REFERENCE** · Last verified: 2026-11-23
+> How the phone copies a request's top-level `generation` into every response it sends. This is the phone half of the go-xkms#128 change.
 
 ## Summary
 
 A desktop may put a top-level `generation` member, a uint64, in each JSON-RPC
-request. The phone never computes with it: it copies the value verbatim into
+request. The phone never computes with it. It copies the value verbatim into
 the response so the desktop can match the answer to the request generation it
 sent. A request without a `generation` gets a response without one.
 
@@ -16,24 +16,26 @@ The value is read from the message text by `readGeneration`, not from a parsed
 written back as a `Long` when it fits, otherwise as a `BigInteger`, so the
 digits round-trip exactly up to `18446744073709551615`.
 
-The echo is applied in one place per path rather than by each method handler:
-`RequestHandler.handleRequest` for every method the shared handler serves,
+Each path applies the echo in one place; method handlers do not. The places
+are `RequestHandler.handleRequest` for every method the shared handler serves,
 `StreamPairingSession.routeTransportMethod` for the USB-only store families,
-and each refusal the transports build themselves before routing.
+and each refusal a transport builds itself before routing.
 
 ## Components
 
+Paths are relative to ``.
+
 | Component | File | Role |
 |-----------|------|------|
-| `Request.generation`, `Request.fromJson` | `app/src/main/kotlin/com/automatethethings/xkey/protocol/Messages.kt` | `generation: ULong?`; `fromJson` fills it from `readGeneration(json)` |
-| `Response.generation`, `Response.success` / `Response.error` | same file | Optional `generation` argument; `toJsonString` writes it only when non-null |
+| `Request.generation`, `Request.fromJson` | `protocol/Messages.kt` | `generation: ULong?`; `fromJson` fills it from `readGeneration(json)` |
+| `Response.generation`, `Response.success` / `Response.error` | same file | Optional `generation` argument; `toJsonString` writes it only when non-null. `BleClient` imports it as `ProtocolResponse` |
 | `readGeneration`, `GENERATION_KEY` | same file | Walks the top-level members with a `JSONTokener` and returns the `generation` literal if it matches `0` or `[1-9][0-9]*` and fits a `ULong`; otherwise null |
-| `RequestHandler.handleRequest` / `handleRawRequest` | `app/src/main/kotlin/com/automatethethings/xkey/protocol/Handler.kt` | `dispatch(request).copy(generation = request.generation)`; a request that fails to parse still gets `readGeneration(json)` on its error |
-| `BidirectionalMessageRouter` | `app/src/main/kotlin/com/automatethethings/xkey/remote/BidirectionalMessageRouter.kt` | Passes inbound requests to `RequestHandler.handleRawRequest` |
-| `StreamPairingSession.routeTransportMethod`, `rejectUnpaired`, `handlePairingConfirm`, `confirmAlreadyPaired` | `app/src/main/kotlin/com/automatethethings/xkey/transport/StreamPairingSession.kt` | USB/TCP: echo on the store families, on `PAIRING_REQUIRED`, and on `pairing.confirm` answers |
-| `GattServer.rejectUnpaired`, `handlePairingConfirmIfNeeded` | `app/src/main/kotlin/com/automatethethings/xkey/ble/GattServer.kt` | BLE GATT: the same refusals and `pairing.confirm` answers |
-| `BleClient.dispatchInboundRequest` | `app/src/main/kotlin/com/automatethethings/xkey/ble/BleClient.kt` | Phone-initiated sessions: echo on its own refusals |
-| `FrameBudget.GENERATION_RESERVE` | `app/src/main/kotlin/com/automatethethings/xkey/usb/FrameBudget.kt` | Reserves `,"generation":18446744073709551615` in `RESULT_BUDGET` so a USB store result still fits one frame |
+| `RequestHandler.handleRequest` / `handleRawRequest` | `protocol/Handler.kt` | `dispatch(request).copy(generation = request.generation)`; a request that fails to parse still gets `readGeneration(json)` on its error |
+| `BidirectionalMessageRouter` | `remote/BidirectionalMessageRouter.kt` | Passes inbound requests to `RequestHandler.handleRawRequest` |
+| `StreamPairingSession.routeTransportMethod`, `rejectUnpaired`, `handlePairingConfirm`, `confirmAlreadyPaired` | `transport/StreamPairingSession.kt` | USB/TCP: echo on the store families, on `PAIRING_REQUIRED`, and on `pairing.confirm` answers |
+| `GattServer.rejectUnpaired`, `handlePairingConfirmIfNeeded` | `ble/GattServer.kt` | BLE GATT: the same refusals and `pairing.confirm` answers |
+| `BleClient.dispatchInboundRequest` | `ble/BleClient.kt` | Phone-initiated sessions: echo on its own refusals |
+| `FrameBudget.GENERATION_RESERVE` | `usb/FrameBudget.kt` | Reserves `,"generation":18446744073709551615` in `RESULT_BUDGET` so a USB store result still fits one frame |
 
 ## Wire methods and Android entry points
 
@@ -44,7 +46,7 @@ and each refusal the transports build themselves before routing.
 - Only the top-level member counts; a `generation` inside `params` is not the
   request's.
 - No code that sets `generation` on the phone's own outbound `remote.*`
-  requests was found in `app/src/main/kotlin/com/automatethethings/xkey/remote/`.
+  requests was found in `remote/`.
 
 ## Main flow
 
@@ -84,9 +86,8 @@ sequenceDiagram
   `BleClient`, and every handler error.
 - `RequestHandler.createErrorResponse(id, code, message)` takes no generation
   and builds a response without one.
-- The KDoc on `FrameBudget.GENERATION_RESERVE` says "[Response] has no
-  generation here yet"; `Response` does carry one on main, so that comment is
-  out of date. The reserve itself is applied to every response either way.
+- `FrameBudget` keeps the reserve for every response, whether or not the
+  request sent a generation.
 
 ## Tests
 

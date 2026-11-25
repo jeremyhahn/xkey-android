@@ -99,7 +99,19 @@ class GenerationEchoTest {
             keystoreManager = keystoreManager,
             biometricLauncher = null,
             sessionAuthManager = null,
-            pairedDeviceRepository = null
+            pairedDeviceRepository = pairedDevices
+        )
+        // Key-use methods answer only a paired desktop.
+        handler.setConnectedDevicePublicKeyHex(PEER)
+    }
+
+    private val PEER = "aa01"
+
+    private val pairedDevices = mockk<com.automatethethings.xkey.settings.PairedDeviceRepository> {
+        every { lookupDevice(PEER) } returns com.automatethethings.xkey.settings.DeviceLookup.Paired(
+            mockk<com.automatethethings.xkey.settings.PairedDeviceData>(relaxed = true) {
+                every { requireAttestationForKeyUse } returns false
+            }
         )
     }
 

@@ -32,6 +32,10 @@ import com.automatethethings.xkey.protocol.SessionBindingProvider
 import com.automatethethings.xkey.settings.BiometricSettingsData
 import com.automatethethings.xkey.settings.BiometricSettingsRepository
 import com.automatethethings.xkey.ui.MainActivity
+import com.automatethethings.xkey.ui.PromptActivityTracker
+import com.automatethethings.xkey.ui.PromptHost
+import com.automatethethings.xkey.ui.awaitHostedAnswer
+import androidx.annotation.VisibleForTesting
 import com.automatethethings.xkey.remote.BidirectionalMessageRouter
 import com.automatethethings.xkey.tcp.TcpHsmServer
 import com.automatethethings.xkey.remote.RemoteKeyClient
@@ -61,11 +65,8 @@ import com.automatethethings.xkey.ca.EnrolledDeviceRepository
 import com.automatethethings.xkey.settings.TrustedComputingSettingsRepository
 import com.automatethethings.xkey.truststore.IDevIDVerifier
 import com.automatethethings.xkey.truststore.TrustStoreRepository
-import com.google.android.material.dialog.MaterialAlertDialogBuilder
-import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import kotlin.coroutines.resume
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -76,7 +77,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
-import java.lang.ref.WeakReference
 
 /**
  * Foreground service that manages the BLE GATT server for xKey operations.
@@ -151,8 +151,13 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
     @Volatile
     private var isStartingAdvertising = false
 
-    // Activity reference for biometric prompts
-    private var activityRef: WeakReference<FragmentActivity>? = null
+    /**
+     * Where the pairing confirmation is raised: the app-wide record of the
+     * resumed screen, never a reference one activity sets and another clears
+     * (#320). Tests may pin it with [setActivity].
+     */
+    @VisibleForTesting
+    internal var promptHost: PromptHost = PromptActivityTracker
 
     // Service state
     private val _serviceState = MutableStateFlow<ServiceState>(ServiceState.Stopped)
@@ -572,15 +577,13 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
     }
 
     /**
-     * Sets the activity for biometric prompts.
-     *
-     * Call this when the activity becomes available (e.g., in onResume).
-     *
-     * @param activity The activity to use for biometric prompts
+     * Test hook: pins the pairing confirmation's host to [activity], or to
+     * none when null. The app never calls it; the prompt host is
+     * [PromptActivityTracker], which follows whichever screen is in front.
      */
+    @VisibleForTesting
     fun setActivity(activity: FragmentActivity?) {
-        activityRef = if (activity != null) WeakReference(activity) else null
-        requestHandler?.setActivity(activity)
+        promptHost = PromptHost { activity }
     }
 
     /**
@@ -1011,7 +1014,8 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
      * Asks the connected desktop for an encrypted backup of the stores in
      * [include] under [password] (`remote.createBackup`) over the active
      * transport, and keeps the returned envelope in [BackupStore] under the
-     * desktop's backup id.
+     * desktop's backup id. The result carries the id the envelope was stored
+     * under: a generated one when the desktop sent none.
      *
      * [password] is zeroed before this returns, whatever the outcome.
      *
@@ -1031,10 +1035,13 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
             Log.i(TAG, "Starting phone-initiated backup")
             val result = RemoteBackupClient(desktop)
                 .createBackup(password, include, "phone-${System.currentTimeMillis()}")
-            withContext(Dispatchers.IO) {
+            // A reply with no backup_id is stored under a generated id: hand
+            // back that id, the one a restore can find.
+            val storedId = withContext(Dispatchers.IO) {
                 BackupStore(applicationContext).store(result.backupId, result.backupData)
             }
-            return result
+            if (storedId == result.backupId) return result
+            return RemoteBackupClient.CreateResult(result.backupData, storedId, result.itemCount)
         } finally {
             password.fill('\u0000')
         }
@@ -1142,7 +1149,7 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
     /**
      * Shows a Material dialog for pairing confirmation.
      *
-     * If no activity is bound, rejects by default (security: no unattended pairing).
+     * If no activity is resumed, rejects by default (security: no unattended pairing).
      */
     override suspend fun onPairingConfirmationRequired(
         deviceName: String,
@@ -1164,28 +1171,19 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
     )
 
     private suspend fun showPairingDialog(message: String): Boolean {
-        val activity = activityRef?.get() ?: run {
+        val activity = promptHost.current() ?: run {
             Log.w(TAG, "No activity available for pairing dialog, rejecting")
             return false
         }
 
-        return withContext(Dispatchers.Main) {
-            suspendCancellableCoroutine { continuation ->
-                MaterialAlertDialogBuilder(activity)
-                    .setTitle(getString(R.string.pairing_dialog_title))
-                    .setMessage(message)
-                    .setPositiveButton(getString(R.string.pairing_dialog_allow)) { _, _ ->
-                        if (continuation.isActive) continuation.resume(true)
-                    }
-                    .setNegativeButton(getString(R.string.pairing_dialog_deny)) { _, _ ->
-                        if (continuation.isActive) continuation.resume(false)
-                    }
-                    .setOnCancelListener {
-                        if (continuation.isActive) continuation.resume(false)
-                    }
-                    .setCancelable(false)
-                    .show()
-            }
+        // Bound to the host: a host destroyed under the dialog is a refusal.
+        return awaitHostedAnswer(activity) { dialog, answer ->
+            dialog
+                .setTitle(getString(R.string.pairing_dialog_title))
+                .setMessage(message)
+                .setPositiveButton(getString(R.string.pairing_dialog_allow)) { _, _ -> answer(true) }
+                .setNegativeButton(getString(R.string.pairing_dialog_deny)) { _, _ -> answer(false) }
+                .setCancelable(false)
         }
     }
 }

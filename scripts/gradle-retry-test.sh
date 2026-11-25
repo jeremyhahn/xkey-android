@@ -1,37 +1,11 @@
 #!/usr/bin/env bash
-# gradle-retry-test: the toolchain image's Gradle download retry, checked two
-# ways.
-#
-# The warm stage of build/docker/devcontainer/Dockerfile runs the gates once,
-# online, to fill the Gradle dependency cache. One transient repository error
-# (an artifact Gradle "Could not resolve") must not fail the image build, so
-# that run goes through /usr/local/bin/gradle-retry, a script the Dockerfile
-# writes with a COPY heredoc: a bounded retry, with gradle-quiesce between
-# attempts, that still fails closed.
-#
-# 1. Static: in the warm stage, every online RUN of the gates (assembleDebug)
-#    runs them through gradle-retry, after the COPY that writes it; no bare
-#    `gradle ... assembleDebug` online run remains, and the offline proof is
-#    never retried (there a missing dependency is a gap in the cache). Copies of the Dockerfile with the
-#    retry removed from the RUN, or with the script's COPY removed, fail.
-# 2. Behaviour: the gradle-retry script itself, extracted from the Dockerfile
-#    (the heredoc body between its COPY line and EOF, never a copy), run with
-#    a stubbed gradle and gradle-quiesce on PATH and no backoff. It passes
-#    when an attempt fails to resolve a dependency and a later one succeeds;
-#    fails after exactly the bound when every attempt fails, printing the log
-#    tail; makes no attempt after a success; and does not retry a failure
-#    that is not a download failure (a failing test). Mutants of the script
-#    (the bound removed, the last attempt failing open, every failure
-#    retried) are caught.
-#
-# Needs bash and coreutils; offline. `make gradle-retry-test` (make
-# lint-gates).
+# Checks the warm stage runs the gates through gradle-retry and tests gradle-retry's bound and backoff with stubs. `make gradle-retry-test`.
 set -uo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 DOCKERFILE=${ROOT}/build/docker/devcontainer/Dockerfile
 SCRIPT_PATH=/usr/local/bin/gradle-retry
-BOUND=3
+BOUND=5
 FAILED=0
 T=$(mktemp -d)
 cleanup() { rm -rf "${T}"; }
@@ -50,10 +24,7 @@ check() {
 	fi
 }
 
-# warm_uses_retry <dockerfile>: the warm stage writes gradle-retry with a COPY
-# heredoc, and every RUN in it naming assembleDebug runs `gradle-retry`, after
-# that COPY; at least one does. Comment lines and heredoc bodies are skipped,
-# continuation lines joined.
+# warm_uses_retry <dockerfile>: every online assembleDebug RUN in the warm stage uses gradle-retry.
 warm_uses_retry() {
 	local file=$1 line logical='' words in_warm=0 heredoc='' copied=0 runs=0 bad=0
 	while IFS= read -r line || [ -n "${line}" ]; do
@@ -156,10 +127,7 @@ check "heredoc bodies are skipped and the bare offline proof passes" warm_uses_r
 
 # --- behaviour --------------------------------------------------------------
 
-# The stubs: gradle reads its outcome for attempt n from line n of
-# ${STUB_DIR}/plan (ok, resolve, test; ok past the end), counts its calls in
-# ${STUB_DIR}/calls and its arguments in ${STUB_DIR}/args; gradle-quiesce
-# counts its calls in ${STUB_DIR}/quiesce.
+# Stub gradle reads each attempt's outcome from STUB_DIR/plan; quiesce and sleep record their calls.
 BIN=${T}/bin
 mkdir -p "${BIN}"
 cat > "${BIN}/gradle" << 'STUB'
@@ -178,8 +146,20 @@ resolve)
 	echo "BUILD FAILED"
 	exit 1
 	;;
+throttle)
+	echo "   > Received status code 429 from server: Too Many Requests"
+	echo "STUB-MARK attempt $n"
+	echo "BUILD FAILED"
+	exit 1
+	;;
 test)
 	echo "WarmTest > sums FAILED"
+	echo "STUB-MARK attempt $n"
+	echo "BUILD FAILED"
+	exit 1
+	;;
+test429)
+	echo "HttpTest > maps 429 to RateLimited FAILED"
 	echo "STUB-MARK attempt $n"
 	echo "BUILD FAILED"
 	exit 1
@@ -190,10 +170,13 @@ cat > "${BIN}/gradle-quiesce" << 'STUB'
 #!/usr/bin/env bash
 echo q >> "${STUB_DIR}/quiesce"
 STUB
-chmod +x "${BIN}/gradle" "${BIN}/gradle-quiesce"
+cat > "${BIN}/sleep" << 'STUB'
+#!/usr/bin/env bash
+echo "$1" >> "${STUB_DIR}/sleeps"
+STUB
+chmod +x "${BIN}/gradle" "${BIN}/gradle-quiesce" "${BIN}/sleep"
 
-# run_retry <script> <plan words...>: run script with the stubs and that plan;
-# sets RC, CALLS, QUIESCE and OUT (its output), LOG (the log it was given).
+# run_retry <script> <plan words...>: sets RC, CALLS, QUIESCE, SLEEPS, OUT and LOG.
 run_retry() {
 	local script=$1
 	shift
@@ -201,14 +184,19 @@ run_retry() {
 	mkdir -p "${STUB_DIR}"
 	: > "${STUB_DIR}/calls"
 	: > "${STUB_DIR}/quiesce"
+	: > "${STUB_DIR}/sleeps"
 	printf '%s\n' "$@" > "${STUB_DIR}/plan"
 	LOG=${STUB_DIR}/warm.log
-	OUT=$(PATH="${BIN}:${PATH}" GRADLE_RETRY_DELAY=0 "${script}" "${LOG}" --no-daemon assembleDebug 2>&1)
+	OUT=$(env -u GRADLE_RETRY_DELAY -u GRADLE_RETRY_ATTEMPTS PATH="${BIN}:${PATH}" \
+		${RETRY_ATTEMPTS:+GRADLE_RETRY_ATTEMPTS="${RETRY_ATTEMPTS}"} \
+		"${script}" "${LOG}" --no-daemon assembleDebug 2>&1)
 	RC=$?
 	CALLS=$(wc -l < "${STUB_DIR}/calls")
 	QUIESCE=$(wc -l < "${STUB_DIR}/quiesce")
+	SLEEPS=$(paste -sd ' ' "${STUB_DIR}/sleeps")
 }
 RUN_N=0
+RETRY_ATTEMPTS=
 
 # The cases, each on a script; each returns 0 when the script behaves.
 case_recovers() {
@@ -239,8 +227,33 @@ case_other_failure_after_resolve() {
 	run_retry "$1" resolve test ok
 	[ "${RC}" != 0 ] && [ "${CALLS}" = 2 ] && [[ ${OUT} == *"STUB-MARK attempt 2"* ]]
 }
+case_throttle_retried() {
+	run_retry "$1" throttle throttle ok
+	[ "${RC}" = 0 ] && [ "${CALLS}" = 3 ] && [ "${QUIESCE}" = 2 ]
+}
+case_backoff_doubles() {
+	run_retry "$1" resolve resolve resolve resolve resolve resolve resolve resolve
+	[ "${RC}" != 0 ] && [ "${SLEEPS}" = "30 60 120 240" ]
+}
+case_attempts_fewer() {
+	local RETRY_ATTEMPTS=2
+	run_retry "$1" resolve resolve resolve resolve
+	[ "${RC}" != 0 ] && [ "${CALLS}" = 2 ] && [ "${SLEEPS}" = 30 ] \
+		&& [[ ${OUT} == *"attempt 2 of 2"* ]]
+}
+case_attempts_more() {
+	local RETRY_ATTEMPTS=7
+	run_retry "$1" resolve throttle resolve throttle resolve throttle ok
+	[ "${RC}" = 0 ] && [ "${CALLS}" = 7 ]
+}
+case_test429_not_retried() {
+	run_retry "$1" test429 ok
+	[ "${RC}" != 0 ] && [ "${CALLS}" = 1 ] && [ "${QUIESCE}" = 0 ] && [ -z "${SLEEPS}" ] \
+		&& [[ ${OUT} == *"maps 429 to RateLimited FAILED"* ]]
+}
 CASES=(case_recovers case_recovers_last case_bounded case_no_attempt_after_success
-	case_other_failure_not_retried case_other_failure_after_resolve)
+	case_other_failure_not_retried case_other_failure_after_resolve case_throttle_retried
+	case_backoff_doubles case_attempts_fewer case_attempts_more case_test429_not_retried)
 
 all_cases() {
 	local c
@@ -258,14 +271,37 @@ else
 	check "no attempt after a success" case_no_attempt_after_success "${S}"
 	check "a failing test is not retried" case_other_failure_not_retried "${S}"
 	check "a failing test after a resolution failure stops there" case_other_failure_after_resolve "${S}"
+	check "an HTTP 429 Too Many Requests, then success, passes" case_throttle_retried "${S}"
+	check "the default waits are 30, 60, 120, 240 s" case_backoff_doubles "${S}"
+	check "GRADLE_RETRY_ATTEMPTS=2 stops after 2 attempts" case_attempts_fewer "${S}"
+	check "GRADLE_RETRY_ATTEMPTS=7 allows a success on the 7th attempt" case_attempts_more "${S}"
+	check "a failing test naming 429 is not retried" case_test429_not_retried "${S}"
 
 	# The mutants: each must fail at least one case. The patterns are the
 	# script's literal text, so they do not expand.
 	M=${T}/mutant
-	if replace "${S}" "attempts=${BOUND}" "attempts=99" "${M}.bound"; then
+	# shellcheck disable=SC2016
+	if replace "${S}" '${GRADLE_RETRY_ATTEMPTS:-'"${BOUND}"'}' '${GRADLE_RETRY_ATTEMPTS:-99}' "${M}.bound"; then
 		check "a mutant with the bound raised is caught" not all_cases "${M}.bound"
 	else
-		check "the script sets attempts=${BOUND}" false
+		check "the script defaults attempts to ${BOUND}" false
+	fi
+	# shellcheck disable=SC2016
+	if replace "${S}" 'attempts=${GRADLE_RETRY_ATTEMPTS:-'"${BOUND}"'}' "attempts=${BOUND}" "${M}.noenv"; then
+		check "a mutant ignoring GRADLE_RETRY_ATTEMPTS is caught" not all_cases "${M}.noenv"
+	else
+		check "the script reads GRADLE_RETRY_ATTEMPTS" false
+	fi
+	if replace "${S}" '|status code 429|Too Many Requests' '' "${M}.no429"; then
+		check "a mutant not retrying HTTP 429 is caught" not all_cases "${M}.no429"
+	else
+		check "the script retries HTTP 429 Too Many Requests" false
+	fi
+	# shellcheck disable=SC2016
+	if replace "${S}" 'delay=$((delay * 2))' ':' "${M}.flat"; then
+		check "a mutant with a flat backoff is caught" not all_cases "${M}.flat"
+	else
+		check "the script doubles its wait" false
 	fi
 	# shellcheck disable=SC2016
 	if replace "${S}" '[ "${n}" -ge "${attempts}" ] || ' '' "${M}.unbounded"; then

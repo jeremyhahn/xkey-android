@@ -183,7 +183,7 @@ class ProtocolTestClient(
      * Sends a request carrying [generation] written as the raw JSON number
      * given (null omits it) and returns the response's plaintext unparsed,
      * success or error, so a test can check the echoed `generation` digit for
-     * digit (#10): a parsed JSONObject would round a uint64 above Long.
+     * digit: a parsed JSONObject would round a uint64 above Long.
      */
     fun callRaw(method: String, generation: String?, params: JSONObject? = null): String {
         val id = nextId.getAndIncrement()

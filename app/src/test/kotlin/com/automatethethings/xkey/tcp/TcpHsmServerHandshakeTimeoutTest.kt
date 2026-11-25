@@ -15,6 +15,7 @@
 
 package com.automatethethings.xkey.tcp
 
+import com.automatethethings.xkey.ble.NoiseTestKeyStore
 import android.content.Context
 import android.util.Log
 import com.automatethethings.xkey.protocol.RequestHandler
@@ -53,7 +54,7 @@ import org.junit.Before
 import org.junit.Test
 
 /**
- * The handshake deadline (#64): a peer that connects and does not finish the
+ * The handshake deadline: a peer that connects and does not finish the
  * identity exchange and the Noise XX handshake in time is cut, so the accept
  * loop serves the next desktop. The deadline is shortened through the
  * server's seam; the encrypted session that follows a handshake has none.
@@ -79,6 +80,7 @@ class TcpHsmServerHandshakeTimeoutTest {
 
     @Before
     fun setUp() {
+        NoiseTestKeyStore.install()
         mockkStatic(Log::class)
         every { Log.v(any(), any<String>()) } returns 0
         every { Log.d(any(), any<String>()) } returns 0
@@ -110,7 +112,7 @@ class TcpHsmServerHandshakeTimeoutTest {
     }
 
     /**
-     * Serves one desktop end to end under the default deadline (#69). The
+     * Serves one desktop end to end under the default deadline. The
      * first connection in a JVM is cold: the phone's static-key load, which
      * comes before `serve` starts the deadline, took over a second on two
      * CPUs, and the desktop's key setup and both sides' first handshake run

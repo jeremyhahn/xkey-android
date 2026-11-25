@@ -526,9 +526,11 @@ class RequestHandlerErrorPathTest {
 
     /** Deleting something that is already gone is a success, not an error. */
     @Test
-    fun deletingAnUnknownKeyIsIdempotent() {
+    fun deletingAnUnknownKeyReportsNothingDeleted() {
+        // local.deleteKey answers deleted = materialRemoved || rowsDeleted > 0:
+        // an unknown key succeeds but says nothing was deleted (#143).
         val response = call("local.deleteKey", JSONObject().put("keyId", "never-existed-$runId"))
-        assertTrue(response.ok().getBoolean("deleted"))
+        assertFalse(response.ok().getBoolean("deleted"))
     }
 
     @Test
@@ -637,7 +639,10 @@ class RequestHandlerErrorPathTest {
         assertEquals(ErrorCodes.ENCRYPTION_FAILED, response.errorCode())
     }
 
-    /** HMAC-SHA384 has a COSE id but no Keystore support: UnsupportedAlgorithmException. */
+    /**
+     * EdDSA has a COSE id but no Keystore key behind local.generateKey (only
+     * the name Ed25519 makes one): UnsupportedAlgorithmException.
+     */
     @Test
     fun unsupportedAlgorithmMapsToInvalidAlgorithm() {
         val keyId = "unsupported-$runId"
@@ -646,8 +651,8 @@ class RequestHandlerErrorPathTest {
             "local.generateKey",
             JSONObject()
                 .put("keyId", keyId)
-                .put("keyType", "hmac")
-                .put("algorithm", "HMAC-SHA384")
+                .put("keyType", "signing")
+                .put("algorithm", "EdDSA")
                 .put("requireUserVerification", false)
                 .put("preferStrongBox", false)
         )
@@ -789,22 +794,26 @@ class RequestHandlerErrorPathTest {
         )
     }
 
-    /** With no connected identity there is no device policy to apply. */
+    /** Key use needs a paired peer; an anonymous session is refused. */
     @Test
-    fun anAnonymousSessionIsNotGated() {
-        requireAttestation(forKeyUse = true, forKeyAttestation = true, graceMinutes = 60)
+    fun anAnonymousSessionIsRefusedKeyUse() {
         servedPeer = null
 
-        assertEquals(ErrorCodes.KEY_NOT_FOUND, signMissingKey().errorCode())
+        assertEquals(
+            expectedCode("local.sign", ErrorCodes.DEVICE_ATTESTATION_REQUIRED),
+            signMissingKey().errorCode()
+        )
     }
 
-    /** A peer with no record in the repository has no policy either. */
+    /** Key use needs a paired peer; a peer with no stored record is refused. */
     @Test
-    fun aPeerWithNoStoredRecordIsNotGated() {
-        requireAttestation(forKeyUse = true, forKeyAttestation = true, graceMinutes = 60)
+    fun aPeerWithNoStoredRecordIsRefusedKeyUse() {
         servedPeer = UNKNOWN_PEER_HEX
 
-        assertEquals(ErrorCodes.KEY_NOT_FOUND, signMissingKey().errorCode())
+        assertEquals(
+            expectedCode("local.sign", ErrorCodes.DEVICE_ATTESTATION_REQUIRED),
+            signMissingKey().errorCode()
+        )
     }
 
     // ------------------------------------------------------------------
@@ -1245,11 +1254,23 @@ class RequestHandlerErrorPathTest {
             ErrorCodes.INVALID_PARAMS,
             call("local.pinSet", JSONObject().put("pinType", "SO_PIN")).errorCode()
         )
+        // docs/plans/190.md r3: no newPin is INVALID_PARAMS (checked first),
+        // no currentPin is PIN_REQUIRED; the new PIN length check runs after both.
+        assertEquals(
+            ErrorCodes.PIN_REQUIRED,
+            call(
+                "local.pinChange",
+                JSONObject().put("pinType", "USER_PIN").put("newPin", "1")
+            ).errorCode()
+        )
         assertEquals(
             ErrorCodes.INVALID_PARAMS,
             call(
                 "local.pinChange",
-                JSONObject().put("pinType", "USER_PIN").put("newPin", "1")
+                JSONObject()
+                    .put("pinType", "USER_PIN")
+                    .put("currentPin", "123456")
+                    .put("newPin", "1")
             ).errorCode()
         )
         assertEquals(

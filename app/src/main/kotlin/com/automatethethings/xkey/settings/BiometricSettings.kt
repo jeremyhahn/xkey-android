@@ -336,12 +336,15 @@ private val Context.biometricSettingsDataStore: DataStore<Preferences> by prefer
  * )
  * ```
  *
- * @param context The Android context used to access DataStore.
+ * @param dataStore The DataStore holding the settings.
  */
-public class BiometricSettingsRepository(
-    private val context: Context
+public class BiometricSettingsRepository internal constructor(
+    private val dataStore: DataStore<Preferences>
 ) {
-    private val dataStore: DataStore<Preferences> = context.biometricSettingsDataStore
+    /**
+     * @param context The Android context used to access DataStore.
+     */
+    public constructor(context: Context) : this(context.biometricSettingsDataStore)
 
     /**
      * Flow of biometric settings that emits whenever settings change.
@@ -389,7 +392,7 @@ public class BiometricSettingsRepository(
         AuditLogger.editAuditedSetting(dataStore, "userVerificationPolicy") { preferences ->
             val oldValue = mapPreferencesToSettings(preferences).uvPolicy.name
             preferences[KEY_UV_POLICY] = policy.name
-            AuditLogger.SettingChange(oldValue, policy.name)
+            if (oldValue == policy.name) null else AuditLogger.SettingChange(oldValue, policy.name)
         }
     }
 
@@ -402,7 +405,7 @@ public class BiometricSettingsRepository(
         AuditLogger.editAuditedSetting(dataStore, "authMode") { preferences ->
             val oldValue = mapPreferencesToSettings(preferences).authMode.name
             preferences[KEY_AUTH_MODE] = mode.name
-            AuditLogger.SettingChange(oldValue, mode.name)
+            if (oldValue == mode.name) null else AuditLogger.SettingChange(oldValue, mode.name)
         }
     }
 
@@ -436,7 +439,7 @@ public class BiometricSettingsRepository(
         AuditLogger.editAuditedSetting(dataStore, "attestationBiometricPolicy") { preferences ->
             val oldValue = mapPreferencesToSettings(preferences).attestationBiometricPolicy.name
             preferences[KEY_ATTESTATION_BIOMETRIC_POLICY] = policy.name
-            AuditLogger.SettingChange(oldValue, policy.name)
+            if (oldValue == policy.name) null else AuditLogger.SettingChange(oldValue, policy.name)
         }
     }
 
@@ -493,7 +496,11 @@ public class BiometricSettingsRepository(
             authMode = authModeName?.let { name ->
                 runCatching { BiometricAuthMode.valueOf(name) }.getOrNull()
             } ?: BiometricAuthMode.PER_OPERATION,
-            timeWindowSeconds = timeWindowSeconds ?: AuthTimeWindow.MINUTES_2.seconds,
+            // A stored window outside the offered range is clamped into it.
+            timeWindowSeconds = timeWindowSeconds?.coerceIn(
+                AuthTimeWindow.SECONDS_30.seconds,
+                AuthTimeWindow.MINUTES_10.seconds
+            ) ?: AuthTimeWindow.MINUTES_2.seconds,
             attestationBiometricPolicy = attestationBiometricPolicyName?.let { name ->
                 runCatching { AttestationBiometricPolicy.valueOf(name) }.getOrNull()
             } ?: AttestationBiometricPolicy.ALWAYS,

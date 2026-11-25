@@ -47,8 +47,7 @@ import java.security.cert.X509Certificate
 import java.security.interfaces.ECPublicKey
 
 /**
- * The production [KeystoreUserVerificationKey] against real Keystore hardware
- * (Codex review 7357 on PR #62).
+ * The production [KeystoreUserVerificationKey] against real Keystore hardware.
  *
  * The JVM suites for `local.verifyUser` inject a software key and a
  * replacement prompt, so they stay green whatever the UVK's authorization
