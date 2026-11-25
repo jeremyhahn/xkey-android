@@ -29,6 +29,7 @@ import com.automatethethings.xkey.ble.ServiceState
 import com.automatethethings.xkey.ble.XKeyGattService
 import com.automatethethings.xkey.remote.RemoteSyncClient
 import com.automatethethings.xkey.storage.XKeyDatabase
+import com.google.android.material.snackbar.Snackbar
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
@@ -38,6 +39,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.MutableStateFlow
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -45,6 +47,7 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
+import java.lang.reflect.Proxy
 import java.time.Duration
 import java.time.OffsetDateTime
 import java.time.ZoneId
@@ -69,6 +72,7 @@ class MainActivitySyncNowTest {
 
     @Before
     fun setUp() {
+        resetSnackbarManager()
         FakeAndroidKeyStore.install()
         database = Room.inMemoryDatabaseBuilder(app, XKeyDatabase::class.java)
             .allowMainThreadQueries()
@@ -89,7 +93,37 @@ class MainActivitySyncNowTest {
     @After
     fun tearDown() {
         XKeyDatabase.closeAndClear()
+        resetSnackbarManager()
     }
+
+    /**
+     * Drops Material's process-wide SnackbarManager. A record a test left
+     * current (its timeout dropped with the looper, its view detached
+     * mid-animation) is dismissed but never reports back while its weakly
+     * held callback lives, so every later Snackbar waits behind it unshown.
+     */
+    private fun resetSnackbarManager() {
+        snackbarManagerType.getDeclaredField("snackbarManager").apply { isAccessible = true }.set(null, null)
+    }
+
+    /** Leaves a record current whose dismissal never completes; the callback returned must stay reachable. */
+    private fun leaveStuckSnackbar(): Any {
+        val callbackType = Class.forName("com.google.android.material.snackbar.SnackbarManager\$Callback")
+        val callback = Proxy.newProxyInstance(callbackType.classLoader, arrayOf(callbackType)) { proxy, method, args ->
+            when (method.name) {
+                "equals" -> proxy === args?.get(0)
+                "hashCode" -> System.identityHashCode(proxy)
+                else -> null
+            }
+        }
+        val manager = snackbarManagerType.getDeclaredMethod("getInstance").apply { isAccessible = true }.invoke(null)
+        snackbarManagerType.getDeclaredMethod("show", Int::class.javaPrimitiveType, callbackType)
+            .apply { isAccessible = true }
+            .invoke(manager, Snackbar.LENGTH_INDEFINITE, callback)
+        return callback
+    }
+
+    private val snackbarManagerType = Class.forName("com.google.android.material.snackbar.SnackbarManager")
 
     /** Makes [db] the instance [XKeyDatabase.getInstance] returns. */
     @Suppress("UNCHECKED_CAST")
@@ -276,6 +310,24 @@ class MainActivitySyncNowTest {
             coVerify(exactly = 1) { service.syncNow() }
             assertShows(scenario, app.getString(R.string.sync_in_progress))
         }
+    }
+
+    @Test
+    fun `a Snackbar an earlier test left current does not hold this test's notices back`() {
+        val stuck = leaveStuckSnackbar()
+        // What setUp does before every test, here after the leak.
+        resetSnackbarManager()
+        grantBluetooth()
+        val pending = CompletableDeferred<RemoteSyncClient.SyncResult>()
+        coEvery { service.syncNow() } coAnswers { pending.await() }
+
+        launch().use { scenario ->
+            tapSyncNow(scenario)
+            tapSyncNow(scenario)
+
+            assertShows(scenario, app.getString(R.string.sync_in_progress))
+        }
+        assertNotNull("the stuck record's callback stays reachable", stuck)
     }
 
     @Test
