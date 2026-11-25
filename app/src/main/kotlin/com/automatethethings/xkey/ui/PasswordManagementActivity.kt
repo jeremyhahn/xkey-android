@@ -29,6 +29,7 @@ import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.annotation.VisibleForTesting
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
@@ -43,6 +44,7 @@ import com.automatethethings.xkey.storage.XKeyDatabase
 import com.google.android.material.appbar.MaterialToolbar
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.floatingactionbutton.ExtendedFloatingActionButton
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import java.util.UUID
 
@@ -75,7 +77,7 @@ class PasswordManagementActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         SecureScreens.protect(window)
 
-        adapter = PasswordAdapter { showDetailDialog(it) }
+        adapter = PasswordAdapter { openEntry(it) }
 
         val toolbarContainer = buildPremiumToolbar()
 
@@ -205,10 +207,45 @@ class PasswordManagementActivity : AppCompatActivity() {
 
     private fun reload() {
         lifecycleScope.launch {
-            val items = repository.list().sortedBy { (it.title ?: it.name).lowercase() }
+            // The list never decrypts: a password is decrypted only when its
+            // entry is opened, so one unreadable entry cannot break the screen.
+            val items = repository.listWithoutSecrets().sortedBy { (it.title ?: it.name).lowercase() }
             adapter.submit(items)
             emptyView.visibility = if (items.isEmpty()) android.view.View.VISIBLE else android.view.View.GONE
         }
+    }
+
+    /**
+     * Decrypts the entry behind the list row [listed] and shows it, or shows
+     * that it cannot be decrypted. The cause is not logged or shown: it could
+     * carry key material details and the user can only delete the entry.
+     */
+    private fun openEntry(listed: PasswordRecord) {
+        lifecycleScope.launch {
+            val record = try {
+                repository.get(listed.passwordId)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                showUnreadableDialog(listed)
+                return@launch
+            }
+            if (record == null) {
+                reload()
+                return@launch
+            }
+            showDetailDialog(record)
+        }
+    }
+
+    private fun showUnreadableDialog(record: PasswordRecord) {
+        MaterialAlertDialogBuilder(this)
+            .setTitle(record.title?.takeIf { it.isNotBlank() } ?: record.name)
+            .setMessage(R.string.password_unreadable)
+            .setNeutralButton(R.string.password_delete) { _, _ -> confirmDelete(record) }
+            .setNegativeButton(R.string.password_close, null)
+            .create()
+            .let { SecureScreens.show(it) }
     }
 
     private fun labeledField(label: String, password: Boolean = false): Pair<LinearLayout, EditText> {
@@ -251,47 +288,51 @@ class PasswordManagementActivity : AppCompatActivity() {
         }
         val scroll = ScrollView(this).apply { addView(container) }
 
-        MaterialAlertDialogBuilder(this)
+        // The Save button is wired after show(): an AlertDialog button set
+        // through the builder dismisses before its listener runs, which would
+        // throw away what the user typed whenever validation fails.
+        val dialog = MaterialAlertDialogBuilder(this)
             .setTitle(R.string.password_add_title)
             .setView(scroll)
-            .setPositiveButton(R.string.password_save) { _, _ ->
-                val name = nameEt.text.toString().trim()
-                val password = passEt.text.toString()
-                if (name.isEmpty() || password.isEmpty()) {
-                    Toast.makeText(
-                        this,
-                        R.string.password_required,
-                        Toast.LENGTH_SHORT
-                    ).show()
-                    return@setPositiveButton
-                }
-                lifecycleScope.launch {
-                    val record = PasswordRecord(
-                        passwordId = "pwd-${UUID.randomUUID()}",
-                        name = name,
-                        title = name,
-                        username = userEt.text.toString().trim().ifBlank { null },
-                        password = password,
-                        url = urlEt.text.toString().trim().ifBlank { null },
-                        notes = notesEt.text.toString().trim().ifBlank { null },
-                        source = "local"
-                    )
-                    try {
-                        edits.add(record)
-                    } catch (e: PasswordEntryTooLargeException) {
-                        Toast.makeText(
-                            this@PasswordManagementActivity,
-                            R.string.password_too_large,
-                            Toast.LENGTH_SHORT
-                        ).show()
-                        return@launch
-                    }
-                    reload()
-                }
-            }
+            .setPositiveButton(R.string.password_save, null)
             .setNegativeButton(R.string.button_cancel, null)
             .create()
-            .let { SecureScreens.show(it) }
+        SecureScreens.show(dialog)
+        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+            val name = nameEt.text.toString().trim()
+            val password = passEt.text.toString()
+            nameEt.error = if (name.isEmpty()) getString(R.string.password_name_required) else null
+            passEt.error = if (password.isEmpty()) getString(R.string.password_password_required) else null
+            when {
+                name.isEmpty() -> { nameEt.requestFocus(); return@setOnClickListener }
+                password.isEmpty() -> { passEt.requestFocus(); return@setOnClickListener }
+            }
+            lifecycleScope.launch {
+                val record = PasswordRecord(
+                    passwordId = "pwd-${UUID.randomUUID()}",
+                    name = name,
+                    title = name,
+                    username = userEt.text.toString().trim().ifBlank { null },
+                    password = password,
+                    url = urlEt.text.toString().trim().ifBlank { null },
+                    notes = notesEt.text.toString().trim().ifBlank { null },
+                    source = "local"
+                )
+                try {
+                    edits.add(record)
+                } catch (e: PasswordEntryTooLargeException) {
+                    // Keep the dialog and its text so the user can shorten it.
+                    Toast.makeText(
+                        this@PasswordManagementActivity,
+                        R.string.password_too_large,
+                        Toast.LENGTH_SHORT
+                    ).show()
+                    return@launch
+                }
+                dialog.dismiss()
+                reload()
+            }
+        }
     }
 
     private fun showDetailDialog(record: PasswordRecord) {

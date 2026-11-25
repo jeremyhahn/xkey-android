@@ -54,6 +54,7 @@ import com.automatethethings.xkey.protocol.ProtocolException
 import com.automatethethings.xkey.protocol.PairingConfirmParams
 import com.automatethethings.xkey.protocol.PairingConfirmResult
 import com.automatethethings.xkey.protocol.Response as ProtocolResponse
+import com.automatethethings.xkey.protocol.RpcId
 import com.automatethethings.xkey.protocol.readGeneration
 import com.automatethethings.xkey.protocol.SessionBindingProvider
 import com.automatethethings.xkey.transport.confirmAlreadyPaired
@@ -1606,7 +1607,7 @@ class GattServer(
             Log.e(TAG, "Failed to process application message", e)
             try {
                 requestHandler.createErrorResponse(
-                    id = 0,
+                    id = RpcId.read(String(plaintext, Charsets.UTF_8)) ?: RpcId.NULL,
                     code = -32603,
                     message = "Internal error: ${e.message}"
                 )
@@ -1732,7 +1733,7 @@ class GattServer(
 
         Log.w(TAG, "Refusing '$method' from an unpaired peer")
         return ProtocolResponse.error(
-            json.optLong("id", -1),
+            RpcId.read(text) ?: RpcId.NULL,
             ErrorCodes.PAIRING_REQUIRED,
             "Device is not paired; send pairing.confirm first",
             generation = readGeneration(text)
@@ -1759,7 +1760,7 @@ class GattServer(
         val method = json.getStringOrNull("method") ?: return null
         if (method != MethodNames.PAIRING_CONFIRM) return null
 
-        val id = json.optLong("id", -1)
+        val id = RpcId.read(text) ?: RpcId.NULL
         val generation = readGeneration(text)
         val params = json.optJSONObject("params") ?: return null
         val pairingParams = try {

@@ -153,7 +153,7 @@ class OathDesktopAuditTest {
 
         assertTrue(response.toString(), response.getJSONObject("result").getBoolean("success"))
         val id = inserted.single().oathId
-        verify(exactly = 1) { AuditLogger.logOathCredentialCreated(id, "Acme", "alice", "TOTP", any(), any()) }
+        verify(exactly = 1) { AuditLogger.logOathCredentialCreated(id, "Acme", "alice", "TOTP", PEER, any()) }
         verify(exactly = 1) { AuditLogger.logOathCredentialCreated(any(), any(), any(), any(), any(), any()) }
     }
 
@@ -162,7 +162,7 @@ class OathDesktopAuditTest {
         val response = call(MethodNames.LOCAL_OATH_REMOVE, JSONObject().put("credential_id", STORED_ID))
 
         assertEquals(true, response.getJSONObject("result").getBoolean("deleted"))
-        verify(exactly = 1) { AuditLogger.logOathCredentialDeleted(STORED_ID, "Acme", "alice", any(), any()) }
+        verify(exactly = 1) { AuditLogger.logOathCredentialDeleted(STORED_ID, "Acme", "alice", PEER, any()) }
         verify(exactly = 1) { AuditLogger.logOathCredentialDeleted(any(), any(), any(), any(), any()) }
     }
 
@@ -179,7 +179,7 @@ class OathDesktopAuditTest {
         val response = call(MethodNames.LOCAL_OATH_GENERATE, JSONObject().put("credential_id", STORED_ID))
 
         assertEquals(6, response.getJSONObject("result").getString("code").length)
-        verify(exactly = 1) { AuditLogger.logOathCodeGenerated(STORED_ID, "Acme", "alice", any(), any()) }
+        verify(exactly = 1) { AuditLogger.logOathCodeGenerated(STORED_ID, "Acme", "alice", PEER, any()) }
         verify(exactly = 1) { AuditLogger.logOathCodeGenerated(any(), any(), any(), any(), any()) }
     }
 

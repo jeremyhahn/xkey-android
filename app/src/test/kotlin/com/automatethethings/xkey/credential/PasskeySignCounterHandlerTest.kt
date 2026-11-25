@@ -20,6 +20,7 @@ import android.content.Context
 import android.os.Looper
 import android.util.Log
 import androidx.credentials.GetPublicKeyCredentialOption
+import androidx.credentials.provider.CallingAppInfo
 import androidx.credentials.provider.ProviderGetCredentialRequest
 import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.auth.BiometricActivityLauncher
@@ -293,8 +294,14 @@ class PasskeySignCounterHandlerTest {
                 .toString()
             every { clientDataHash } returns CLIENT_DATA_HASH
         }
+        // A caller-supplied hash is taken only from a privileged browser on the RP.
+        val browser = mockk<CallingAppInfo>(relaxed = true) {
+            every { isOriginPopulated() } returns true
+            every { getOrigin(any()) } returns "https://$RP_ID"
+        }
         val request = mockk<ProviderGetCredentialRequest>(relaxed = true) {
             every { credentialOptions } returns listOf(option)
+            every { callingAppInfo } returns browser
         }
         val settings = mockk<BiometricSettingsRepository> {
             coEvery { getSettings() } returns BiometricSettingsData()

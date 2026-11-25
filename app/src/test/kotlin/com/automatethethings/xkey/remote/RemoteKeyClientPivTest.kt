@@ -376,7 +376,7 @@ class RemoteKeyClientPivTest {
         client.pivListSlots()
         client.pivSign("9c", byteArrayOf(1))
 
-        val ids = sender.sent.map { it.id }
+        val ids = sender.sent.map { it.id.longValueOrNull()!! }
         assertEquals(listOf(ids[0], ids[0] + 1, ids[0] + 2), ids)
     }
 

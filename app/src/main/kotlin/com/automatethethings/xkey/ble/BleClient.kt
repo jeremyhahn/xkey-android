@@ -36,6 +36,7 @@ import com.automatethethings.xkey.protocol.AttestTranscript
 import com.automatethethings.xkey.protocol.ErrorCodes
 import com.automatethethings.xkey.protocol.MethodNames
 import com.automatethethings.xkey.protocol.Response as ProtocolResponse
+import com.automatethethings.xkey.protocol.RpcId
 import com.automatethethings.xkey.protocol.readGeneration
 import com.automatethethings.xkey.protocol.SessionBinding
 import com.automatethethings.xkey.protocol.SessionBindingProvider
@@ -1439,9 +1440,10 @@ class BleClient(
     private fun dispatchInboundRequest(session: NoiseInitiatorSession, request: JSONObject, raw: ByteArray) {
         val owner = connection?.takeIf { it.session === session } ?: return
         val requests = owner.requests
-        val id = request.optLong("id", -1)
-        // The served answer comes from RequestHandler, which echoes it too.
-        val generation = readGeneration(String(raw, Charsets.UTF_8))
+        val text = String(raw, Charsets.UTF_8)
+        // The served answer comes from RequestHandler, which echoes both too.
+        val id = RpcId.read(text) ?: RpcId.NULL
+        val generation = readGeneration(text)
         val method = request.getStringOrNull("method")
         val handler = inboundRequests
         val peerPublicKeyHex = session.getRemoteStaticKey()?.joinToString("") { "%02x".format(it) }

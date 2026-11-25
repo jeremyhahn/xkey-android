@@ -200,7 +200,10 @@ class KeystoreManager(
             withAliasGate(alias) { keyStore.deleteEntry(alias) }
         }
 
-        try {
+        val strongBoxSpec = Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && isStrongBoxAvailable()
+        // Only making the key falls back to the TEE. Once a key exists, a
+        // later failure propagates and the key is never generated a second time.
+        val keyPair = try {
             val specBuilder = KeyGenParameterSpec.Builder(
                 alias,
                 KeyProperties.PURPOSE_SIGN
@@ -238,8 +241,18 @@ class KeystoreManager(
             )
             keyPairGenerator.initialize(specBuilder.build())
 
-            val keyPair = withAliasGate(alias) { keyPairGenerator.generateKeyPair() }
-            markStrongBoxSpec(alias, Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && isStrongBoxAvailable())
+            withAliasGate(alias) { keyPairGenerator.generateKeyPair() }
+        } catch (e: Exception) {
+            // StrongBox fallback: only when StrongBox is unavailable, and nothing has been generated yet.
+            if (strongBoxSpec && !requireStrongBox && StrongBoxFallback.isStrongBoxUnavailable(e)) {
+                return generateKeyWithoutStrongBox(alias, requireBiometric)
+                    .also { markStrongBoxSpec(alias, false) }
+            }
+            throw KeyGenerationException("Failed to generate key", e)
+        }
+
+        return afterGeneration {
+            markStrongBoxSpec(alias, strongBoxSpec)
             // The audit line only; callers read the level themselves and see a failure.
             val strongBoxBacked =
                 runCatching { credentialSecurityLevel(credentialId) }.getOrNull() == KeySecurityLevel.STRONGBOX
@@ -253,17 +266,7 @@ class KeystoreManager(
                 strongBox = strongBoxBacked
             )
 
-            return encodeCOSEPublicKey(keyPair.public)
-        } catch (e: Exception) {
-            // Handle StrongBox fallback - some devices claim StrongBox but fail
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P &&
-                isStrongBoxAvailable() &&
-                !requireStrongBox
-            ) {
-                return generateKeyWithoutStrongBox(alias, requireBiometric)
-                    .also { markStrongBoxSpec(alias, false) }
-            }
-            throw KeyGenerationException("Failed to generate key", e)
+            encodeCOSEPublicKey(keyPair.public)
         }
     }
 
@@ -302,7 +305,10 @@ class KeystoreManager(
             withAliasGate(alias) { keyStore.deleteEntry(alias) }
         }
 
-        try {
+        val strongBoxSpec = Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && isStrongBoxAvailable()
+        // Only making the key falls back to the TEE. Once a key exists, a
+        // later failure propagates and the key is never generated a second time.
+        val keyPair = try {
             val specBuilder = KeyGenParameterSpec.Builder(
                 alias,
                 KeyProperties.PURPOSE_SIGN
@@ -365,19 +371,19 @@ class KeystoreManager(
             )
             keyPairGenerator.initialize(specBuilder.build())
 
-            val keyPair = withAliasGate(alias) { keyPairGenerator.generateKeyPair() }
-            markStrongBoxSpec(alias, Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && isStrongBoxAvailable())
-            return encodeCOSEPublicKey(keyPair.public)
+            withAliasGate(alias) { keyPairGenerator.generateKeyPair() }
         } catch (e: Exception) {
-            // Handle StrongBox fallback - some devices claim StrongBox but fail
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P &&
-                isStrongBoxAvailable() &&
-                !requireStrongBox
-            ) {
+            // StrongBox fallback: only when StrongBox is unavailable, and nothing has been generated yet.
+            if (strongBoxSpec && !requireStrongBox && StrongBoxFallback.isStrongBoxUnavailable(e)) {
                 return generateKeyWithAuthDurationWithoutStrongBox(alias, authDurationSeconds)
                     .also { markStrongBoxSpec(alias, false) }
             }
             throw KeyGenerationException("Failed to generate key with auth duration", e)
+        }
+
+        return afterGeneration {
+            markStrongBoxSpec(alias, strongBoxSpec)
+            encodeCOSEPublicKey(keyPair.public)
         }
     }
 
@@ -406,7 +412,10 @@ class KeystoreManager(
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                         specBuilder.setUserAuthenticationParameters(
                             0,
-                            KeyProperties.AUTH_BIOMETRIC_STRONG
+                            // Same policy as the StrongBox path: a device with
+                            // only a PIN can still use the passkey.
+                            KeyProperties.AUTH_BIOMETRIC_STRONG or
+                                KeyProperties.AUTH_DEVICE_CREDENTIAL
                         )
                     } else {
                         @Suppress("DEPRECATION")
@@ -931,6 +940,19 @@ class KeystoreManager(
     /** Records whether the spec that generated [alias] asked for StrongBox. */
     private fun markStrongBoxSpec(alias: String, strongBoxSpec: Boolean) {
         if (strongBoxSpec) strongBoxSpecAliases.add(alias) else strongBoxSpecAliases.remove(alias)
+    }
+
+    /**
+     * Runs the steps that follow a successful key generation. Their failures
+     * propagate as they are (or wrapped as a [KeyGenerationException]) and are
+     * never treated as a reason to generate the key again elsewhere.
+     */
+    private inline fun afterGeneration(block: () -> ByteArray): ByteArray = try {
+        block()
+    } catch (e: XKeyCryptoException) {
+        throw e
+    } catch (e: Exception) {
+        throw KeyGenerationException("Failed after key generation", e)
     }
 
     // -------------------------------------------------------------------------

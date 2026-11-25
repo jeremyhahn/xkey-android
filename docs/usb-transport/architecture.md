@@ -188,7 +188,7 @@ sequenceDiagram
   the identity exchange and the whole Noise handshake; on expiry the streams
   are closed and the connection ends.
 - Before pairing is confirmed every method except `pairing.confirm` answers
-  `ErrorCodes.PAIRING_REQUIRED` (-32025). `pairing.confirm` answers
+  `ErrorCodes.PAIRING_REQUIRED` (-32051). `pairing.confirm` answers
   `ErrorCodes.PAIRING_REJECTED` (-32017) when there is no authenticated peer,
   when its `publicKeyHex` differs from the Noise peer key, or when the user
   rejects the SAS prompt.

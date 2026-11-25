@@ -6,6 +6,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Context
 import android.os.Build
+import androidx.annotation.RequiresApi
 import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.crypto.KeystorePqcBackend
 import com.automatethethings.xkey.crypto.PqcHardware
@@ -38,6 +39,8 @@ class XKeyApplication : Application() {
         registerGrantCleanup()
         // Finish a copied secret's pending clipboard clear from any screen.
         registerActivityLifecycleCallbacks(ClipboardFocusRetry)
+        // Media signatures the app may not write into the file (API 30+).
+        com.automatethethings.xkey.media.XmpMetadataHelper.usePrivateStore(this)
     }
 
     /**
@@ -100,20 +103,7 @@ class XKeyApplication : Application() {
             }
             notificationManager.createNotificationChannel(serviceChannel)
 
-            // Biometric request channel (high priority for lock screen visibility)
-            val biometricChannel = NotificationChannel(
-                BIOMETRIC_CHANNEL_ID,
-                getString(R.string.biometric_channel_name),
-                NotificationManager.IMPORTANCE_HIGH
-            ).apply {
-                description = getString(R.string.biometric_channel_description)
-                enableVibration(true)
-                vibrationPattern = longArrayOf(0, 250, 250, 250)
-                enableLights(true)
-                lockscreenVisibility = Notification.VISIBILITY_PUBLIC
-                setShowBadge(true)
-            }
-            notificationManager.createNotificationChannel(biometricChannel)
+            notificationManager.createNotificationChannel(biometricChannel(this))
         }
     }
 
@@ -123,6 +113,25 @@ class XKeyApplication : Application() {
 
         /** High-priority channel for biometric authentication requests. */
         const val BIOMETRIC_CHANNEL_ID = "xkey_biometric"
+
+        /**
+         * The biometric request channel: high priority, so it wakes a locked
+         * phone, and private, so the lock screen shows each notification's
+         * public version, which names no relying party.
+         */
+        @RequiresApi(Build.VERSION_CODES.O)
+        internal fun biometricChannel(context: Context): NotificationChannel = NotificationChannel(
+            BIOMETRIC_CHANNEL_ID,
+            context.getString(R.string.biometric_channel_name),
+            NotificationManager.IMPORTANCE_HIGH
+        ).apply {
+            description = context.getString(R.string.biometric_channel_description)
+            enableVibration(true)
+            vibrationPattern = longArrayOf(0, 250, 250, 250)
+            enableLights(true)
+            lockscreenVisibility = Notification.VISIBILITY_PRIVATE
+            setShowBadge(true)
+        }
 
         /**
          * Registers the app's software ML-DSA store before any screen runs,

@@ -411,6 +411,11 @@ class PivSlotDetailActivity : AppCompatActivity() {
             algorithm?.let {
                 addDetailRow(
                     content,
+                    getString(R.string.piv_detail_algorithm_id),
+                    getString(R.string.piv_detail_algorithm_id_value, it.pivAlgorithmId)
+                )
+                addDetailRow(
+                    content,
                     getString(R.string.piv_detail_key_size),
                     getString(R.string.piv_detail_key_size_value, it.keySizeBits)
                 )
@@ -602,7 +607,8 @@ class PivSlotDetailActivity : AppCompatActivity() {
         val card = createSectionCard(getString(R.string.piv_section_actions))
         val content = card.findViewWithTag<LinearLayout>("card_content")
 
-        // Sign test data button
+        // Sign test data button; an X25519 key only agrees, so it has none.
+        val canSign = entity.algorithm?.let { PivAlgorithm.fromStoredName(it)?.canSign } ?: true
         val signButton = MaterialButton(
             this,
             null,
@@ -617,7 +623,7 @@ class PivSlotDetailActivity : AppCompatActivity() {
             text = getString(R.string.piv_action_sign_test)
             setOnClickListener { signTestData(slot, entity) }
         }
-        content.addView(signButton)
+        if (canSign) content.addView(signButton)
 
         // Delete key button
         val deleteButton = MaterialButton(

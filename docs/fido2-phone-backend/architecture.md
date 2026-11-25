@@ -138,7 +138,7 @@ sequenceDiagram
 | Unknown credential | `ProtocolException`, `ErrorCodes.KEY_NOT_FOUND` |
 | Key is not `KeyTypes.FIDO2`; stored `rpId` differs from the request | `ProtocolException`, `ErrorCodes.KEY_NOT_FOUND` ("Credential not found"): the lookup offers only FIDO2 passkeys of the requested `rpId`, so such a key cannot be named |
 | Sharing policy refuses this peer | `ProtocolException`, `ErrorCodes.OPERATION_DENIED` (list omits the credential instead) |
-| UV required but not performed, with strict user verification on | `UserVerificationRequiredException` from `UserVerificationCompliance.enforce`; `RequestHandler.dispatch` answers `ErrorCodes.BIOMETRIC_FAILED` (-32003) with the exception's message |
+| UV required but not performed, with strict user verification on | `UserVerificationRequiredException` from `UserVerificationCompliance.enforce`; `RequestHandler.dispatch` answers `ErrorCodes.BIOMETRIC_FAILED` (-32002) with the exception's message |
 
 When the relying party requires user verification and none was performed, both
 `local.listFido2Credentials` and `local.signFido2Assertion` return
