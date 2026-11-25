@@ -199,6 +199,10 @@ class PivSlotTest {
             PivAlgorithm.RS4096 to 0x16,
             PivAlgorithm.ED25519 to 0xE0,
             PivAlgorithm.X25519 to 0xE1,
+            // SP 800-78 assigns no ML-DSA id.
+            PivAlgorithm.ML_DSA_44 to null,
+            PivAlgorithm.ML_DSA_65 to null,
+            PivAlgorithm.ML_DSA_87 to null,
         )
 
         assertEquals("table must cover every algorithm", PivAlgorithm.entries.toSet(), expected.keys)
@@ -244,7 +248,7 @@ class PivSlotTest {
     @Test
     fun `PivAlgorithm names stay stable`() {
         assertEquals(
-            listOf("ES256", "ES384", "RS2048", "RS3072", "RS4096", "ED25519", "X25519"),
+            listOf("ES256", "ES384", "RS2048", "RS3072", "RS4096", "ED25519", "X25519", "ML_DSA_44", "ML_DSA_65", "ML_DSA_87"),
             PivAlgorithm.entries.map { it.name }
         )
         PivAlgorithm.entries.forEach { assertEquals(it, PivAlgorithm.fromStoredName(it.name)) }

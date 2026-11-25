@@ -399,7 +399,9 @@ class PivHandlerTest {
             pivSlotDao,
             generateKeyPair = { _, algorithm -> keyFor(algorithm).also { keystore.live = it } },
             sdkInt = sdkInt,
-            securityLevelOf = { level }
+            securityLevelOf = { level },
+            // A classical generate drops any software ML-DSA record under the slot's alias.
+            pqcStore = mockk(relaxed = true)
         )
     ): JSONObject {
         val context = mockk<Context>(relaxed = true)

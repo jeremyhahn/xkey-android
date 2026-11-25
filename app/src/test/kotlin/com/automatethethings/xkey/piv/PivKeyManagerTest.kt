@@ -541,6 +541,8 @@ class PivKeyManagerTest {
 
     @Test
     fun `generateKey Ed25519 the Keystore cannot create is refused and the slot keeps its key`() = runTest {
+        // The slot's row describes its key, so a failed replacement keeps both.
+        coEvery { pivSlotDao.getBySlotId("9A") } returns PivTestCertificates.slotRow(slotKey.public.encoded)
         val manager = manager(generatorError = ProviderException("Unsupported EC curve: ed25519"))
 
         val error = generateError(manager, PivAlgorithm.ED25519)
@@ -571,7 +573,7 @@ class PivKeyManagerTest {
         keystore.live = null
         coEvery { pivSlotDao.deleteBySlotId("9A") } returns 0
 
-        PivKeyManager(pivSlotDao).deleteKey(PivSlot.AUTHENTICATION)
+        testPivKeyManager(pivSlotDao).deleteKey(PivSlot.AUTHENTICATION)
 
         verify(exactly = 0) { AuditLogger.logKeyDeleted(any(), any(), any()) }
     }
@@ -580,7 +582,7 @@ class PivKeyManagerTest {
     fun `deleteKey of a populated slot writes one deleted entry`() = runTest {
         coEvery { pivSlotDao.deleteBySlotId("9A") } returns 1
 
-        PivKeyManager(pivSlotDao).deleteKey(PivSlot.AUTHENTICATION)
+        testPivKeyManager(pivSlotDao).deleteKey(PivSlot.AUTHENTICATION)
 
         assertNull(keystore.live)
         verify(exactly = 1) {
@@ -965,7 +967,7 @@ class PivKeyManagerTest {
         }
         try {
             val error = runCatching {
-                PivKeyManager(pivSlotDao).sign(PivSlot.AUTHENTICATION, byteArrayOf(1), PivAlgorithm.ML_DSA_44)
+                testPivKeyManager(pivSlotDao).sign(PivSlot.AUTHENTICATION, byteArrayOf(1), PivAlgorithm.ML_DSA_44)
             }.exceptionOrNull()
             assertTrue("$error", error is UnsupportedAlgorithmException)
             coVerify(exactly = 0) { pivSlotDao.recordUsage(any()) }
@@ -979,7 +981,7 @@ class PivKeyManagerTest {
         keystore.live = null
         coEvery { pivSlotDao.deleteBySlotId("9A") } returns 1
 
-        PivKeyManager(pivSlotDao).deleteKey(PivSlot.AUTHENTICATION)
+        testPivKeyManager(pivSlotDao).deleteKey(PivSlot.AUTHENTICATION)
 
         verify(exactly = 1) { AuditLogger.logKeyDeleted(any(), any(), "piv") }
     }
@@ -993,7 +995,7 @@ class PivKeyManagerTest {
             store.generate(alias, MlDsaParameterSet.ML_DSA_44)
             store.removeFile = { false }
 
-            val error = runCatching { PivKeyManager(pivSlotDao, pqcStore = store).deleteKey(PivSlot.AUTHENTICATION) }
+            val error = runCatching { testPivKeyManager(pivSlotDao, pqcStore = store).deleteKey(PivSlot.AUTHENTICATION) }
                 .exceptionOrNull()
 
             assertTrue("delete must fail, got $error", error != null)
@@ -1010,7 +1012,7 @@ class PivKeyManagerTest {
         store.generate(alias, MlDsaParameterSet.ML_DSA_44)
         every { store.delete(any()) } throws java.io.IOException("Cannot delete ML-DSA key")
 
-        val error = runCatching { PivKeyManager(pivSlotDao, pqcStore = store).deleteKey(PivSlot.AUTHENTICATION) }
+        val error = runCatching { testPivKeyManager(pivSlotDao, pqcStore = store).deleteKey(PivSlot.AUTHENTICATION) }
             .exceptionOrNull()
 
         assertTrue("delete must fail, got $error", error is java.io.IOException)
@@ -1046,13 +1048,13 @@ class PivKeyManagerTest {
         coEvery { pivSlotDao.recordUsage(any(), any()) } coAnswers { usageGate.await() }
 
         val sign = async {
-            PivKeyManager(pivSlotDao, pqcStore = store)
+            testPivKeyManager(pivSlotDao, pqcStore = store)
                 .sign(PivSlot.AUTHENTICATION, byteArrayOf(1), PivAlgorithm.ML_DSA_44)
         }
         runCurrent()
         assertFalse("sign ended before it recorded its use: ${runCatching { sign.getCompleted() }}", sign.isCompleted)
         val generate = launch {
-            PivKeyManager(pivSlotDao, pqcStore = store)
+            testPivKeyManager(pivSlotDao, pqcStore = store)
                 .generateKey(PivSlot.AUTHENTICATION, PivAlgorithm.ML_DSA_87, PqcBacking.SOFTWARE)
         }
         runCurrent()
@@ -1071,7 +1073,7 @@ class PivKeyManagerTest {
         stubSigningAudit()
         keystore.live = null
         val store = softwareStore()
-        val manager = PivKeyManager(pivSlotDao, pqcStore = store)
+        val manager = testPivKeyManager(pivSlotDao, pqcStore = store)
         manager.generateKey(PivSlot.AUTHENTICATION, PivAlgorithm.ML_DSA_44, PqcBacking.SOFTWARE)
         manager.generateKey(PivSlot.AUTHENTICATION, PivAlgorithm.ML_DSA_87, PqcBacking.SOFTWARE)
 
