@@ -364,7 +364,11 @@ class MediaSigningService : Service() {
         // on every later MediaStore event would fail the same way, and a
         // log line alone leaves the user believing the capture is signed.
         val where = try {
-            val data = signContentHash(keyId, keyEntity, contentHash)
+            // Under the material-use lock and its deleted-key recheck (#255 review).
+            val data = com.automatethethings.xkey.storage.KeyPolicyStore.of(db, keystoreManager)
+                .withUsableKey(keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL) {
+                    signContentHash(keyId, keyEntity, contentHash)
+                }
             XmpMetadataHelper.persistSignature(data) { writeIntoMedia(uri, filePath, hashType, data) }
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
@@ -400,17 +404,12 @@ class MediaSigningService : Service() {
         val alias = KeystoreManager.generalKeyAlias(keyId)
         val pubKeyDer = keystoreManager.publicKeyDERAt(alias)
             ?: throw com.automatethethings.xkey.crypto.KeyNotFoundException(keyId)
-        // Under the material-use lock and its deleted-key recheck (#255 review).
-        val db = XKeyDatabase.getInstance(this@MediaSigningService)
-        val signature = com.automatethethings.xkey.storage.KeyPolicyStore.of(db, keystoreManager)
-            .withUsableKey(keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL) {
-                keystoreManager.signApproved(
-                    alias,
-                    pubKeyDer,
-                    hashBytes,
-                    KeystoreManager.jcaSignatureAlgorithm(keyEntity.algorithm)
-                )
-            }
+        val signature = keystoreManager.signApproved(
+            alias,
+            pubKeyDer,
+            hashBytes,
+            KeystoreManager.jcaSignatureAlgorithm(keyEntity.algorithm)
+        )
         val entry = SignatureEntry(
             keyFingerprint = MediaHasher.hashBytes(pubKeyDer),
             signerName = keyEntity.label,
