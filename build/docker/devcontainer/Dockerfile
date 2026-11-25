@@ -126,7 +126,7 @@ done
 echo "gradle-quiesce: JVMs outlived the build: $(jvms | tr '\n' ' ')" >&2
 exit 1
 EOF
-# gradle-retry <log> <gradle args...>: retry a dependency download failure or HTTP 429 with doubling waits (GRADLE_RETRY_ATTEMPTS, GRADLE_RETRY_DELAY); any other failure exits.
+# gradle-retry <log> <gradle args...>: retry a dependency or plugin download/resolution failure (matched without case) or HTTP 429 with doubling waits (GRADLE_RETRY_ATTEMPTS, GRADLE_RETRY_DELAY); any other failure exits.
 COPY --chmod=0755 <<'EOF' /usr/local/bin/gradle-retry
 #!/bin/bash
 set -uo pipefail
@@ -139,7 +139,7 @@ while :; do
   gradle "$@" > "${log}" 2>&1
   rc=$?
   [ "${rc}" -ne 0 ] || exit 0
-  if [ "${n}" -ge "${attempts}" ] || ! grep -Eq 'Could not (resolve|GET|HEAD|download)|status code 429|Too Many Requests' "${log}"; then
+  if [ "${n}" -ge "${attempts}" ] || ! grep -Eiq 'could not (resolve|get|head|download)|plugin \[id: [^]]*\] was not found|status code 429|too many requests' "${log}"; then
     tail -n 60 "${log}"
     echo "gradle-retry: gradle failed (exit ${rc}) on attempt ${n} of ${attempts}" >&2
     exit "${rc}"
