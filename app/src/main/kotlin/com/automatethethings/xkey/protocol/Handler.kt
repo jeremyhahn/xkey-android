@@ -607,7 +607,6 @@ class RequestHandler(
             handler(request)
         } catch (e: ProtocolException) {
             Log.e(TAG, "Handler error: ${e.message}")
-            if (e.errorCode == ErrorCodes.OPERATION_DENIED) auditPolicyDenied(request.method, e)
             Response.error(request.id, e.errorCode, e.message ?: "Handler error")
         } catch (e: KeyNotFoundException) {
             Log.e(TAG, "Key not found: ${e.message}")
@@ -708,32 +707,6 @@ class RequestHandler(
                 deviceId = callerPeer,
                 deviceName = auditPeerName(callerPeer),
                 reason = reason ?: "Operation denied",
-                operation = method
-            )
-        } catch (c: kotlin.coroutines.cancellation.CancellationException) {
-            throw c
-        } catch (x: Exception) {
-            Log.w(TAG, "policy denial not audited: ${x.javaClass.simpleName}")
-        }
-    }
-
-    /**
-     * Records a policy refusal ([ErrorCodes.OPERATION_DENIED]) as one
-     * POLICY_DENIED audit row. Every refusal a handler throws passes
-     * [dispatch]'s catch, so this is the one place they are recorded; a throw
-     * site never logs its own. The row carries the requesting peer, the
-     * request method and the refusal message, which names at most a key or
-     * credential id, never key material or request data. Recording never
-     * changes the response.
-     */
-    private suspend fun auditPolicyDenied(method: String, e: ProtocolException) {
-        try {
-            // A refusal is recorded only against the peer of this request's session.
-            val peer = backupAuditPeer()?.publicKeyHex ?: return
-            AuditLogger.logPolicyDenied(
-                deviceId = peer,
-                deviceName = auditPeerName(peer),
-                reason = e.message ?: "Operation denied",
                 operation = method
             )
         } catch (c: kotlin.coroutines.cancellation.CancellationException) {
