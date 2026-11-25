@@ -204,8 +204,11 @@ object MediaHasher {
      * [MediaPublisher.readCancellable] and passes its signal.
      */
     fun checkInBandUri(context: Context, uri: Uri, mimeType: String?, cancel: CancellationSignal? = null): InBandCheck? {
-        val untyped = XmpMetadataHelper.isUntyped(mimeType)
-        if (!isJpeg(mimeType) && XmpContainers.formatOf(mimeType.orEmpty()) == null && !untyped) return null
+        // The first bytes classify the media; the redacted view serves them as the original does.
+        val classified = classifiedType(mimeType.orEmpty()) {
+            MediaPublisher.openContentRead(context.contentResolver, uri, cancel ?: CancellationSignal()).createInputStream()
+        }
+        if (!isJpeg(classified) && XmpContainers.formatOf(classified) == null) return null
         if (MediaPublisher.originalUri(context, uri) == null) throw MediaPublisher.OriginalUnavailableException(uri)
         return withSnapshot({ MediaPublisher.openOriginal(context, uri, cancel) }, MediaPublisher.recoveryDirectory(context)) { snapshot, whole ->
             val type = sniffedType(snapshot, mimeType)
@@ -215,8 +218,23 @@ object MediaHasher {
     }
 
     /** [mimeType], or the JPEG type when [isJpeg] says [file] is a JPEG by its first bytes. */
-    internal fun sniffedType(file: File, mimeType: String?): String? =
-        if (isJpeg(mimeType, head = readHead(file.path))) JPEG_MIME_TYPE else mimeType
+    internal fun sniffedType(file: File, mimeType: String?): String? = classifiedType(mimeType, readHead(file.path))
+
+    /** [mimeType], or the JPEG type when [isJpeg] says the media is a JPEG by its type or its first bytes [head]. */
+    fun classifiedType(mimeType: String?, head: ByteArray?): String? =
+        if (isJpeg(mimeType, head = head)) JPEG_MIME_TYPE else mimeType
+
+    /**
+     * [classifiedType] of media typed [mimeType] whose bytes [open] reads:
+     * the one storage and format choice for media a provider may mistype.
+     * The head is read only when [mimeType] names neither a JPEG nor an
+     * in-band container; a failed open propagates.
+     */
+    fun classifiedType(mimeType: String, open: () -> InputStream?): String {
+        if (isJpeg(mimeType) || XmpContainers.formatOf(mimeType) != null) return mimeType
+        val head = (open() ?: throw java.io.IOException("cannot open media")).use { readFully(it, JPEG_HEAD_SIZE) }
+        return classifiedType(mimeType, head) ?: mimeType
+    }
 
     /** The type a file [isJpeg] says is a JPEG is hashed and signed as. */
     const val JPEG_MIME_TYPE = "image/jpeg"

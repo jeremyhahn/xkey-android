@@ -168,7 +168,11 @@ object XmpMetadataHelper {
         } catch (_: IllegalArgumentException) {
             null
         }
-        val mimeType = providerType ?: filePath?.let(::getMimeType) ?: "application/octet-stream"
+        val typed = providerType ?: filePath?.let(::getMimeType) ?: "application/octet-stream"
+        // Storage follows the original's bytes, as its hash does: a mistyped JPEG is signed into its EXIF.
+        val mimeType = MediaHasher.classifiedType(typed) {
+            MediaPublisher.openContentRead(context.contentResolver, uri, CancellationSignal()).createInputStream()
+        }
         if (!isJpeg(mimeType) && XmpContainers.formatOf(mimeType) == null) {
             // Not xKey's file: its sidecar is one xKey owns, never a file beside it.
             val identity = if (filePath != null) pathIdentity(filePath) else uri.toString()
@@ -308,7 +312,7 @@ object XmpMetadataHelper {
     private inline fun readSignature(uri: Any, mimeType: String?, open: () -> InputStream?): ContentAuthenticityData? {
         val jpeg = isJpeg(mimeType.orEmpty())
         val format = if (jpeg) null else XmpContainers.formatOf(mimeType.orEmpty())
-        if (!jpeg && format == null && !isUntyped(mimeType)) return null
+        // Any other type is classified by its first bytes: a mistyped JPEG still carries its signature.
         // A failed open propagates for every type, a JPEG included:
         // unreadable media is not unsigned media. Only a JPEG whose bytes
         // carry no readable signature reads as unsigned.
@@ -411,12 +415,14 @@ object XmpMetadataHelper {
         workDir: File,
         destination: String
     ): Boolean {
-        val format = XmpContainers.formatOf(mimeType)
-        if (!isJpeg(mimeType) && format == null) return false
         return signedCopy(open, openOutput, workDir, destination) { path ->
+            // The working copy's bytes, not the type alone, say whether it carries a signature.
+            val type = MediaHasher.sniffedType(File(path), mimeType) ?: mimeType
+            val format = XmpContainers.formatOf(type)
+            if (!isJpeg(type) && format == null) return@signedCopy false
             // The source is read again only now, maybe long after it was
             // signed: publish only bytes that are still what was signed.
-            val payload = MediaHasher.hashStreamedFile(File(path), mimeType).canonical
+            val payload = MediaHasher.hashStreamedFile(File(path), type).canonical
             if (!payload.equals(data.contentHash, ignoreCase = true)) throw SourceChangedException()
             if (format == null) {
                 writeExifSignature(path, data)
@@ -432,12 +438,6 @@ object XmpMetadataHelper {
         IOException("the media changed after it was signed; sign it again to save a signed copy")
 
     private fun isJpeg(mimeType: String): Boolean = MediaHasher.isJpeg(mimeType)
-
-    /** Whether [mimeType] says nothing of the content: none, or application/octet-stream. */
-    internal fun isUntyped(mimeType: String?): Boolean {
-        val type = mimeType.orEmpty().substringBefore(';').trim().lowercase()
-        return type.isEmpty() || type == "application/octet-stream"
-    }
 
     private fun signedCopy(
         open: () -> InputStream,

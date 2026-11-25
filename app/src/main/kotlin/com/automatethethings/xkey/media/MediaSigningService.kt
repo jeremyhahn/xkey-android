@@ -182,7 +182,7 @@ internal object AutoSignHash {
             input.close()
             throw e
         }
-        val type = if (MediaHasher.isJpeg(mimeType, head = head)) MediaHasher.JPEG_MIME_TYPE else mimeType
+        val type = MediaHasher.classifiedType(mimeType, head)
         // Hashed whole: one read, no snapshot needed.
         if (!MediaHasher.isJpeg(type) && XmpContainers.formatOf(type) == null) {
             return input.use { MediaHasher.hashStream(it) }
