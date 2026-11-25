@@ -90,14 +90,15 @@ class KeyStoreSyncManagerStaleEntryTest {
         coEvery { credentialDao.getAll() } returns emptyList()
         val keyDao = mockk<KeyDao>(relaxed = true)
         val key = mockk<KeyEntity>(relaxed = true)
-        every { key.keyId } returns "ed"
+        // An id no other test leaves a removal that did not commit under.
+        every { key.keyId } returns "edunreadable"
         every { key.source } returns "local"
         coEvery { keyDao.getAll() } returns listOf(key)
 
         KeyStoreSyncManager(manager, credentialDao, keyDao, mockk(relaxed = true)).syncAll()
 
         coVerify(exactly = 0) { keyDao.deleteByKeyId(any()) }
-        verify { Log.e(any(), match<String> { "ed" in it }, any()) }
+        verify { Log.e(any(), match<String> { "edunreadable" in it }, any()) }
     }
 
     @Test
