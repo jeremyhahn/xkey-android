@@ -256,8 +256,8 @@ Not implemented: clientPin, authenticatorGetNextAssertion,
 credential management, extensions, U2F, and silent (`up` false)
 assertions.
 
-Left: verification on a device against a CTAP2 BLE client and
-`xkey fido2 --backend phone`.
+Left: run `Ctap2KeystoreRoundTripTest` on a device, then check on a device
+against a CTAP2 BLE client and against `xkey fido2 --backend phone`.
 
 ## Tests
 
@@ -267,6 +267,8 @@ Left: verification on a device against a CTAP2 BLE client and
 | `app/src/test/kotlin/com/automatethethings/xkey/ble/fido/CborCodecTest.kt` | Canonical encoding, decoding, every decoder refusal |
 | `app/src/test/kotlin/com/automatethethings/xkey/ble/fido/Ctap2AuthenticatorTest.kt` | The three commands end to end over CBOR bytes with a fake backend, signature verified, counter, the owner's account choice, every refusal including UV |
 | `app/src/test/kotlin/com/automatethethings/xkey/ble/fido/FidoBleSessionTest.kt` | PING, MSG, keepalive, CANCEL (also before start), handler failure, BUSY, framing errors, the reassembly timeout and the command after it, close |
+| `app/src/test/kotlin/com/automatethethings/xkey/ble/fido/Ctap2BleClientRoundTripTest.kt` | A CTAP2 BLE client writing 20-byte frames, skipping KEEPALIVE and reassembling responses, over the real session, authenticator and backend with in-memory database and Keystore fakes: GetInfo, MakeCredential's attested credential data and P-256 COSE key, a credential ID equal to the listed wire ID, allowList and discoverable assertions verified with the COSE key on the counter the JSON-RPC path continues, a declined or impossible prompt signing nothing, multi-frame requests and responses |
+| `app/src/androidTest/kotlin/com/automatethethings/xkey/ble/fido/Ctap2KeystoreRoundTripTest.kt` | MakeCredential then allowList and discoverable GetAssertion through the authenticator and backend on the app database and AndroidKeyStore with an approving prompt fake: the stored key matches the COSE key, each signature verifies with it, the counter rises |
 | `app/src/test/kotlin/com/automatethethings/xkey/ble/fido/AndroidFidoCredentialBackendTest.kt` | Sharing policy on list and sign, shared counter, one Keystore signature over unhashed data, per-operation passkeys, account names in the chooser, rollback of a failed MakeCredential |
 | `app/src/test/kotlin/com/automatethethings/xkey/ble/fido/BiometricFidoUserPromptTest.kt` | `uv` only with a strong biometric; both prompts over the lock screen with their own notification; the account chooser as one list call |
 | `app/src/test/kotlin/com/automatethethings/xkey/ui/TransparentBiometricActivityAccountChoiceTest.kt` | The account list: every account in order as plain text under the RP, a tap answers its index, Cancel and back answer none, over the lock screen, taken down when its caller is cancelled |
