@@ -463,8 +463,8 @@ object LegacySchemas {
     ).let {
         // Migration 10->11 rewrites data only, so schema 11 is schema 10 verbatim
         // (11.json differs from 10.json in its version number alone).
-        val v13 = schema13(it.getValue(12))
-        it + (11 to it.getValue(10)) + (13 to v13) + (14 to schema14(v13))
+        it + (11 to it.getValue(10)) + (13 to schema13(it.getValue(12))) +
+            (14 to schema14(schema13(it.getValue(12))))
     }
 
     /**

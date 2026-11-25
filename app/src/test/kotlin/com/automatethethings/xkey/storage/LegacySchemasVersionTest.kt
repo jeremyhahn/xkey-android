@@ -37,7 +37,7 @@ class LegacySchemasVersionTest {
         val shipped = Regex("""^\s*version = (\d+),""", RegexOption.MULTILINE).find(database)!!.groupValues[1].toInt()
         val current = Regex("""const val CURRENT = (\d+)""").find(fixture)!!.groupValues[1].toInt()
         val oldest = Regex("""const val OLDEST = (\d+)""").find(fixture)!!.groupValues[1].toInt()
-        val schemas = Regex("""^\s{8}(\d+) to listOf\(|\((\d+) to it\.getValue\(""", RegexOption.MULTILINE).findAll(fixture)
+        val schemas = Regex("""^\s{8}(\d+) to listOf\(|\((\d+) to (?:it\.getValue|schema\d+)\(""", RegexOption.MULTILINE).findAll(fixture)
             .map { (it.groups[1] ?: it.groups[2])!!.value.toInt() }.toList().sorted()
 
         assertEquals(shipped, current)

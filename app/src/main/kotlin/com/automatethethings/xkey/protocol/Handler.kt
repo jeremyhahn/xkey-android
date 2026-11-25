@@ -1755,7 +1755,7 @@ class RequestHandler(
         val made = publicKeySizeBits(publicKeyDer) ?: return null
         val requested = genParams.resolvedKeySizeBits()
         if (made == requested) return made
-        runCatching { keystoreManager.deleteGeneralKey(genParams.keyId) }
+        runCatching { keystoreManager.discardGeneratedKey(com.automatethethings.xkey.crypto.KeystoreManager.userKeyAlias(genParams.keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL)) }
         Log.e(TAG, "Generated key ${genParams.keyId} is $made bits, $requested were requested")
         throw ProtocolException(
             "Generated key ${genParams.keyId} is $made bits, not the $requested requested",
@@ -2103,19 +2103,9 @@ class RequestHandler(
         val caller = auditCaller()
 
         // Software-backed keys are operated on outside the Keystore, inside the key's use gate.
-        withUsableGeneralKey(symParams.keyId) { com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(symParams.keyId)?.useAndZero { sw ->
-            requireSoftwareKeyType(sw, otherType = "HMAC", operation = "AES-GCM")
-            requireKnownSoftwareAlgorithm(sw, operation = "AES-GCM")
-            val swStart = System.currentTimeMillis()
-            // Bad key material answers as the Keystore path does.
-            val ct = try {
-                com.automatethethings.xkey.crypto.SoftwareKeyOps.aesGcmEncrypt(sw.material, plaintext, aad)
-            } catch (e: java.security.GeneralSecurityException) {
-                throw EncryptionException("AES-GCM encryption failed", e)
-            } catch (e: IllegalArgumentException) {
-                throw EncryptionException("invalid AES key", e)
-            }
-            val swDurationMs = System.currentTimeMillis() - swStart
+        // Bad key material answers as the Keystore path does.
+        withUsableSoftwareKey(symParams.keyId, otherType = "HMAC", operation = "AES-GCM") { sw ->
+            val (ct, swDurationMs) = timedSoftwareOp(::EncryptionException, "AES-GCM encryption failed", "invalid AES key") { com.automatethethings.xkey.crypto.SoftwareKeyOps.aesGcmEncrypt(sw.material, plaintext, aad) }
             keyDao.recordUsage(symParams.keyId)
             logKeyUse(
                 KeyUse.ENCRYPT, symParams.keyId,
@@ -2128,7 +2118,7 @@ class RequestHandler(
                 request.id,
                 LocalSymmetricResult(data = Base64.getEncoder().encodeToString(ct), payloadField = LocalSymmetricResult.FIELD_CIPHERTEXT).toJson()
             )
-        } }
+        }
 
         val startTime = System.currentTimeMillis()
         val ciphertext = withUsableGeneralKey(symParams.keyId) { keystoreManager.symmetricEncrypt(symParams.keyId, plaintext, aad) }
@@ -2173,19 +2163,9 @@ class RequestHandler(
         val caller = auditCaller()
 
         // Software-backed keys are operated on outside the Keystore, inside the key's use gate.
-        withUsableGeneralKey(symParams.keyId) { com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(symParams.keyId)?.useAndZero { sw ->
-            requireSoftwareKeyType(sw, otherType = "HMAC", operation = "AES-GCM")
-            requireKnownSoftwareAlgorithm(sw, operation = "AES-GCM")
-            val swStart = System.currentTimeMillis()
-            // A tag mismatch or a short input answers as the Keystore path does.
-            val pt = try {
-                com.automatethethings.xkey.crypto.SoftwareKeyOps.aesGcmDecrypt(sw.material, ciphertext, aad)
-            } catch (e: java.security.GeneralSecurityException) {
-                throw DecryptionException("AES-GCM decryption failed", e)
-            } catch (e: IllegalArgumentException) {
-                throw DecryptionException("ciphertext too short", e)
-            }
-            val swDurationMs = System.currentTimeMillis() - swStart
+        // A tag mismatch or a short input answers as the Keystore path does.
+        withUsableSoftwareKey(symParams.keyId, otherType = "HMAC", operation = "AES-GCM") { sw ->
+            val (pt, swDurationMs) = timedSoftwareOp(::DecryptionException, "AES-GCM decryption failed", "ciphertext too short") { com.automatethethings.xkey.crypto.SoftwareKeyOps.aesGcmDecrypt(sw.material, ciphertext, aad) }
             keyDao.recordUsage(symParams.keyId)
             logKeyUse(
                 KeyUse.DECRYPT, symParams.keyId,
@@ -2198,7 +2178,7 @@ class RequestHandler(
                 request.id,
                 LocalSymmetricResult(data = Base64.getEncoder().encodeToString(pt), payloadField = LocalSymmetricResult.FIELD_PLAINTEXT).toJson()
             )
-        } }
+        }
 
         val startTime = System.currentTimeMillis()
         val plaintext = withUsableGeneralKey(symParams.keyId) { keystoreManager.symmetricDecrypt(symParams.keyId, ciphertext, aad) }
@@ -2320,14 +2300,8 @@ class RequestHandler(
         val caller = auditCaller()
 
         // Software-backed keys are operated on outside the Keystore, inside the key's use gate.
-        withUsableGeneralKey(hmacParams.keyId) { com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(hmacParams.keyId)?.useAndZero { sw ->
-            requireSoftwareKeyType(sw, otherType = "AES", operation = "HMAC")
-            requireKnownSoftwareAlgorithm(sw, operation = "HMAC")
-            val swStart = System.currentTimeMillis()
-            val swMac = com.automatethethings.xkey.crypto.SoftwareKeyOps.hmac(
-                sw.material, hmacData, sw.algorithm
-            )
-            val swDurationMs = System.currentTimeMillis() - swStart
+        withUsableSoftwareKey(hmacParams.keyId, otherType = "AES", operation = "HMAC") { sw ->
+            val (swMac, swDurationMs) = timed { com.automatethethings.xkey.crypto.SoftwareKeyOps.hmac(sw.material, hmacData, sw.algorithm) }
             keyDao.recordUsage(hmacParams.keyId)
             // The MAC and the data stay out of the entry.
             logKeyUse(
@@ -2341,7 +2315,7 @@ class RequestHandler(
                 request.id,
                 LocalHMACResult(mac = Base64.getEncoder().encodeToString(swMac)).toJson()
             )
-        } }
+        }
 
         val startTime = System.currentTimeMillis()
         val hmac = withUsableGeneralKey(hmacParams.keyId) { keystoreManager.computeHMACWithAlgorithm(hmacParams.keyId, hmacData) }
@@ -2482,6 +2456,56 @@ class RequestHandler(
         } finally {
             material.fill(0)
         }
+
+    /**
+     * The one read of a software key's material for a crypto use (#255
+     * review, ruling 554): the record is read inside the store's use gate
+     * ([KeyPolicyStore.withUsableKey]), checked as [operation]'s key
+     * ([requireSoftwareKeyType], [requireKnownSoftwareAlgorithm]), and [use]
+     * runs before the gate is left with the material zeroed after it, so a
+     * delete that waited for the use deletes the material only after it, and
+     * a use that waited for a delete reads nothing deleted. Returns [use]'s
+     * result, or null if [keyId] has no software key.
+     */
+    private suspend inline fun <T> withUsableSoftwareKey(
+        keyId: String,
+        otherType: String,
+        operation: String,
+        use: (com.automatethethings.xkey.crypto.SoftwareKey) -> T
+    ): T? =
+        withUsableGeneralKey(keyId) {
+            com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(keyId)?.useAndZero { sw ->
+                requireSoftwareKeyType(sw, otherType = otherType, operation = operation)
+                requireKnownSoftwareAlgorithm(sw, operation = operation)
+                use(sw)
+            }
+        }
+
+    /** [op]'s result with its duration in milliseconds. */
+    private inline fun <T> timed(op: () -> T): Pair<T, Long> {
+        val start = System.currentTimeMillis()
+        val result = op()
+        return result to (System.currentTimeMillis() - start)
+    }
+
+    /**
+     * [timed] for a software key's AES-GCM [op]: a crypto failure answers as
+     * [failure] with [cryptoReason], a bad key or input with [inputReason].
+     */
+    private inline fun <T> timedSoftwareOp(
+        failure: (String, Throwable?) -> Exception,
+        cryptoReason: String,
+        inputReason: String,
+        op: () -> T
+    ): Pair<T, Long> = timed {
+        try {
+            op()
+        } catch (e: java.security.GeneralSecurityException) {
+            throw failure(cryptoReason, e)
+        } catch (e: IllegalArgumentException) {
+            throw failure(inputReason, e)
+        }
+    }
 
     /**
      * Handles local.getPublicKey - export public key in specified format.
