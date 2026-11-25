@@ -58,6 +58,8 @@ class SoftwareKeyDeleteReplayTest {
 
     @Before
     fun setUp() {
+        // Main's shared ML-DSA store is per process: each test starts with none.
+        com.automatethethings.xkey.crypto.PqcSoftwareKeyStore.clearSharedForTest()
         mockkStatic(android.util.Log::class)
         every { android.util.Log.d(any(), any<String>()) } returns 0
         every { android.util.Log.w(any(), any<String>()) } returns 0
@@ -78,13 +80,18 @@ class SoftwareKeyDeleteReplayTest {
         store = SoftwareKeyStore(context, cipher) { file ->
             if (materialUnlinkFails && file.name.endsWith(".key")) false else file.delete()
         }
-        keystore = spyk(KeystoreManager(mockk<Context>(relaxed = true)))
+        // Main's ML-DSA store reads the context's files directory: an empty one here.
+        val keystoreContext = mockk<Context>(relaxed = true)
+        every { keystoreContext.applicationContext } returns keystoreContext
+        every { keystoreContext.filesDir } returns java.nio.file.Files.createTempDirectory("pqc-keys").toFile().apply { deleteOnExit() }
+        keystore = spyk(KeystoreManager(keystoreContext))
         every { keystore.ed25519Prefs() } returns prefs
         every { keystore.softwareKeys() } returns store
     }
 
     @After
     fun tearDown() {
+        com.automatethethings.xkey.crypto.PqcSoftwareKeyStore.clearSharedForTest()
         unmockkAll()
     }
 

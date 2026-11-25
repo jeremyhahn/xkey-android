@@ -55,6 +55,8 @@ class CoSignInitiatorQrRefusalTest {
 
     @Before
     fun setUp() {
+        // Main's shared ML-DSA store is per process: each test starts with none.
+        com.automatethethings.xkey.crypto.PqcSoftwareKeyStore.clearSharedForTest()
         val platform = mockk<KeyStore>(relaxed = true)
         every { platform.containsAlias(any()) } returns false
         mockkStatic(KeyStore::class)
@@ -63,6 +65,7 @@ class CoSignInitiatorQrRefusalTest {
 
     @After
     fun tearDown() {
+        com.automatethethings.xkey.crypto.PqcSoftwareKeyStore.clearSharedForTest()
         unmockkAll()
     }
 

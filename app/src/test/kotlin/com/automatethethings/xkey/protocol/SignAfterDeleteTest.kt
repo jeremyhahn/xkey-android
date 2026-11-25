@@ -190,10 +190,22 @@ class SignAfterDeleteTest {
                     ) return@mapIndexedNotNull null
                     // The user-verification key is the app's own, never a peer's key to delete.
                     if (lines.getOrNull(i + 1)?.contains("\"user-verification\"") == true) return@mapIndexedNotNull null
+                    // A per-operation prompt in a CryptoObjectSigner runs only where the signer is passed in, checked below.
+                    if ((maxOf(0, i - 3) until i).any { "CryptoObjectSigner {" in lines[it] }) return@mapIndexedNotNull null
                     "${file.name}:${i + 1}"
                 }
             }
         assertEquals(emptyList<String>(), bypasses)
+        // Every call handed the CryptoObjectSigner runs in a gate opened at most 10 lines above, or forwards a helper's own parameter.
+        val handlerLines = File(root, "com/automatethethings/xkey/protocol/Handler.kt").readLines()
+        val ungatedSigner = handlerLines.indices.filter { i ->
+            val code = handlerLines[i].substringBefore("//")
+            Regex("""\(\s*[^)]*\bcryptoObjectSigner\)|,\s*cryptoObjectSigner\s*$""").containsMatchIn(code) &&
+                "fun " !in code &&
+                (maxOf(0, i - 10) until i).none { j -> gates.any { it in handlerLines[j] } } &&
+                (maxOf(0, i - 15) until i).none { j -> "fun " in handlerLines[j] && "cryptoObjectSigner: " in handlerLines.subList(j, i).joinToString("") }
+        }.map { "Handler.kt:${it + 1}" }
+        assertEquals("a CryptoObjectSigner used outside a gate", emptyList<String>(), ungatedSigner)
         val handler = File(root, "com/automatethethings/xkey/protocol/Handler.kt").readText()
         val gate = handler.substringAfter("fun <T> withUsableGeneralKey(").substringBefore("\n    }\n")
         assertTrue("withUsableGeneralKey resolves the id's key", "ownedKeyKind(" in gate)

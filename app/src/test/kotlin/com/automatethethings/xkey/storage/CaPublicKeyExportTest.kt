@@ -57,6 +57,8 @@ class CaPublicKeyExportTest {
 
     @Before
     fun setUp() {
+        // Main's shared ML-DSA store is per process: each test starts with none.
+        com.automatethethings.xkey.crypto.PqcSoftwareKeyStore.clearSharedForTest()
         mockkStatic(android.util.Log::class)
         every { android.util.Log.d(any(), any<String>()) } returns 0
         every { android.util.Log.w(any(), any<String>()) } returns 0
@@ -74,7 +76,11 @@ class CaPublicKeyExportTest {
         every { android.util.Base64.encodeToString(any(), any()) } answers {
             java.util.Base64.getEncoder().encodeToString(firstArg<ByteArray>())
         }
-        keystore = spyk(KeystoreManager(mockk<Context>(relaxed = true)))
+        // Main's ML-DSA store reads the context's files directory: an empty one here.
+        val keystoreContext = mockk<Context>(relaxed = true)
+        every { keystoreContext.applicationContext } returns keystoreContext
+        every { keystoreContext.filesDir } returns java.nio.file.Files.createTempDirectory("pqc-keys").toFile().apply { deleteOnExit() }
+        keystore = spyk(KeystoreManager(keystoreContext))
         every { keystore.ed25519Prefs() } returns null
         val software = mockk<SoftwareKeyStore>()
         every { software.presence(any()) } returns KeyPresence.ABSENT
@@ -83,6 +89,7 @@ class CaPublicKeyExportTest {
 
     @After
     fun tearDown() {
+        com.automatethethings.xkey.crypto.PqcSoftwareKeyStore.clearSharedForTest()
         unmockkAll()
     }
 

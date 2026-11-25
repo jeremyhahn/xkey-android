@@ -67,6 +67,8 @@ class FileEncryptorEphemeralKeyLeakTest {
 
     @Before
     fun setUp() {
+        // Main's shared ML-DSA store is per process: each test starts with none.
+        com.automatethethings.xkey.crypto.PqcSoftwareKeyStore.clearSharedForTest()
         entries.clear()
         ed25519Readable = true
         softwareReadable = true
@@ -104,6 +106,7 @@ class FileEncryptorEphemeralKeyLeakTest {
 
     @After
     fun tearDown() {
+        com.automatethethings.xkey.crypto.PqcSoftwareKeyStore.clearSharedForTest()
         unmockkAll()
     }
 

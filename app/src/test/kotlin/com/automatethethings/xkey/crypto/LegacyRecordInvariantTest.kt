@@ -66,6 +66,8 @@ class LegacyRecordInvariantTest {
 
     @Before
     fun setUp() {
+        // Main's shared ML-DSA store is per process: each test starts with none.
+        com.automatethethings.xkey.crypto.PqcSoftwareKeyStore.clearSharedForTest()
         mockkStatic(android.util.Log::class)
         every { android.util.Log.d(any(), any<String>()) } returns 0
         every { android.util.Log.w(any(), any<String>()) } returns 0
@@ -80,7 +82,11 @@ class LegacyRecordInvariantTest {
         val prefs = mockk<SharedPreferences>()
         every { prefs.contains(any()) } returns false
         every { prefs.getString(any(), any()) } answers { secondArg() }
-        keystore = spyk(KeystoreManager(mockk<Context>(relaxed = true)))
+        // Main's ML-DSA store reads the context's files directory: an empty one here.
+        val keystoreContext = mockk<Context>(relaxed = true)
+        every { keystoreContext.applicationContext } returns keystoreContext
+        every { keystoreContext.filesDir } returns java.nio.file.Files.createTempDirectory("pqc-keys").toFile().apply { deleteOnExit() }
+        keystore = spyk(KeystoreManager(keystoreContext))
         every { keystore.ed25519Prefs() } returns prefs
         every { keystore.softwareKeys() } answers { software!! }
         every { keystore.getPublicKeyPEM(any(), any()) } returns "CREDENTIAL PUBLIC KEY"
@@ -90,6 +96,7 @@ class LegacyRecordInvariantTest {
 
     @After
     fun tearDown() {
+        com.automatethethings.xkey.crypto.PqcSoftwareKeyStore.clearSharedForTest()
         unmockkAll()
     }
 

@@ -72,6 +72,8 @@ class KeystoreManagerPqcLifecycleTest {
 
     @Before
     fun setUp() {
+        // Main's shared ML-DSA store is per process: each test starts with none.
+        com.automatethethings.xkey.crypto.PqcSoftwareKeyStore.clearSharedForTest()
         mockkStatic(Log::class)
         every { Log.d(any(), any<String>()) } returns 0
         every { Log.i(any(), any<String>()) } returns 0
@@ -106,6 +108,7 @@ class KeystoreManagerPqcLifecycleTest {
 
     @After
     fun tearDown() {
+        com.automatethethings.xkey.crypto.PqcSoftwareKeyStore.clearSharedForTest()
         PqcSoftwareKeyStore.clock = defaultClock
         unmockkAll()
     }

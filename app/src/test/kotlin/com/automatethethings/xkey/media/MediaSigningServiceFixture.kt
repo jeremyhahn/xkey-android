@@ -227,6 +227,8 @@ class MediaSigningServiceFixture(private val dir: File) {
     val resolver: ContentResolver get() = service.contentResolver
 
     fun setUp() {
+        // Main's shared ML-DSA store is per process: each test starts with none.
+        com.automatethethings.xkey.crypto.PqcSoftwareKeyStore.clearSharedForTest()
         captures.clear()
         queries.clear()
         keys[KEY_ID] = key()
@@ -266,6 +268,7 @@ class MediaSigningServiceFixture(private val dir: File) {
     }
 
     fun tearDown() {
+        com.automatethethings.xkey.crypto.PqcSoftwareKeyStore.clearSharedForTest()
         try {
             if (controller != null && !destroyed) controller!!.destroy()
             // A job a destroyed service left behind must not outlive the test.

@@ -68,6 +68,8 @@ class KeyDeletionMaterialTypesTest {
 
     @Before
     fun setUp() {
+        // Main's shared ML-DSA store is per process: each test starts with none.
+        com.automatethethings.xkey.crypto.PqcSoftwareKeyStore.clearSharedForTest()
         mockkStatic(Log::class)
         every { Log.d(any(), any<String>()) } returns 0
         every { Log.w(any(), any<String>()) } returns 0
@@ -94,6 +96,7 @@ class KeyDeletionMaterialTypesTest {
 
         files = java.nio.file.Files.createTempDirectory("software-keys").toFile()
         context = mockk(relaxed = true)
+        every { context.applicationContext } returns context
         every { context.filesDir } returns files
 
         val prefs = mockk<SharedPreferences>()
@@ -113,6 +116,7 @@ class KeyDeletionMaterialTypesTest {
 
     @After
     fun tearDown() {
+        com.automatethethings.xkey.crypto.PqcSoftwareKeyStore.clearSharedForTest()
         files.deleteRecursively()
         unmockkAll()
     }

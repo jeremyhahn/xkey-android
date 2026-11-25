@@ -72,6 +72,8 @@ class KeystoreManagerPerOperationSignTest {
 
     @Before
     fun setUp() {
+        // Main's shared ML-DSA store is per process: each test starts with none.
+        com.automatethethings.xkey.crypto.PqcSoftwareKeyStore.clearSharedForTest()
         mockkStatic(Log::class)
         every { Log.d(any(), any<String>()) } returns 0
         every { Log.w(any(), any<String>()) } returns 0
@@ -102,6 +104,7 @@ class KeystoreManagerPerOperationSignTest {
 
     @After
     fun tearDown() {
+        com.automatethethings.xkey.crypto.PqcSoftwareKeyStore.clearSharedForTest()
         PqcHardware.backend = savedBackend
         unmockkAll()
     }

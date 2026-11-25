@@ -150,8 +150,23 @@ class KeyPresenceRefusalBypassTest {
         assertTrue("the handler's generated-key discards are found: ${discards.size}", discards.size >= 3)
         for (discard in discards) {
             val block = handler.substring(discard.range.last, matchingClose(handler, discard.range.last))
-            assertTrue("a discard deletes its own alias: $block", "discardGeneratedKey(" in block)
+            assertTrue(
+                "a discard deletes its own alias: $block",
+                "discardGeneratedKey(" in block || "discardGeneratedMlDsaKey(" in block
+            )
         }
+        // The ML-DSA discard deletes its own general alias from the Keystore, then the software ML-DSA record.
+        val keystore = stripComments(File(main, "com/automatethethings/xkey/crypto/KeystoreManager.kt").readText())
+        for (fn in listOf("fun discardGeneratedMlDsaKey(", "fun discardPqcKey(")) {
+            val start = keystore.indexOf(fn)
+            assertTrue("$fn is found", start >= 0)
+            val open = keystore.indexOf('{', start)
+            val body = keystore.substring(open, matchingClose(keystore, open))
+            guarded.find(body)?.let { leaks += "KeystoreManager.kt: $fn ${it.value}" }
+        }
+        val mlDsa = keystore.substringAfter("fun discardGeneratedMlDsaKey(").substringBefore("\n    }\n")
+        assertTrue("the ML-DSA discard deletes its own alias", "discardGeneratedKey(alias)" in mlDsa && "discardPqcKey(alias)" in mlDsa)
+        assertTrue("an ML-DSA discard passes the cross-backend presence guard: $leaks", leaks.isEmpty())
         val encryptor = stripComments(File(main, "com/automatethethings/xkey/crypto/FileEncryptor.kt").readText())
         // The cleanup is one revoke of the ephemeral ID that discards its own alias.
         val discard = encryptor.substringAfter("fun discardEphemeralKey(").substringBefore("\n\n")

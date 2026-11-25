@@ -88,6 +88,8 @@ class KeySharingBottomSheetDesktopSendTest {
 
     @Before
     fun setUp() {
+        // Main's shared ML-DSA store is per process: each test starts with none.
+        com.automatethethings.xkey.crypto.PqcSoftwareKeyStore.clearSharedForTest()
         app = RuntimeEnvironment.getApplication()
 
         keyDao = mockk(relaxed = true)
@@ -136,6 +138,7 @@ class KeySharingBottomSheetDesktopSendTest {
     fun tearDown() {
         controller?.let { c -> runCatching { c.pause().stop().destroy() } }
         unmockkAll()
+        com.automatethethings.xkey.crypto.PqcSoftwareKeyStore.clearSharedForTest()
     }
 
     private fun currentSession(): ShareSession? =

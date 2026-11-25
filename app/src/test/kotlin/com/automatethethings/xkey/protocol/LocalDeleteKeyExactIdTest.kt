@@ -70,6 +70,8 @@ class LocalDeleteKeyExactIdTest {
 
     @Before
     fun setUp() {
+        // Main's shared ML-DSA store is per process: each test starts with none.
+        com.automatethethings.xkey.crypto.PqcSoftwareKeyStore.clearSharedForTest()
         mockkStatic(Log::class)
         every { Log.d(any(), any<String>()) } returns 0
         every { Log.i(any(), any<String>()) } returns 0
@@ -95,6 +97,7 @@ class LocalDeleteKeyExactIdTest {
 
         val files: File = java.nio.file.Files.createTempDirectory("software-keys").toFile().apply { deleteOnExit() }
         context = mockk(relaxed = true)
+        every { context.applicationContext } returns context
         every { context.filesDir } returns files
 
         val prefs = mockk<SharedPreferences>()
@@ -112,6 +115,7 @@ class LocalDeleteKeyExactIdTest {
 
     @After
     fun tearDown() {
+        com.automatethethings.xkey.crypto.PqcSoftwareKeyStore.clearSharedForTest()
         unmockkAll()
     }
 
