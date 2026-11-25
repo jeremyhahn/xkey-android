@@ -50,6 +50,7 @@ import io.mockk.mockkObject
 import io.mockk.mockkStatic
 import io.mockk.unmockkAll
 import io.mockk.verify
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.runBlocking
 import org.junit.After
@@ -90,6 +91,8 @@ class KeySharingBottomSheetDesktopSendTest {
     fun setUp() {
         // Main's shared ML-DSA store is per process: each test starts with none.
         com.automatethethings.xkey.crypto.PqcSoftwareKeyStore.clearSharedForTest()
+        // The sheet's loads run on the main looper, which each wait idles.
+        KeySharingBottomSheet.ioDispatcher = Dispatchers.Main
         app = RuntimeEnvironment.getApplication()
 
         keyDao = mockk(relaxed = true)
@@ -138,6 +141,7 @@ class KeySharingBottomSheetDesktopSendTest {
     fun tearDown() {
         controller?.let { c -> runCatching { c.pause().stop().destroy() } }
         unmockkAll()
+        KeySharingBottomSheet.ioDispatcher = Dispatchers.IO
         com.automatethethings.xkey.crypto.PqcSoftwareKeyStore.clearSharedForTest()
     }
 
@@ -432,24 +436,14 @@ class KeySharingBottomSheetDesktopSendTest {
         }
     }
 
-    /** Runs the main looper until [done], while the sheet's IO loads finish on their own thread. */
+    /** Runs the main looper, which also runs the sheet's loads, and requires [done] after it. */
     private fun waitUntil(what: String, done: () -> Boolean) {
-        val deadline = System.currentTimeMillis() + 5_000
-        while (true) {
-            shadowOf(Looper.getMainLooper()).idle()
-            if (done()) return
-            if (System.currentTimeMillis() > deadline) fail(what)
-            Thread.sleep(5)
-        }
+        shadowOf(Looper.getMainLooper()).idle()
+        if (!done()) fail(what)
     }
 
     /** Lets every refresh in flight finish. */
     private fun settle() {
-        val until = System.currentTimeMillis() + 200
-        while (System.currentTimeMillis() < until) {
-            shadowOf(Looper.getMainLooper()).idle()
-            Thread.sleep(5)
-        }
         shadowOf(Looper.getMainLooper()).idle()
     }
 

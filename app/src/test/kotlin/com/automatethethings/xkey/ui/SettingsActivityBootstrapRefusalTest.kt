@@ -29,6 +29,7 @@ import com.automatethethings.xkey.settings.BootstrapSettingsData
 import com.automatethethings.xkey.settings.BootstrapSettingsRepository
 import com.automatethethings.xkey.settings.TrustedComputingSettingsRepository
 import com.automatethethings.xkey.storage.XKeyDatabase
+import com.automatethethings.xkey.testing.MainLooperWait
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -67,17 +68,8 @@ class SettingsActivityBootstrapRefusalTest {
         shadowOf(Looper.getMainLooper()).idle()
     }
 
-    /** Idles the main looper until [condition] holds or the deadline passes. */
-    private fun waitUntil(condition: () -> Boolean): Boolean {
-        val deadline = System.currentTimeMillis() + 5_000
-        while (System.currentTimeMillis() < deadline) {
-            idleMainLooper()
-            if (condition()) return true
-            Thread.sleep(20)
-        }
-        idleMainLooper()
-        return condition()
-    }
+    /** Idles the main looper until [condition] holds, while the settings load on their own threads. */
+    private fun waitUntil(condition: () -> Boolean): Boolean = MainLooperWait.holds(condition)
 
     private fun isInitializing(activity: SettingsActivity): Boolean =
         SettingsActivity::class.java.getDeclaredField("isInitializing")

@@ -20,6 +20,7 @@ import android.content.Intent
 import android.content.ServiceConnection
 import android.os.IBinder
 import androidx.annotation.StringRes
+import androidx.annotation.VisibleForTesting
 import android.graphics.Typeface
 import android.os.Bundle
 import android.util.TypedValue
@@ -63,6 +64,7 @@ import com.automatethethings.xkey.storage.readShareable
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.entity.KeyEntity
 import com.automatethethings.xkey.storage.entity.SharingPolicyType as EntitySharingPolicyType
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -127,7 +129,7 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
     private val keyDao by lazy { XKeyDatabase.getInstance(requireContext()).keyDao() }
     private val keyPolicyStore by lazy { KeyPolicyStore.of(XKeyDatabase.getInstance(requireContext()), com.automatethethings.xkey.crypto.KeystoreManager(requireContext())) }
     private val pairedDeviceRepository by lazy { PairedDeviceRepository(requireContext()) }
-    private val sharingPeers by lazy { KeySharingPeers(keyId, checkNotNull(keyEntity).id, keyPolicyStore, pairedDeviceRepository) }
+    private val sharingPeers by lazy { KeySharingPeers(keyId, checkNotNull(keyEntity).id, keyPolicyStore, pairedDeviceRepository, ioDispatcher) }
 
     private var keyId: String = ""
     private var keyEntity: KeyEntity? = null
@@ -724,7 +726,7 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
      * the hand back from the IO dispatcher zeroes it here.
      */
     private suspend fun loadShareInputs(): ShareInputs = loadZeroedOnCancel(
-        Dispatchers.IO, zero = { it.software?.material?.fill(0) }
+        ioDispatcher, zero = { it.software?.material?.fill(0) }
     ) {
         val context = requireContext().applicationContext
         val entity = keyDao.getByKeyId(keyId)
@@ -1042,6 +1044,10 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
         private const val ARG_KEY_ID = "key_id"
         private const val TAG_SUBTITLE = "subtitle"
         private const val DISABLED_ALPHA = 0.5f
+
+        // Where the sheet's store reads run; tests set a dispatcher they drive.
+        @VisibleForTesting
+        internal var ioDispatcher: CoroutineDispatcher = Dispatchers.IO
 
         // Use fixed IDs to avoid issues with generateViewId() in companion object
         private const val RADIO_ID_PRIVATE = 0x7f0a0001
