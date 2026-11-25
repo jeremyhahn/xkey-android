@@ -1,6 +1,6 @@
 # Media auto-signing
 
-> **Status: REFERENCE** · Last verified: 2026-11-23
+> **Status: REFERENCE** · Last verified: 2026-11-25
 > Engineering reference for `MediaSigningService`: lifecycle, hashing, storage format, settings, manifest entries and limits.
 
 The flow is in [architecture.md](architecture.md).
@@ -12,13 +12,15 @@ stateDiagram-v2
     [*] --> Stopped
     Stopped --> Observing: Auto-Sign Media switched on (startForegroundService)
     Observing --> Signing: MediaStore change for an unsigned URI
-    Signing --> Observing: Signed, skipped, or failed (logged)
+    Signing --> Observing: Signed, skipped, queued, or refused (logged)
     Observing --> Stopped: Switched off (stopService) or onDestroy
 ```
 
-The service uses `CoroutineScope(SupervisorJob() + Dispatchers.IO)`. Each
-change event starts its own job, so several captures in a burst are hashed
-and signed at the same time. `onDestroy` cancels all of them.
+The service uses `CoroutineScope(SupervisorJob() + Dispatchers.IO)`. Every
+signing job starts through one gate (`MediaJobGate.forSigning`). The gate runs
+at most one job per URI at a time and bounds the memory of all the jobs
+together. Several captures in a burst can still sign at the same time.
+`onDestroy` cancels all of them.
 
 ## Change events
 
@@ -26,22 +28,53 @@ and signed at the same time. `onDestroy` cancels all of them.
 |--------|-------|
 | Observed URIs | `MediaStore.Images.Media.EXTERNAL_CONTENT_URI`, `MediaStore.Video.Media.EXTERNAL_CONTENT_URI`, with descendants |
 | Wait before hashing | 500 ms (`SIGN_DELAY_MS`), so the camera can finish writing |
-| Duplicate guard | `processedUris`, a concurrent in-memory set of URI strings |
-| Set size | When it passes 1000 entries, 500 are removed in iteration order. The set is hash-based, so these are not the oldest |
+| Duplicate guard | `processedUris`, a thread-safe `RecentUris` of handled URIs: signed, queued or refused |
+| Set size | 1000 (`RecentUris.DEFAULT_BOUND`); past that, the least recently added URI is dropped |
 
-The set lives in memory only. A restarted service can sign a URI again if
-`MediaStore` reports a change for it.
+The set lives in memory only. A restarted service can handle a URI again if
+`MediaStore` reports a change for it. An exception outside `signCapture`
+leaves the URI unmarked, so a later change event tries again.
+
+## Retry queue
+
+`AutoSigner.signCapture` returns `Signed`, `AwaitingAccess` or
+`QueuedForRetry`. Only a JPEG that is too large throws
+(`AutoSignHash.TooLargeException`). Every queued capture becomes a
+`PendingMediaWrite` in `MediaWriteAuthorizations`, and the user is notified
+(`notifyPending`):
+
+| Cause | Queued with |
+|-------|-------------|
+| No location access, so the original cannot be read | No signature |
+| Another app owns the capture and xKey has no write grant | The signature |
+| A failure to hash, sign or write, including `OutOfMemoryError` | No signature |
+
+An entry without a signature is hashed and signed again from its original
+when the queue runs it. Before a kept signature is written, the writer checks
+that the media still has its content hash; if the media changed it throws
+`SourceChangedException` and publishes nothing.
 
 ## Hashing
 
-`AutoSignHash.contentHashUri` takes the MIME type from the content resolver:
+`AutoSignHash.contentHashOriginal` hashes the original of a `MediaStore` item
+(`MediaPublisher.openOriginal`), never the location-redacted view. If a
+granted write of the capture was interrupted, it puts that write back first
+(`MediaPublisher.recoverInterruptedWrite`), so it never hashes part-written
+bytes. `contentHashOf` opens the item once and reads its head to pick the
+type:
 
-| MIME type | Hash |
-|-----------|------|
-| `image/jpeg` or `image/jpg` | `MediaHasher.hashCanonical`: SHA-256 with the `APPn` and `COM` segments left out. The file is read into memory, up to 32 MiB (`MAX_CANONICAL_JPEG_BYTES`); a larger one throws `TooLargeException` |
-| Anything else | `MediaHasher.hashUri`: SHA-256 of the whole file, streamed |
+| Content | Hash |
+|---------|------|
+| JPEG: `image/jpeg` or `image/jpg`, or no type / `application/octet-stream` with an `FF D8 FF` head (`MediaHasher.isJpeg`) | Canonical SHA-256 with the `APPn` and `COM` segments left out, streamed from a private snapshot. Above 32 MiB (`MAX_CANONICAL_JPEG_BYTES`) it throws `TooLargeException`, because the writer holds a JPEG in memory to embed |
+| MP4, MOV, PNG, WebP (`XmpContainers.formatOf`) | Canonical SHA-256 without xKey's XMP packet, streamed from a private snapshot |
+| Anything else | SHA-256 of the whole file, streamed in one read |
 
-The service turns the hex hash into bytes and signs those bytes with the JCA
+No capture is held in memory to hash it. The size check and the hash read the
+same snapshot, never two reads of media that could change between them.
+`AutoSignHash.contentHashFile` computes the same hash over a file that is
+already copied out; co-signing uses it.
+
+The signer turns the hex hash into bytes and signs those bytes with the JCA
 algorithm for the key (`KeystoreManager.jcaSignatureAlgorithm`). That
 algorithm hashes the content-hash bytes again with its own digest before
 signing: SHA-256 for ES256 and RS256, SHA-384 for ES384 and RS384, SHA-512 for
@@ -87,18 +120,27 @@ Co-signatures added later go in the same `signatures` array; see
 
 ## Storage
 
-`XmpMetadataHelper` decides by the file path's extension, not by MIME type.
+`XmpMetadataHelper.signMedia` is the auto-signer's only write. It picks the
+storage by content type, using the same JPEG check as the hash:
 
-| Extension | Write | Read (`readSignature`) |
-|-----------|-------|------------------------|
-| `.jpg`, `.jpeg` | `ExifInterface` `TAG_USER_COMMENT` = `XKEY_SIG:` + JSON, then `saveAttributes()` | EXIF first, then the sidecar |
-| Anything else | `<path>.xkeysig`, the JSON alone | Sidecar only |
+| Content | Write |
+|---------|-------|
+| JPEG | `ExifInterface` `TAG_USER_COMMENT` = `XKEY_SIG:` + JSON |
+| MP4, MOV, PNG, WebP | An XMP packet in a box or chunk (`XmpContainers`), written streaming at any size |
+| HEIC, MKV, other types, or a container that refuses the packet | A `.xkeysig` sidecar, the JSON alone |
 
-`readSignatureFromUri` reads only the EXIF block of a JPEG. It never looks
-for a sidecar, because a content URI has no path to put `.xkeysig` after.
-The [viewer](../verified-media-viewer/architecture.md#finding-the-signature-block)
-looks for the sidecar itself, which works only for a `file://` URI or a
-document URI. File operations ask the user to pick the `.xkeysig` file.
+| Who owns the media | How it is written |
+|--------------------|-------------------|
+| xKey, with a file path | By path, under a per-path lock, through a staging file that is created exclusively. A sidecar goes beside the file |
+| Another app, with a write grant | The original is copied to a staging file and checked against the signed hash, then the signature is added and the file is written back through its URI (`MediaPublisher.writeGranted`). A sidecar is a file xKey owns under `Documents/xKey/` |
+| Another app, no grant | Nothing is written: `NeedsWriteAuthorization`, and the capture is queued |
+
+Readers look for the signature in the media first, then in a sidecar.
+`readSidecar` reads the owned sidecar under `Documents/xKey/` when there is
+one, otherwise the legacy one beside the file, so media signed before
+embedding still verifies. `readSignatureFromUri` reads an in-band signature
+only (EXIF or XMP): a content URI has no sidecar beside it. App code reads
+source media through its Context overload, which reads the original.
 
 The `XKEY_SIG:` prefix marks the comment as xKey's. A comment without it is
 ignored, and writing a signature replaces whatever comment the photo had.
@@ -130,6 +172,7 @@ signs with, so choosing one leaves every new item unsigned.
 ```xml
 <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
 <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+<uses-permission android:name="android.permission.ACCESS_MEDIA_LOCATION" />
 <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
     android:maxSdkVersion="32" />
 <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
@@ -140,8 +183,11 @@ signs with, so choosing one leaves every new item unsigned.
     android:exported="false" />
 ```
 
-The app declares the media permissions but has no code that asks the user for
-them at run time.
+`MediaLocationAccess` asks for `ACCESS_MEDIA_LOCATION`, without which no
+original can be read and a capture waits in the queue. Turning auto-signing
+on asks for `POST_NOTIFICATIONS`, which the queue's write-access notification
+needs. If that is refused, the settings entry is still a way to reach the
+queue.
 
 ## Notification
 
