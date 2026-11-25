@@ -188,6 +188,11 @@ class GattServerTcgEnrollmentTest {
             originalSettings.copy(enabled = true, caSource = CertificateAuthoritySource.THIS_DEVICE)
         )
         val outbound = enrollmentServer()
+        // A request is only opened toward a connected device; with none the
+        // ceremony refuses before its first step.
+        val adapter = context.getSystemService(android.bluetooth.BluetoothManager::class.java)?.adapter
+            ?: throw AssertionError("the ceremony needs a Bluetooth adapter to name its peer")
+        outbound.connectedDevice = adapter.getRemoteDevice("AA:BB:CC:DD:EE:F8")
         val before = outbound.nextEnrollmentRequestId
 
         try {

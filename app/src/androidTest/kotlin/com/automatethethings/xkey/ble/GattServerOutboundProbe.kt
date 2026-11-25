@@ -132,8 +132,14 @@ class GattServerOutboundProbe(val server: GattServer) {
     suspend fun sendRequestAndWaitForResponse(method: String, params: JSONObject): JSONObject =
         callSuspend(sendRequestMethod, currentSession(), method, params) as JSONObject
 
+    /**
+     * Runs the ceremony on the server's live session or, when a test set none
+     * up, on a session no handshake ever established: the server's callers
+     * always hand it one, and a session with no transport keys is what "no
+     * session to carry it" is now.
+     */
     suspend fun performPostPairingEnrollment(publicKeyHex: String, deviceName: String) {
-        callSuspend(enrollmentMethod, publicKeyHex, deviceName, currentSession())
+        callSuspend(enrollmentMethod, publicKeyHex, deviceName, noiseSession ?: NoiseSession())
     }
 
     // The server's live session, which its own callers pass to these seams.
