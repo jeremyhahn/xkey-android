@@ -19,6 +19,7 @@ import androidx.appcompat.app.AlertDialog
 import com.automatethethings.xkey.R
 import com.automatethethings.xkey.remote.RemoteBackupClient
 import com.automatethethings.xkey.remote.RemoteBackupException
+import com.google.android.material.snackbar.Snackbar
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.mockk
@@ -38,6 +39,7 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import java.io.IOException
+import java.lang.reflect.Proxy
 
 /**
  * Robolectric tests for the restore half of [DesktopBackupDialogs]: the
@@ -54,6 +56,7 @@ class DesktopBackupDialogsRestoreTest {
 
     @Before
     fun setUp() {
+        resetSnackbarManager()
         host = DesktopBackupDialogsTestHost()
     }
 
@@ -61,6 +64,46 @@ class DesktopBackupDialogsRestoreTest {
     fun tearDown() {
         host.close()
         unmockkAll()
+        resetSnackbarManager()
+    }
+
+    private val snackbarManagerType = Class.forName("com.google.android.material.snackbar.SnackbarManager")
+
+    /** Drops Material's process-wide Snackbar queue, which a record from an earlier test can block. */
+    private fun resetSnackbarManager() {
+        snackbarManagerType.getDeclaredField("snackbarManager").apply { isAccessible = true }.set(null, null)
+    }
+
+    /** Makes a record current whose dismissal never reports back, as a test torn down mid-Snackbar leaves it. */
+    private fun leaveStuckSnackbar(): Any {
+        val callbackType = Class.forName("com.google.android.material.snackbar.SnackbarManager\$Callback")
+        val callback = Proxy.newProxyInstance(callbackType.classLoader, arrayOf(callbackType)) { proxy, method, args ->
+            when (method.name) {
+                "equals" -> proxy === args?.get(0)
+                "hashCode" -> System.identityHashCode(proxy)
+                else -> null
+            }
+        }
+        val manager = snackbarManagerType.getDeclaredMethod("getInstance").apply { isAccessible = true }.invoke(null)
+        snackbarManagerType.getDeclaredMethod("show", Int::class.javaPrimitiveType, callbackType)
+            .apply { isAccessible = true }.invoke(manager, Snackbar.LENGTH_INDEFINITE, callback)
+        return callback
+    }
+
+    @Test
+    fun `a Snackbar an earlier test left current does not hold the no-backup notice back`() {
+        host.close()
+        val stuck = leaveStuckSnackbar()
+        // What setUp does before every test, here after the leak.
+        resetSnackbarManager()
+        host = DesktopBackupDialogsTestHost()
+        stored(null)
+
+        host.open(RESTORE)
+        host.settle()
+
+        assertEquals(listOf(host.string(R.string.desktop_backup_none_stored)), host.snackbarTexts())
+        assertNotNull("the stuck record's callback stays reachable", stuck)
     }
 
     // ---------------------------------------------------------------- lookup
