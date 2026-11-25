@@ -1,7 +1,7 @@
 # PIV architecture
 
-> **Status: REFERENCE** · Last verified: 2026-11-12
-> As-built description of the phone's PIV slots: the `local.piv*` wire family, the Keystore keys behind each slot, and the `piv_slots` table.
+> **Status: REFERENCE** · Last verified: 2026-11-23
+> As-built description of the phone's PIV slots: the `local.piv*` wire family, the Keystore keys behind each slot, the `piv_slots` table, and the `remote.piv*` calls that show the paired desktop's slots.
 
 ## Summary
 
@@ -10,8 +10,25 @@ slots 9A, 9C, 9D, 9E, F9 and the retired slots 82 to 95) can hold one
 Android Keystore key pair under the alias `xkey_piv_<hexId>`, plus an optional
 imported X.509 certificate. Metadata (algorithm, public key DER, certificate,
 created / last-used time, use count) lives in the Room table `piv_slots`
-(`PivSlotEntity`, `PivSlotDao`). Keys are ECDSA P-256, ECDSA P-384 or RSA 2048
-(`PivAlgorithm`).
+(`PivSlotEntity`, `PivSlotDao`). Keys are ECDSA P-256, ECDSA P-384, RSA 2048, RSA 3072 or RSA 4096
+(`PivAlgorithm`). PIV keys never ask for StrongBox, so every size is made in
+the TEE.
+
+### PIV algorithms
+
+| `PivAlgorithm` | Key | PIV algorithm id | Wire names accepted |
+|---|---|---|---|
+| `ES256` | ECDSA P-256 | `0x11` | `ES256`, `ECCP256`, `ECC-P256`, `ECDSA-P256`, `EC-P256`, `P256` |
+| `ES384` | ECDSA P-384 | `0x14` | `ES384`, `ECCP384`, `ECC-P384`, `ECDSA-P384`, `EC-P384`, `P384` |
+| `RS2048` | RSA 2048 | `0x07` | `RS2048`, `RSA2048`, `RSA-2048` |
+| `RS3072` | RSA 3072 | `0x05` | `RS3072`, `RSA3072`, `RSA-3072` |
+| `RS4096` | RSA 4096 | `0x16` | `RS4096`, `RSA4096`, `RSA-4096` |
+
+The ids for P-256, P-384, RSA 2048 and RSA 3072 are the NIST SP 800-78
+values; `0x16` for RSA 4096 is the YubiKey extension the desktop uses.
+`PivAlgorithm.fromWireName` matches names case-insensitively and treats `_`
+as `-`; any other name, including RSA 1024, P-521 and post-quantum names, is
+answered with `INVALID_ALGORITHM`.
 
 The desktop drives the slots through `local.piv*`. All transports share the
 one `RequestHandler` built in `XKeyGattService` with
@@ -20,9 +37,14 @@ one `RequestHandler` built in `XKeyGattService` with
 On the phone, `PivActivity` and `PivSlotDetailActivity` use their own
 `PivKeyManager`.
 
-`MethodNames` also defines `remote.pivListSlots`, `remote.pivSign` and
-`remote.pivGetCert`, but no code in `app/src/main` sends them; only
-`PivHandlerTest` and `ProtocolConstantsTest` reference those constants.
+The PIV screens also show the paired desktop's slots while a desktop is
+connected. `PivActivity` lists them in a separate read-only section from
+`remote.pivListSlots`. Opening one shows `PivSlotDetailActivity` in desktop
+mode: the certificate comes from `remote.pivGetCert` and the "sign test"
+action sends `remote.pivSign`. That view has no delete or export. A desktop
+slot id is sent back exactly as the desktop gave it and is never mapped onto
+the phone's own slots. When no desktop is connected, or the desktop errors,
+the list shows only the phone's slots and no error.
 
 ## Components
 
@@ -30,9 +52,12 @@ On the phone, `PivActivity` and `PivSlotDetailActivity` use their own
 |-----------|------|------|
 | `RequestHandler` (`handlePivListSlots`, `handlePivGenerateKey`, `handlePivImportCert`, `handlePivSign`, `handlePivGetCert`, `pivSlotId`, `pivAlgorithmOf`) | `app/src/main/kotlin/com/automatethethings/xkey/protocol/Handler.kt` | Wire handlers; accept go-xkms field and algorithm spellings alongside the older Android ones |
 | `PivKeyManager`, `PivSlotInfo` | `app/src/main/kotlin/com/automatethethings/xkey/piv/PivKeyManager.kt` | `generateKey`, `importCertificate`, `listSlots`, `sign`, `getCertificate`, `getPublicKey`, `deleteKey`; audit via `AuditLogger.logKeyCreated`, `AuditLogger.logSigningRequest` and, after a stored import, `AuditLogger.logPivCertImported` (slot and subject) |
-| `PivSlot`, `PivAlgorithm` | `app/src/main/kotlin/com/automatethethings/xkey/piv/PivSlot.kt` | Slot ids, labels, `keystoreAlias`, `isPrimarySlot`, `fromHexId` (case-insensitive); algorithms `ES256`, `ES384`, `RS2048` |
+| `PivSlot`, `PivAlgorithm` | `app/src/main/kotlin/com/automatethethings/xkey/piv/PivSlot.kt` | Slot ids, labels, `keystoreAlias`, `isPrimarySlot`, `fromHexId` (case-insensitive); algorithms `ES256`, `ES384`, `RS2048`, `RS3072`, `RS4096` with `pivAlgorithmId`; `PivAlgorithm.fromWireName` parses wire names |
 | `PivSlotEntity`, `PivSlotDao` | `app/src/main/kotlin/com/automatethethings/xkey/piv/PivSlotEntity.kt`, `PivSlotDao.kt` | Room table `piv_slots`; `upsert`, `getBySlotId`, `getAll`, `recordUsage`, `deleteBySlotId`, observers for the UI |
-| `PivActivity`, `PivSlotDetailActivity` | `app/src/main/kotlin/com/automatethethings/xkey/ui/` | On-phone slot list and slot detail screens |
+| `PivActivity`, `PivSlotDetailActivity` | `app/src/main/kotlin/com/automatethethings/xkey/ui/` | On-phone slot list and slot detail screens, for the phone's slots and the desktop's |
+| `DesktopPivSlots`, `desktopPivSlots`, `desktopSessions` | `app/src/main/kotlin/com/automatethethings/xkey/ui/PivActivity.kt` | Load the desktop's slots for each desktop session; any failure gives an empty list |
+| `DesktopPivSlotActions`, `desktopPivSlotDetail` | `app/src/main/kotlin/com/automatethethings/xkey/ui/PivSlotDetailActivity.kt` | The desktop slot's certificate (none on `PIV_SLOT_NOT_FOUND`) and the test sign |
+| `RemoteKeyClient` (`pivListSlots`, `pivGetCert`, `pivSign`), `RemotePivSlot`, `RemotePivCertificate`, `RemotePivSignature` | `app/src/main/kotlin/com/automatethethings/xkey/remote/RemoteKeyClient.kt` | Sends `remote.piv*`; an off-shape reply is a `ProtocolException` with `PARSE_ERROR` |
 
 ## Wire methods served
 
@@ -47,6 +72,20 @@ On the phone, `PivActivity` and `PivSlotDetailActivity` use their own
 Accepted algorithm names: the enum names (`ES256`, `ES384`, `RS2048`) and
 `ECDSA-P256`, `EC-P256`, `P256`, `ECDSA-P384`, `EC-P384`, `P384`, `RSA-2048`,
 `RSA2048` (case and `_`/`-` folded).
+
+Each result also carries the older Android spellings (`slotId`, `hasKey`,
+`hasCertificate`, `publicKey`, `certificate`) next to the go-xkms names.
+
+## Wire methods sent
+
+| Method | Constant | Params | Result read |
+|--------|----------|--------|-------------|
+| `remote.pivListSlots` | `REMOTE_PIV_LIST_SLOTS` | none, or `backend` | `slots[]`: `slot`, `has_key`, `has_certificate` required; `label`, `algorithm`, `cert_subject`, `cert_expiry` optional. A `null` `slots` means no slots |
+| `remote.pivGetCert` | `REMOTE_PIV_GET_CERT` | `slot`, optional `backend` | `certificate_der` (must parse as X.509); `subject`, `issuer`, `expiry` optional |
+| `remote.pivSign` | `REMOTE_PIV_SIGN` | `slot`, `data` (base64), optional `algorithm` and `backend` | `signature`, `algorithm` |
+
+The shapes follow go-xkms `protocol_piv.go`. The client refuses a blank slot
+or empty data before sending.
 
 ## Main flow
 
@@ -94,17 +133,18 @@ sequenceDiagram
 | `local.pivImportCert` into a slot with no key | `PIV_SLOT_NOT_FOUND` |
 | Any other import failure, list or get-cert failure | `INTERNAL_ERROR` |
 
-The `local.piv*` handlers do not check a PIN or prompt the user; no PIN or
-user-verification gate was found in these handlers or in `PivKeyManager`.
+The `local.piv*` handlers and `PivKeyManager` do not check a PIN or prompt the
+user.
 
 ## Tests
 
-- Unit (`app/src/test`): `PivKeyManagerTest`, `PivSlotTest`, `PivSlotEntityTest`, `PivHandlerTest`, `ProtocolConstantsTest`.
+- Unit (`app/src/test`): `PivKeyManagerTest`, `PivSlotTest`, `PivSlotEntityTest`, `PivHandlerTest`, `ProtocolConstantsTest`, `KeystoreManagerPivAliasTest`, `RemoteKeyClientPivTest`, `DesktopPivSlotsTest`, `DesktopPivSessionTest`.
 - Instrumented (`app/src/androidTest`): `PivSlotDaoTest`, `PivActivityUiTest`, `PivFlowTest`, `PivSlotDetailActivityUiTest`, `PivSlotDetailFlowTest`.
 
 ## Related features
 
-- [PIN](../pin/architecture.md) — the other smart-card style family on the same handler.
-- [Hardware-backed keys](../hardware-backed-keys/architecture.md) — the general Keystore key path.
+- [PIN](../pin/architecture.md): the other smart-card style family on the same handler.
+- [Hardware-backed keys](../hardware-backed-keys/architecture.md): the general Keystore key path.
+- [Remote key access](../remote-key-access/architecture.md): the `remote.*` client and router.
 - [Certificate authority](../certificate-authority/)
 - [Audit log](../audit-log/architecture.md)

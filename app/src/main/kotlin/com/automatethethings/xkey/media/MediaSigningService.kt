@@ -45,6 +45,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -89,8 +90,10 @@ internal object AutoSignHash {
         MediaHasher.hashCanonical(data, mimeType)
 
     /**
-     * [contentHash] over the content at [uri], typed by the resolver, in the
-     * domain verification uses. A JPEG above [limit] bytes throws
+     * [contentHash] over the content at [uri], typed by [mimeType] (the
+     * resolver's type unless given), in the domain verification uses.
+     * Content [MediaHasher.isJpeg] says is a JPEG, by the type or its first
+     * bytes, is hashed canonically. A JPEG above [limit] bytes throws
      * [TooLargeException].
      *
      * An MP4/MOV, PNG or WebP may already carry an embedded signature (an
@@ -107,8 +110,9 @@ internal object AutoSignHash {
         contentResolver: ContentResolver,
         uri: Uri,
         workDir: java.io.File,
-        limit: Int = MAX_CANONICAL_JPEG_BYTES
-    ): String = contentHashOf(contentResolver.getType(uri), limit, workDir) {
+        limit: Int = MAX_CANONICAL_JPEG_BYTES,
+        mimeType: String? = contentResolver.getType(uri)
+    ): String = contentHashOf(mimeType, limit, workDir) {
         contentResolver.openInputStream(uri) ?: throw IllegalArgumentException("Cannot open URI: $uri")
     }
 
@@ -169,25 +173,36 @@ internal object AutoSignHash {
         workDir: java.io.File,
         open: () -> java.io.InputStream
     ): String {
+        val input = open().buffered()
+        // Content that starts like a JPEG is hashed as one whatever its type says.
+        input.mark(MediaHasher.JPEG_HEAD_SIZE)
+        val head = try {
+            MediaHasher.readFully(input, MediaHasher.JPEG_HEAD_SIZE).also { input.reset() }
+        } catch (e: Throwable) {
+            input.close()
+            throw e
+        }
+        val type = if (MediaHasher.isJpeg(mimeType, head = head)) MediaHasher.JPEG_MIME_TYPE else mimeType
         // Hashed whole: one read, no snapshot needed.
-        if (!MediaHasher.isCanonicalisedJpeg(mimeType) && XmpContainers.formatOf(mimeType) == null) {
-            return open().use { MediaHasher.hashStream(it) }
+        if (!MediaHasher.isJpeg(type) && XmpContainers.formatOf(type) == null) {
+            return input.use { MediaHasher.hashStream(it) }
         }
         // One read: the size bound and the hash come from the same snapshot,
         // never from separate reads of media that may change between them.
-        return MediaHasher.withSnapshot(open, workDir) { snapshot, _ ->
-            contentHashOfFile(mimeType, limit, snapshot)
+        return MediaHasher.withSnapshot({ input }, workDir) { snapshot, _ ->
+            contentHashOfFile(type, limit, snapshot)
         }
     }
 
     /** [contentHashOf] over [file], a private copy nothing else writes: every check and pass reads it. */
     private fun contentHashOfFile(mimeType: String?, limit: Int, file: java.io.File): String {
-        if (MediaHasher.isCanonicalisedJpeg(mimeType)) {
+        val type = MediaHasher.sniffedType(file, mimeType)
+        if (MediaHasher.isJpeg(type)) {
             if (file.length() > limit.toLong()) throw TooLargeException(limit)
-            return MediaHasher.hashStreamedFile(file, mimeType).canonical
+            return MediaHasher.hashStreamedFile(file, type).canonical
         }
-        if (XmpContainers.formatOf(mimeType) == null) return file.inputStream().use { MediaHasher.hashStream(it) }
-        return MediaHasher.hashStreamedFile(file, mimeType).canonical
+        if (XmpContainers.formatOf(type) == null) return file.inputStream().use { MediaHasher.hashStream(it) }
+        return MediaHasher.hashStreamedFile(file, type).canonical
     }
 
 }
@@ -382,6 +397,9 @@ class MediaSigningService : Service() {
         super.onDestroy()
         unregisterObservers()
         releaseWakeLock()
+        // Cancelling the scope, not only the jobs in flight, means a change
+        // already dispatched to an observer starts no new signing after this.
+        serviceScope.cancel()
         signingJobs.forEach { it.cancel() }
         signingJobs.clear()
         Log.i(TAG, "Media signing service stopped")

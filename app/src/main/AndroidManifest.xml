@@ -319,6 +319,17 @@
                 android:value=".ui.MainActivity" />
         </activity>
 
+        <!-- OATH credential details (no secret shown), opened from the OATH list -->
+        <activity
+            android:name=".ui.OathCredentialDetailActivity"
+            android:exported="false"
+            android:label="@string/oath_detail_title"
+            android:parentActivityName=".ui.OathActivity">
+            <meta-data
+                android:name="android.support.PARENT_ACTIVITY"
+                android:value=".ui.OathActivity" />
+        </activity>
+
         <!-- Password manager activity -->
         <activity
             android:name=".ui.PasswordManagementActivity"

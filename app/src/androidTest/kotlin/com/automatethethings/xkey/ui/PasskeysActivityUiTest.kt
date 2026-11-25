@@ -270,7 +270,7 @@ class PasskeysActivityUiTest {
         // is gone before clicking the button.
         onView(withText(R.string.passkey_delete_title)).inRoot(isDialog())
             .check(matches(isDisplayed()))
-        onView(withText(R.string.key_delete_confirm)).inRoot(isDialog()).perform(click())
+        DialogFlowSupport.clickInDialog(R.string.key_delete_confirm)
 
         awaitCondition("Confirmed delete should remove the passkey from Room") {
             runBlocking { keyDao.getByKeyId(deletableKeyId) } == null

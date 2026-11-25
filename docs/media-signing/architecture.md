@@ -1,119 +1,102 @@
 # Media signing architecture
 
-> **Status: REFERENCE** · Last verified: 2026-11-12
-> As-built description of how `MediaSigningService` fits into xKey and the auto-sign flow.
+> **Status: REFERENCE** · Last verified: 2026-11-23
+> How `MediaSigningService` signs new photos and videos as they appear in `MediaStore`.
 
-## Service Layer
+## Parts
 
-### MediaSigningService
+| Part | Where | Job |
+|------|-------|-----|
+| `MediaSigningService` | `media/` | Foreground service that watches `MediaStore` and signs new items |
+| `AutoSignHash` | `media/MediaSigningService.kt` | The content hash the service signs, with a size limit for JPEG |
+| `MediaHasher` | `media/` | SHA-256 hashes: canonical for JPEG, whole-file for anything else |
+| `KeystoreManager.signApproved` | `crypto/` | Signs under the general key alias, checking the public key first |
+| `XmpMetadataHelper.writeSignature` | `media/` | EXIF `UserComment` for a JPEG, a `<path>.xkeysig` sidecar for anything else |
+| `MediaSigningSettingsRepository` | `settings/MediaSigningSettings.kt` | DataStore settings read by the service and the settings screen |
+| `AuditLogger` | `audit/` | `MEDIA_AUTO_SIGNED` on success, a failed key use when a JPEG is too large |
 
-Foreground service that monitors `MediaStore` via `ContentObserver` for new
-photos and videos. When new media is detected, it computes a SHA-256 hash,
-signs it with the configured key via `KeystoreManager.signWithAlgorithm()`,
-and embeds the signature in the file using `XmpMetadataHelper`: EXIF
-`UserComment` for JPEG, an XMP box or chunk for MP4/MOV, PNG and WebP
-(`XmpContainers`); an unsigned one is embedded streaming at any size
-(`XmpContainers.embedFile`). HEIC, MKV, unknown types and a file the embed
-refuses get a `<name>.xkeysig` sidecar, and readers fall back to a sidecar, so files
-signed before embedding still verify. Embedded writes go through a unique,
-exclusively created staging file, serialized per path. See
-[engineering.md](engineering.md#mp4--mov-png-webp-embedded-xmp).
+## Starting and stopping
 
-- Foreground service type: `dataSync`
-- Notification channel: `media_signing_channel`
-- Controlled by `MediaSigningSettings.autoSignEnabled`
+The "Auto-Sign Media" switch in the Media Signing section of `SettingsActivity`
+saves `autoSignEnabled` and then starts the service with
+`startForegroundService` or stops it with `stopService`. Nothing else starts
+the service: there is no boot receiver for it, so after a reboot it stays off
+until the switch is turned on again, even though the setting is still on.
 
-## Activity to Service Communication
+On each `onStartCommand` the service:
 
-### SettingsActivity to MediaSigningService
+1. Calls `startForeground` with type `dataSync` (passed explicitly on API 34
+   and later).
+2. Releases any wake lock and content observers left from an earlier start,
+   so a second start does not leave two sets of observers.
+3. Takes a partial wake lock with a 10-minute limit. It is not renewed.
+4. Registers content observers on `MediaStore.Images.Media.EXTERNAL_CONTENT_URI`
+   and `MediaStore.Video.Media.EXTERNAL_CONTENT_URI`, including descendants.
+5. Returns `START_STICKY`.
 
-| Mechanism | Direction | Purpose |
-|-----------|-----------|---------|
-| `startForegroundService()` | Activity -> Service | Start auto-signing |
-| `stopService()` | Activity -> Service | Stop auto-signing |
-| `MediaSigningSettingsRepository` | Shared | Settings read by both |
+`onDestroy` unregisters the observers, releases the wake lock and cancels
+every signing job still running.
 
-## MediaSigningService to ContentObserver
-
-```mermaid
-sequenceDiagram
-    participant Camera
-    participant MS as MediaStore
-    participant CO as ContentObserver
-    participant Svc as MediaSigningService
-    participant KM as KeystoreManager
-    participant XMP as XmpMetadataHelper
-
-    Camera->>MS: Insert new photo
-    MS->>CO: onChange(uri)
-    CO->>Svc: handleNewMedia(uri, "image")
-    Note over Svc: delay(500ms) for file write completion
-    Svc->>MS: Query file path from URI
-    Svc->>Svc: Hash content via MediaHasher
-    Svc->>KM: signWithAlgorithm(keyId, hash, alg)
-    KM-->>Svc: Signature bytes
-    Svc->>XMP: writeSignature(filePath, data)
-```
-
-## Data Flow: Auto-Sign Media
-
-```mermaid
-graph LR
-    A[Camera] -->|New photo| B[MediaStore]
-    B -->|onChange| C[ContentObserver]
-    C -->|URI| D[MediaSigningService]
-    D -->|Hash| E[MediaHasher]
-    E -->|Hash bytes| F[KeystoreManager]
-    F -->|In hardware| G[Android Keystore]
-    G -->|Signature| F
-    F -->|Signature| D
-    D -->|Write EXIF/XMP| H[XmpMetadataHelper]
-    D -->|Log| I[AuditLogger]
-```
-
-## Auto-Sign a Photo
-
-The user takes a photo with the system camera. The `MediaSigningService`
-detects the new media and automatically signs it in the background.
+## Signing one item
 
 ```mermaid
 sequenceDiagram
-    actor User
-    participant Camera as Camera App
     participant MS as MediaStore
     participant Svc as MediaSigningService
-    participant MH as MediaHasher
+    participant AH as AutoSignHash
     participant KM as KeystoreManager
-    participant HW as TEE / StrongBox
     participant XMP as XmpMetadataHelper
+    participant AL as AuditLogger
 
-    Note over User,Svc: Precondition: Auto-sign enabled in Settings
-
-    User->>Camera: Take photo
-    Camera->>MS: Save JPEG to MediaStore
-
-    MS->>Svc: ContentObserver.onChange(uri)
-    Note over Svc: Debounce: wait 500ms
-
-    Svc->>Svc: Check settings (autoSignEnabled = true)
-    Svc->>Svc: Check media type (signPhotos = true)
-    Svc->>Svc: Get signingKeyId from settings
-
-    Svc->>MH: hashUri(contentResolver, uri)
-    Note over MH: Streaming SHA-256
-    MH-->>Svc: Content hash
-
-    Svc->>KM: signWithAlgorithm(keyId, hashBytes, algorithm)
-    KM->>HW: Sign in hardware (no biometric -- key has authDuration < 0)
-    HW-->>KM: Signature bytes
+    MS->>Svc: onChange(uri)
+    Note over Svc: Skip a URI already signed
+    Svc->>Svc: delay(500 ms)
+    Svc->>Svc: Read settings: autoSignEnabled, signPhotos or signVideos, signingKeyId
+    Svc->>Svc: KeyDao.getByKeyId(signingKeyId)
+    Svc->>AH: contentHashUri(contentResolver, uri)
+    Note over AH: JPEG: canonical hash, refused above 32 MiB<br/>Other: whole-file hash, streamed
+    AH-->>Svc: Content hash (hex)
+    Svc->>KM: publicKeyDERAt(generalKeyAlias(keyId))
+    Svc->>KM: signApproved(alias, publicKeyDer, hashBytes, JCA algorithm)
     KM-->>Svc: Signature
-
-    Svc->>Svc: Build SignatureEntry (role=CREATOR)
-    Svc->>Svc: Build ContentAuthenticityData
-
-    Svc->>MS: Query file path from URI
+    Svc->>Svc: SignatureEntry(role CREATOR), fingerprint = SHA-256(publicKeyDer)
+    Svc->>MS: Query the DATA column for a file path
     Svc->>XMP: writeSignature(filePath, data)
-    Note over XMP: JPEG: EXIF TAG_USER_COMMENT<br/>MP4/MOV, PNG, WebP: XMP box or chunk
-
-    Note over User: User opens photo later in Verified Viewer<br/>and sees green verification badge
+    Svc->>AL: logMediaAutoSigned(keyId, label, uri)
 ```
+
+The service returns without signing, and without an audit entry, when:
+
+- auto-sign is off, or the item's type (photo or video) is switched off;
+- no signing key is set, or the key's row is gone;
+- `MediaStore` gives no file path for the URI. The URI is not marked as
+  done, so a later change event for it tries again.
+
+A JPEG over 32 MiB is refused. The service logs a failed
+`media_auto_sign` key use in the audit log and marks the URI as done. Any
+other exception, a missing Keystore key included, is written to logcat and
+the item stays unsigned.
+
+The key signs with no prompt. `signApproved` checks that the public key under
+the alias is the one it just read and holds the alias gate while it signs;
+see [co-signing](../co-signing/architecture.md). A key that needs user
+authentication for each use cannot sign from the background, so such a key
+leaves new media unsigned.
+
+## Where the signature goes
+
+`XmpMetadataHelper.writeSignature` picks the storage from the file path's
+extension:
+
+| Extension | Storage |
+|-----------|---------|
+| `.jpg`, `.jpeg` | EXIF `UserComment` = `XKEY_SIG:` + JSON, written with `ExifInterface.saveAttributes` |
+| Anything else (PNG, WebP, HEIC, MP4, MOV, MKV and others) | A `<path>.xkeysig` JSON file next to the media |
+
+The hash the service stores is the one each place can be checked against
+later. For a JPEG it is the canonical hash, which skips the `APPn` and `COM`
+segments, so writing the EXIF block does not change it. For anything else it
+is the whole-file hash, which the sidecar leaves untouched.
+
+Both are written through a plain file path, so the service needs write access
+to the file the camera app created.

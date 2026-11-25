@@ -105,23 +105,49 @@ enum class PivSlot(val hexId: String, val label: String, val description: String
     }
 }
 
-/**
- * Cryptographic algorithms supported for PIV key generation.
- *
- * Maps PIV algorithm identifiers to Android Keystore parameters for
- * key generation and signing operations.
- *
- * @property displayName Human-readable algorithm name for UI display.
- * @property keyAlgorithm The JCA key algorithm name (e.g., "EC", "RSA").
- * @property keySizeBits The key size in bits.
- */
-enum class PivAlgorithm(val displayName: String, val keyAlgorithm: String, val keySizeBits: Int) {
+enum class PivAlgorithm(
+    val displayName: String,
+    val keyAlgorithm: String,
+    val keySizeBits: Int,
+    val pivAlgorithmId: Int
+) {
+    // Algorithm ids: NIST SP 800-78 (Table 6-2: RSA 2048 0x07, RSA 3072
+    // 0x05, ECC P-256 0x11, ECC P-384 0x14) and the YubiKey PIV extension
+    // for RSA 4096 (0x16, Yubico PIV algorithm table, firmware 5.7).
+
     /** ECDSA with NIST P-256 curve. */
-    ES256("ECDSA P-256", "EC", 256),
+    ES256("ECDSA P-256", "EC", 256, 0x11),
 
     /** ECDSA with NIST P-384 curve. */
-    ES384("ECDSA P-384", "EC", 384),
+    ES384("ECDSA P-384", "EC", 384, 0x14),
 
     /** RSA with 2048-bit key. */
-    RS2048("RSA 2048", "RSA", 2048);
+    RS2048("RSA 2048", "RSA", 2048, 0x07),
+
+    /** RSA with 3072-bit key. */
+    RS3072("RSA 3072", "RSA", 3072, 0x05),
+
+    /** RSA with 4096-bit key. */
+    RS4096("RSA 4096", "RSA", 4096, 0x16);
+
+    companion object {
+        /**
+         * The algorithm a peer names: an enum name, the desktop's spellings
+         * ("ECCP256", "RSA3072") or the dashed ones ("ECDSA-P256",
+         * "RSA-4096"). Case and `_`/`-` do not matter. Null for any other
+         * name; callers refuse it, never default it.
+         */
+        fun fromWireName(name: String): PivAlgorithm? {
+            if (name.isBlank()) return null
+            entries.firstOrNull { it.name == name }?.let { return it }
+            return when (name.trim().uppercase().replace("_", "-")) {
+                "ES256", "ECDSA-P256", "EC-P256", "P256", "ECCP256", "ECC-P256" -> ES256
+                "ES384", "ECDSA-P384", "EC-P384", "P384", "ECCP384", "ECC-P384" -> ES384
+                "RS2048", "RSA-2048", "RSA2048" -> RS2048
+                "RS3072", "RSA-3072", "RSA3072" -> RS3072
+                "RS4096", "RSA-4096", "RSA4096" -> RS4096
+                else -> null
+            }
+        }
+    }
 }

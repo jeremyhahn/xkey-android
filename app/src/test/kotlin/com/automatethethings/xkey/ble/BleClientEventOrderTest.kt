@@ -39,7 +39,7 @@ import org.junit.Test
 
 /**
  * The client, as BLE central, handles a notification and the stack's
- * disconnect in the order they arrived (#63): a reply the desktop notified
+ * disconnect in the order they arrived: a reply the desktop notified
  * before it disconnected reaches its request, and only then is a request
  * still waiting woken.
  *

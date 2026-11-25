@@ -1233,10 +1233,12 @@ class FileOperationActivity : AppCompatActivity() {
                 )
 
                 // Determine if we can embed in EXIF or need sidecar
-                val mimeType = contentResolver.getType(uri) ?: ""
+                // Content that starts like a JPEG is one whatever the resolver says.
+                val mimeType = if (MediaHasher.isJpegUri(applicationContext, uri)) MediaHasher.JPEG_MIME_TYPE
+                else contentResolver.getType(uri) ?: ""
                 val fileName = getFileName(uri) ?: "file"
 
-                val jpeg = MediaHasher.isCanonicalisedJpeg(mimeType)
+                val jpeg = MediaHasher.isJpeg(mimeType)
                 if (jpeg || sharedSigning(uri, mimeType) == XmpMetadataHelper.SharedSigning.SIGNED_COPY) {
                     // An embedded signature: EXIF for a JPEG, XMP replacing the
                     // one a PNG, WebP or video carries (readers prefer it to a

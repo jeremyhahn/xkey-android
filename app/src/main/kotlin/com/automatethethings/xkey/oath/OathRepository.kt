@@ -15,9 +15,12 @@
 package com.automatethethings.xkey.oath
 
 import android.net.Uri
+import android.util.Log
+import com.automatethethings.xkey.audit.AuditLogger
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import java.net.URLEncoder
+import java.security.MessageDigest
 import java.util.UUID
 
 /**
@@ -30,12 +33,34 @@ import java.util.UUID
  * @property credential The underlying OATH credential entity.
  * @property code The current one-time password code string.
  * @property secondsRemaining Seconds until the current TOTP code expires (0 for HOTP).
+ * @property codeError True when no code could be computed for this row (its
+ *           secret cannot be decrypted, or a stored field the engine refuses);
+ *           [code] is then [OathRepository.NO_CODE].
  */
 data class OathCredentialWithCode(
     val credential: OathCredentialEntity,
     val code: String,
-    val secondsRemaining: Int
+    val secondsRemaining: Int,
+    val codeError: Boolean = false
 )
+
+/** What [OathRepository.upsertStructured] did with one synced item. */
+enum class SyncMergeOutcome {
+    /** No row had the id: one was added. */
+    ADDED,
+
+    /** A row had the id: it was updated in place. */
+    UPDATED,
+
+    /** The id was deleted on the phone: nothing was written. */
+    DELETED,
+
+    /**
+     * A row had the id with other key material (secret, type, algorithm,
+     * digits or period): nothing was written and an audit entry names the id.
+     */
+    CONFLICT
+}
 
 /**
  * The `otpauth://` URI ([Key Uri Format](https://github.com/google/google-authenticator/wiki/Key-Uri-Format))
@@ -196,7 +221,11 @@ class OathRepository(
      * @param uri The `otpauth://` URI string to parse.
      * @return The generated unique oath identifier for the imported credential.
      * @throws IllegalArgumentException if the URI scheme is not `otpauth`,
-     *         the type is not `totp` or `hotp`, or the `secret` parameter is missing.
+     *         the type is not `totp` or `hotp`, the `secret` parameter is missing,
+     *         not Base32 or under 80 bits, the algorithm is not SHA1, SHA256 or
+     *         SHA512, digits is not 6 to 8, or a TOTP period is not a positive
+     *         number of seconds (an HOTP period is ignored).
+     *         The message never carries the secret.
      */
     suspend fun importFromUri(uri: String): String = importParsed(uri, structuredLabel = false)
 
@@ -238,7 +267,158 @@ class OathRepository(
         return importParsed(uri, structuredLabel = true)
     }
 
+    /**
+     * Merge a credential a paired peer synced, under the peer's [oathId]: the
+     * one entry point that turns a synced item into an OATH row. The fields
+     * are decoded and validated as [importStructured] does them. While no
+     * row has [oathId] one is added under it. A row with other key material
+     * (secret, type, algorithm, digits or period) is a conflict: the wire
+     * item carries no timestamp, so nothing is written and an audit entry
+     * names the id. Otherwise the row's label is updated in place
+     * ([OathCredentialDao.updateSynced]), keeping its primary key,
+     * creation time and usage statistics, with the HOTP counter the larger
+     * of the stored one and [counter]. Merging the same item again therefore
+     * never adds a second row. An id deleted on the phone
+     * ([deleteCredential]) is never added back: the deletion check and each
+     * insert run in one DAO transaction
+     * ([OathCredentialDao.insertIfAbsentUnlessDeleted]), and a row still
+     * stored under a deleted id is removed.
+     *
+     * @return what the merge did with the item ([SyncMergeOutcome]).
+     * @throws IllegalArgumentException if [oathId] is blank or the fields are
+     *         invalid (for example a secret that is not Base32); nothing is written.
+     */
+    suspend fun upsertStructured(
+        oathId: String,
+        type: String,
+        issuer: String?,
+        accountName: String,
+        secret: String,
+        algorithm: String = "SHA1",
+        digits: Int = 6,
+        period: Int = 30,
+        counter: Long? = null
+    ): SyncMergeOutcome {
+        require(oathId.isNotBlank()) { "Missing OATH credential id" }
+        // A row an interrupted merge left beside the deletion record goes too, in the same transaction.
+        if (dao.removeIfDeleted(oathId)) return SyncMergeOutcome.DELETED
+        val otpType = type.lowercase()
+        val parsed = parseOathUri(
+            otpauthUri(
+                type = otpType,
+                issuer = issuer,
+                accountName = accountName,
+                secret = secret,
+                algorithm = algorithm,
+                digits = digits,
+                period = period,
+                counter = if (otpType == "hotp") counter ?: 0L else null
+            ),
+            structuredLabel = true
+        )
+        val encryptedSecret = secretManager.encryptSecret(parsed.secret)
+        val entity = OathCredentialEntity(
+            oathId = oathId,
+            oathType = parsed.type,
+            algorithm = parsed.algorithm,
+            digits = parsed.digits,
+            periodSeconds = parsed.periodSeconds,
+            counter = parsed.counter,
+            issuer = parsed.issuer,
+            accountName = parsed.accountName,
+            secretEncrypted = encryptedSecret,
+            source = "local",
+            createdAt = System.currentTimeMillis()
+        )
+        // Never REPLACE: that deletes the row and inserts a new one, losing its usage statistics.
+        // The deletion check and the insert are one transaction: a delete cannot land between them.
+        insertedUnlessDeleted(entity)?.let { return it }
+        val stored = dao.getByOathId(oathId)
+        if (stored != null && !sameKeyMaterial(stored, entity, parsed.secret)) {
+            // The wire item has no timestamp to say which copy is newer: the phone's key material is kept.
+            AuditLogger.logOathSyncConflict(oathId)
+            return SyncMergeOutcome.CONFLICT
+        }
+        val updated = dao.updateSynced(
+            oathId = oathId,
+            counter = entity.counter,
+            issuer = entity.issuer,
+            accountName = entity.accountName
+        )
+        if (updated > 0) return SyncMergeOutcome.UPDATED
+        // Gone between the insert and the update: added again only if the phone did not delete it.
+        return insertedUnlessDeleted(entity) ?: SyncMergeOutcome.UPDATED
+    }
+
+    /**
+     * Add [entity] through [OathCredentialDao.insertIfAbsentUnlessDeleted]:
+     * [SyncMergeOutcome.ADDED] or [SyncMergeOutcome.DELETED], or null when a
+     * row already has its oath id and nothing was written.
+     */
+    private suspend fun insertedUnlessDeleted(entity: OathCredentialEntity): SyncMergeOutcome? =
+        when (dao.insertIfAbsentUnlessDeleted(entity)) {
+            OATH_KEPT_DELETED -> SyncMergeOutcome.DELETED
+            -1L -> null
+            else -> SyncMergeOutcome.ADDED
+        }
+
+    /**
+     * True if [stored] has the same secret, type, algorithm, digits and
+     * period as [incoming] (whose plain secret is [incomingSecret]). A
+     * stored secret that cannot be decrypted counts as different, so the
+     * merge never replaces it.
+     */
+    private fun sameKeyMaterial(
+        stored: OathCredentialEntity,
+        incoming: OathCredentialEntity,
+        incomingSecret: ByteArray
+    ): Boolean {
+        if (!stored.oathType.equals(incoming.oathType, ignoreCase = true) ||
+            !stored.algorithm.equals(incoming.algorithm, ignoreCase = true) ||
+            stored.digits != incoming.digits ||
+            stored.periodSeconds != incoming.periodSeconds
+        ) {
+            return false
+        }
+        val storedSecret = try {
+            secretManager.decryptSecret(stored.secretEncrypted)
+        } catch (e: Exception) {
+            return false
+        }
+        return try {
+            MessageDigest.isEqual(storedSecret, incomingSecret)
+        } finally {
+            storedSecret.fill(0)
+        }
+    }
+
     private suspend fun importParsed(uri: String, structuredLabel: Boolean): String {
+        val parsed = parseOathUri(uri, structuredLabel)
+        return addCredential(
+            issuer = parsed.issuer,
+            accountName = parsed.accountName,
+            secret = parsed.secret,
+            type = parsed.type,
+            algorithm = parsed.algorithm,
+            digits = parsed.digits,
+            periodSeconds = parsed.periodSeconds,
+            counter = parsed.counter
+        )
+    }
+
+    /** The decoded fields of an `otpauth://` URI, as [parseOathUri] reads them. */
+    private class ParsedOath(
+        val issuer: String?,
+        val accountName: String,
+        val secret: ByteArray,
+        val type: String,
+        val algorithm: String,
+        val digits: Int,
+        val periodSeconds: Int,
+        val counter: Long
+    )
+
+    private fun parseOathUri(uri: String, structuredLabel: Boolean): ParsedOath {
         val parsed = Uri.parse(uri)
 
         require(parsed.scheme == "otpauth") {
@@ -265,12 +445,27 @@ class OathRepository(
             "Missing required 'secret' query parameter"
         }
         val secret = base32Decode(secretBase32)
+        // Never name the secret here: the message reaches the UI and logs.
+        require(secret.size >= MIN_SECRET_BYTES) {
+            "Secret is too short: ${secret.size} bytes decoded, at least $MIN_SECRET_BYTES required"
+        }
 
         // Optional parameters with defaults
         val issuer = parsed.getQueryParameter("issuer") ?: labelIssuer
         val algorithm = parsed.getQueryParameter("algorithm")?.uppercase() ?: "SHA1"
         val digits = parsed.getQueryParameter("digits")?.toIntOrNull() ?: 6
         val periodSeconds = parsed.getQueryParameter("period")?.toIntOrNull() ?: 30
+        // A value OathEngine cannot compute a code from would be stored and
+        // then fail on every tick of the list, so it is refused here.
+        require(algorithm in SUPPORTED_ALGORITHMS) {
+            "Unsupported algorithm: expected SHA1, SHA256 or SHA512"
+        }
+        require(digits in SUPPORTED_DIGITS) { "Unsupported digits: $digits, expected 6 to 8" }
+        // HOTP ignores the period; TOTP needs a positive one, as
+        // OathEngine.generateTotpCode requires.
+        require(type != "TOTP" || periodSeconds > 0) {
+            "Unsupported period: $periodSeconds seconds, expected a positive number of seconds"
+        }
 
         // The HOTP counter is part of the credential, not an update applied
         // after it: a credential inserted at counter 0 and only afterwards
@@ -284,7 +479,7 @@ class OathRepository(
             0L
         }
 
-        return addCredential(
+        return ParsedOath(
             issuer = issuer,
             accountName = accountName,
             secret = secret,
@@ -301,36 +496,80 @@ class OathRepository(
      *
      * For TOTP credentials, computes the code based on the current system time.
      * For HOTP credentials, computes the code using the stored counter value
-     * and automatically increments the counter after generation.
+     * and advances the counter by compare-and-set
+     * ([OathCredentialDao.claimCounter]): when the counter moved since it
+     * was read (a sync raised it, or another code took it), that code is
+     * discarded and the row read again, so no code is ever returned for a
+     * counter that is not the one the store moved past, and a counter a
+     * sync raised is never rewound.
      *
      * Records the usage timestamp and increments the use count in the database.
      *
      * @param oathId The unique identifier of the OATH credential.
      * @return The generated OTP code string, zero-padded to the configured digit length.
      * @throws NoSuchElementException if no credential exists with the given [oathId].
+     * @throws OathCounterExhaustedException if the HOTP counter is at
+     *         [HOTP_COUNTER_MAX]: no further code exists for it.
+     * @throws IllegalStateException if an HOTP claim fails while the stored
+     *         counter has not moved past the value tried.
      */
     suspend fun generateCode(oathId: String): String {
-        val credential = dao.getByOathId(oathId)
+        var credential = dao.getByOathId(oathId)
             ?: throw NoSuchElementException("No OATH credential found with oathId: $oathId")
 
-        val secret = secretManager.decryptSecret(credential.secretEncrypted)
-
         val code = when (credential.oathType) {
-            "TOTP" -> OathEngine.generateTotpCode(
-                secret = secret,
-                algorithm = credential.algorithm,
-                digits = credential.digits,
-                periodSeconds = credential.periodSeconds
-            )
+            "TOTP" -> {
+                val secret = secretManager.decryptSecret(credential.secretEncrypted)
+                try {
+                    OathEngine.generateTotpCode(
+                        secret = secret,
+                        algorithm = credential.algorithm,
+                        digits = credential.digits,
+                        periodSeconds = credential.periodSeconds
+                    )
+                } finally {
+                    secret.fill(0)
+                }
+            }
             "HOTP" -> {
-                val hotpCode = OathEngine.generateHotpCode(
-                    secret = secret,
-                    counter = credential.counter,
-                    algorithm = credential.algorithm,
-                    digits = credential.digits
-                )
-                // Increment the HOTP counter after successful generation
-                dao.updateCounter(oathId, credential.counter + 1)
+                // A code is handed out only once its counter value is claimed
+                // (compare-and-set, one statement): two callers that read the
+                // same counter (a desktop generate and a phone tap) cannot
+                // both claim it, and a sync that raised the counter makes the
+                // claim fail, so the loser re-reads and takes the current
+                // value. The code is computed before the claim, so a decrypt
+                // or engine failure never burns a counter value. A retry
+                // happens only when the counter moved on; otherwise the claim
+                // could fail forever on the same value.
+                if (credential.counter == HOTP_COUNTER_MAX) {
+                    throw OathCounterExhaustedException(oathId)
+                }
+                var hotpCode: String
+                while (true) {
+                    val tried = credential.counter
+                    val secret = secretManager.decryptSecret(credential.secretEncrypted)
+                    hotpCode = try {
+                        OathEngine.generateHotpCode(
+                            secret = secret,
+                            counter = tried,
+                            algorithm = credential.algorithm,
+                            digits = credential.digits
+                        )
+                    } finally {
+                        secret.fill(0)
+                    }
+                    if (dao.claimCounter(oathId, tried) > 0) break
+                    credential = dao.getByOathId(oathId)
+                        ?: throw NoSuchElementException("No OATH credential found with oathId: $oathId")
+                    if (credential.counter == HOTP_COUNTER_MAX) {
+                        throw OathCounterExhaustedException(oathId)
+                    }
+                    if (credential.counter <= tried) {
+                        throw IllegalStateException(
+                            "HOTP counter claim failed without progress for OATH credential $oathId"
+                        )
+                    }
+                }
                 hotpCode
             }
             else -> throw IllegalStateException(
@@ -338,7 +577,14 @@ class OathRepository(
             )
         }
 
-        dao.recordUsage(oathId, System.currentTimeMillis())
+        // The HOTP counter is already claimed, so a failed usage record must not discard the code.
+        try {
+            dao.recordUsage(oathId, System.currentTimeMillis())
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "Usage record failed for OATH credential $oathId: ${e.javaClass.simpleName}")
+        }
 
         return code
     }
@@ -358,53 +604,51 @@ class OathRepository(
      */
     fun observeAll(): Flow<List<OathCredentialWithCode>> {
         return dao.observeAll().map { credentials ->
-            credentials.map { credential ->
-                val secret = secretManager.decryptSecret(credential.secretEncrypted)
-                val now = System.currentTimeMillis()
+            credentials.map(::withCode)
+        }
+    }
 
-                val code = when (credential.oathType) {
-                    "TOTP" -> OathEngine.generateTotpCode(
-                        secret = secret,
-                        algorithm = credential.algorithm,
-                        digits = credential.digits,
-                        periodSeconds = credential.periodSeconds,
-                        timeMs = now
-                    )
-                    "HOTP" -> OathEngine.generateHotpCode(
-                        secret = secret,
-                        counter = credential.counter,
-                        algorithm = credential.algorithm,
-                        digits = credential.digits
-                    )
-                    else -> "------"
-                }
-
-                val secondsRemaining = if (credential.oathType == "TOTP") {
-                    val elapsed = (now / 1000L) % credential.periodSeconds.toLong()
-                    credential.periodSeconds - elapsed.toInt()
-                } else {
-                    0
-                }
-
+    /**
+     * The row with its current code ([OathCurrentCode]). One row whose code
+     * cannot be computed (an invalidated Keystore key, a stored value the
+     * engine refuses) must not take the whole list down: it is shown without
+     * a code and can still be deleted.
+     */
+    private fun withCode(credential: OathCredentialEntity): OathCredentialWithCode =
+        when (val current = OathCurrentCode.currentCode(
+            credential,
+            { secretManager.decryptSecret(it.secretEncrypted) },
+            System.currentTimeMillis()
+        )) {
+            is OathCurrentCode.Available -> OathCredentialWithCode(
+                credential = credential,
+                code = current.code,
+                secondsRemaining = current.secondsLeft ?: 0
+            )
+            OathCurrentCode.Unavailable -> {
+                Log.w(TAG, "No code for OATH row ${credential.oathId}")
                 OathCredentialWithCode(
                     credential = credential,
-                    code = code,
-                    secondsRemaining = secondsRemaining
+                    code = NO_CODE,
+                    secondsRemaining = 0,
+                    codeError = true
                 )
             }
         }
-    }
 
     /**
      * Delete an OATH credential by its unique identifier.
      *
      * Removes the credential and its encrypted secret from the database.
-     * This operation is irreversible.
+     * This operation is irreversible. The id is recorded and the row deleted
+     * in one transaction ([OathCredentialDao.deleteAndRecordDeletion]), so
+     * a sync merge running at the same time, or any later one, never adds
+     * the credential back, and no interruption leaves one without the other.
      *
      * @param oathId The unique identifier of the credential to delete.
      */
     suspend fun deleteCredential(oathId: String) {
-        dao.deleteByOathId(oathId)
+        dao.deleteAndRecordDeletion(oathId, System.currentTimeMillis())
     }
 
     /**
@@ -426,10 +670,30 @@ class OathRepository(
 
     companion object {
 
+        private const val TAG = "OathRepository"
+
+        /** What a row shows in place of a code it cannot compute. */
+        const val NO_CODE = "------"
+
+        /**
+         * The last HOTP counter value: no code is computed at it, and
+         * [OathCredentialDao.claimCounter] never advances past it.
+         */
+        const val HOTP_COUNTER_MAX = Long.MAX_VALUE
+
         /**
          * RFC 4648 Base32 alphabet (A-Z, 2-7).
          */
         private const val BASE32_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
+
+        /** RFC 4226 section 4 R6: a shared secret of at least 128 bits is recommended, 80 required. */
+        private const val MIN_SECRET_BYTES = 10
+
+        /** The HMAC algorithms [OathEngine] computes. */
+        private val SUPPORTED_ALGORITHMS = setOf("SHA1", "SHA256", "SHA512")
+
+        /** The code lengths [OathEngine] computes. */
+        private val SUPPORTED_DIGITS = 6..8
 
         /**
          * Decode a Base32-encoded string to raw bytes.
@@ -508,3 +772,11 @@ class OathRepository(
         private val CONFUSABLE_DIGITS = mapOf('0' to 'O', '1' to 'L', '8' to 'B')
     }
 }
+
+/**
+ * The HOTP counter of [oathId] is at [OathRepository.HOTP_COUNTER_MAX]: the
+ * credential is kept, but no further code can be generated for it. The text
+ * names only the id, never a secret or a code.
+ */
+class OathCounterExhaustedException(oathId: String) :
+    IllegalStateException("HOTP counter exhausted for OATH credential $oathId")

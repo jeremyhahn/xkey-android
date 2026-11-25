@@ -115,7 +115,7 @@ class CoSignMediaPickerTest {
     @Test
     fun `every offered type has its own embedded container`() {
         for (type in XmpMetadataHelper.EMBEDDED_MIME_TYPES) {
-            assertTrue(type, MediaHasher.isCanonicalisedJpeg(type) || XmpContainers.formatOf(type) != null)
+            assertTrue(type, MediaHasher.isJpeg(type) || XmpContainers.formatOf(type) != null)
             assertTrue(type, XmpMetadataHelper.stagingSuffix(type) !in setOf(".bin", ".mkv"))
         }
     }

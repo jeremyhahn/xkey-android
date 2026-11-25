@@ -28,6 +28,8 @@ import com.automatethethings.xkey.pin.LockoutStatus
 import com.automatethethings.xkey.pin.PinHasher
 import com.automatethethings.xkey.pin.PinLockedException
 import com.automatethethings.xkey.pin.PinManager
+import com.automatethethings.xkey.settings.DeviceLookup
+import com.automatethethings.xkey.settings.PairedDeviceRepository
 import com.automatethethings.xkey.settings.PinSettingsData
 import com.automatethethings.xkey.settings.PinSettingsRepository
 import com.automatethethings.xkey.storage.XKeyDatabase
@@ -46,6 +48,7 @@ import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -89,7 +92,7 @@ class PinOathHandlerErrorsTest {
         every { Looper.getMainLooper() } returns mockk(relaxed = true)
 
         mockkObject(AuditLogger)
-        every { AuditLogger.logOathCredentialDeleted(any(), any(), any()) } returns Unit
+        every { AuditLogger.logOathCredentialDeleted(any(), any(), any(), any(), any()) } returns Unit
 
         oathDao = mockk(relaxed = true)
         val database = mockk<XKeyDatabase>(relaxed = true)
@@ -115,9 +118,18 @@ class PinOathHandlerErrorsTest {
         keystoreManager = mockk<KeystoreManager>(relaxed = true),
         biometricLauncher = null,
         sessionAuthManager = null,
-        pairedDeviceRepository = null,
+        pairedDeviceRepository = pairedDevices(),
         pinManager = pins
     )
+
+    /** Key use is served only to a paired peer; [PEER] is paired with no attestation required. */
+    private fun pairedDevices(): PairedDeviceRepository {
+        val repo = mockk<PairedDeviceRepository>()
+        every { repo.lookupDevice(PEER) } returns DeviceLookup.Paired(
+            mockk(relaxed = true) { every { requireAttestationForKeyUse } returns false }
+        )
+        return repo
+    }
 
     /**
      * Serves the handler from a real [PinManager] over [settings], so a test
@@ -367,8 +379,9 @@ class PinOathHandlerErrorsTest {
 
         assertFalse(response.has("error"))
         assertFalse(response.getJSONObject("result").getBoolean("deleted"))
+        coVerify(exactly = 0) { oathDao.deleteAndRecordDeletion(any(), any()) }
         coVerify(exactly = 0) { oathDao.deleteByOathId(any()) }
-        verify(exactly = 0) { AuditLogger.logOathCredentialDeleted(any(), any(), any()) }
+        verify(exactly = 0) { AuditLogger.logOathCredentialDeleted(any(), any(), any(), any(), any()) }
     }
 
     @Test
@@ -378,12 +391,18 @@ class PinOathHandlerErrorsTest {
         val response = call(MethodNames.LOCAL_OATH_REMOVE, """{"credential_id":"known"}""")
 
         assertEquals(true, response.getJSONObject("result").getBoolean("deleted"))
-        coVerify { oathDao.deleteByOathId("known") }
+        // Recorded and deleted in one DAO transaction, never as two statements.
+        coVerify { oathDao.deleteAndRecordDeletion("known", any()) }
+        coVerify(exactly = 0) { oathDao.recordDeletion(any(), any()) }
     }
 
     private suspend fun call(method: String, params: String): JSONObject {
         val request = """{"id":1,"method":"$method","params":$params}"""
-        return JSONObject(String(handler.handleRawRequest(request.toByteArray(Charsets.UTF_8)), Charsets.UTF_8))
+        val binding = SessionBindingProvider { SessionBinding(ByteArray(32) { 3 }, ByteArray(32) { 4 }, ByteArray(0)) }
+        val raw = withContext(RequestHandler.servedConnection(binding, PEER, "test:connection")) {
+            handler.handleRawRequest(request.toByteArray(Charsets.UTF_8))
+        }
+        return JSONObject(String(raw, Charsets.UTF_8))
     }
 
     /**
@@ -405,5 +424,6 @@ class PinOathHandlerErrorsTest {
         /** Any stored hash and salt: [PinHasher.verifyPin] is mocked. */
         const val HASH = "AAAA"
         const val SALT = "AAAA"
+        const val PEER = "aa01"
     }
 }

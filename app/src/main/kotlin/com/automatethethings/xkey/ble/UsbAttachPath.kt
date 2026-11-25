@@ -28,7 +28,7 @@ import kotlinx.coroutines.Job
  * [UsbAccessoryServerSlot.states], installed on the first attach and kept
  * until [scope] ends, follows whichever server the slot holds. No attach
  * installs or cancels an observer of its own, so an attach that resumes late
- * cannot replace the observer of the server that now holds the slot (#134).
+ * cannot replace the observer of the server that now holds the slot.
  *
  * @param afterOpen Runs between the open returning and the session refresh;
  *   tests use it to pause one attach while another runs.

@@ -43,7 +43,8 @@ object MediaHasher {
      * [hashCanonical] over the content at [uri], hashed streaming
      * ([hashStreamed]) so media of any size is signed. The mime type comes
      * from the resolver, so a JPEG is recognised whether it arrived as a file
-     * or a document URI. It reads the original bytes, as the capture signer
+     * or a document URI. Content that starts like a JPEG ([isJpeg]) is one whatever
+     * the resolver says. It reads the original bytes, as the capture signer
      * does ([MediaPublisher.openOriginal]): without location access a
      * MediaStore item throws [MediaPublisher.OriginalUnavailableException].
      * The provider's open is passed [cancel]: a screen hashes inside
@@ -97,7 +98,7 @@ object MediaHasher {
      * [MediaPlan.MAX_PIECES] pieces throws [MediaTooFragmentedException].
      */
     private fun canonicalPlan(source: ByteSource, mimeType: String?): MediaPlan? {
-        if (isCanonicalisedJpeg(mimeType)) return jpegPlan(source)
+        if (isJpeg(mimeType)) return jpegPlan(source)
         val format = XmpContainers.formatOf(mimeType) ?: return null
         return XmpContainers.stripPlan(source, format)
     }
@@ -175,17 +176,17 @@ object MediaHasher {
     private fun hex(bytes: ByteArray): String = bytes.joinToString("") { "%02x".format(it) }
 
     /**
-     * [hashStreamed] over the original bytes at [uri], typed by the resolver:
+     * [hashStreamed] over the original bytes at [uri], typed by the resolver
+     * or by its JPEG bytes:
      * the one read every verification and co-signing hash shares with the
      * signer ([MediaPublisher.openOriginal]), never MediaStore's redacted view.
      */
     private fun hashStreamedUri(context: Context, uri: Uri, cancel: CancellationSignal? = null): StreamedHashes {
         if (MediaPublisher.originalUri(context, uri) == null) throw MediaPublisher.OriginalUnavailableException(uri)
-        return hashStreamed(
-            { MediaPublisher.openOriginal(context, uri, cancel) },
-            context.contentResolver.getType(uri),
-            MediaPublisher.recoveryDirectory(context)
-        )
+        val type = context.contentResolver.getType(uri)
+        return withSnapshot({ MediaPublisher.openOriginal(context, uri, cancel) }, MediaPublisher.recoveryDirectory(context)) { snapshot, whole ->
+            canonicalOf(snapshot, sniffedType(snapshot, type), whole)
+        }
     }
 
     /** A signature embedded in media and the check of its content hash, both from one read. */
@@ -196,30 +197,82 @@ object MediaHasher {
      * [mimeType], and the check of its content hash, both read from one
      * snapshot of the original ([withSnapshot]): the signature checked is the
      * one in the bytes hashed. Null when the media carries none, and without
-     * a read for a type that carries no in-band signature. Without location
+     * a read for a type that carries no in-band signature; untyped media is
+     * read and is a JPEG when its first bytes say so. Without location
      * access it throws [MediaPublisher.OriginalUnavailableException]. The
      * provider's open is passed [cancel]: a screen checks inside
      * [MediaPublisher.readCancellable] and passes its signal.
      */
     fun checkInBandUri(context: Context, uri: Uri, mimeType: String?, cancel: CancellationSignal? = null): InBandCheck? {
-        val type = mimeType ?: ""
-        val jpeg = type.startsWith("image/jpeg") || type.startsWith("image/jpg")
-        if (!jpeg && XmpContainers.formatOf(type) == null) return null
+        val untyped = XmpMetadataHelper.isUntyped(mimeType)
+        if (!isJpeg(mimeType) && XmpContainers.formatOf(mimeType.orEmpty()) == null && !untyped) return null
         if (MediaPublisher.originalUri(context, uri) == null) throw MediaPublisher.OriginalUnavailableException(uri)
         return withSnapshot({ MediaPublisher.openOriginal(context, uri, cancel) }, MediaPublisher.recoveryDirectory(context)) { snapshot, whole ->
-            val data = XmpMetadataHelper.readSignatureFromSnapshot(snapshot, mimeType) ?: return@withSnapshot null
-            InBandCheck(data, contentHashCheck(canonicalOf(snapshot, mimeType, whole), data.contentHash, SignatureSource.IN_BAND))
+            val type = sniffedType(snapshot, mimeType)
+            val data = XmpMetadataHelper.readSignatureFromSnapshot(snapshot, type) ?: return@withSnapshot null
+            InBandCheck(data, contentHashCheck(canonicalOf(snapshot, type, whole), data.contentHash, SignatureSource.IN_BAND))
         }
     }
 
+    /** [mimeType], or the JPEG type when [isJpeg] says [file] is a JPEG by its first bytes. */
+    internal fun sniffedType(file: File, mimeType: String?): String? =
+        if (isJpeg(mimeType, head = readHead(file.path))) JPEG_MIME_TYPE else mimeType
+
+    /** The type a file [isJpeg] says is a JPEG is hashed and signed as. */
+    const val JPEG_MIME_TYPE = "image/jpeg"
+
+    /** How many leading bytes [isJpeg] needs to recognise a JPEG by content. */
+    const val JPEG_HEAD_SIZE = 3
+
     /**
-     * Whether [hashCanonical] strips JPEG metadata for [mimeType]. Otherwise it
-     * hashes the file whole, less only an embedded xKey XMP box or chunk.
+     * The one JPEG classifier: every decision over a JPEG's hash or where its
+     * signature lives goes through it.
+     *
+     * A file is a JPEG when its type says image/jpeg (or image/jpg), its name
+     * ends `.jpg` or `.jpeg`, or its content starts with the JPEG SOI bytes
+     * `FF D8 FF`. A resolver often types a capture application/octet-stream
+     * or not at all, so the type alone misses JPEGs. Calling a non-JPEG a JPEG
+     * is safe: [canonicalContent] returns content without the SOI unchanged.
      */
-    fun isCanonicalisedJpeg(mimeType: String?): Boolean {
+    fun isJpeg(mimeType: String?, name: String? = null, head: ByteArray? = null): Boolean {
         val type = mimeType.orEmpty().lowercase()
-        return type.startsWith("image/jpeg") || type.startsWith("image/jpg")
+        if (type.startsWith(JPEG_MIME_TYPE) || type.startsWith("image/jpg")) return true
+        val lowerName = name.orEmpty().lowercase()
+        if (lowerName.endsWith(".jpg") || lowerName.endsWith(".jpeg")) return true
+        return head != null && head.size >= JPEG_HEAD_SIZE &&
+            byteAt(head, 0) == 0xFF && byteAt(head, 1) == 0xD8 && byteAt(head, 2) == 0xFF
     }
+
+    /** [isJpeg] for the file at [path], by its name and its first bytes. */
+    fun isJpegFile(path: String): Boolean = isJpeg(null, path, readHead(path))
+
+    fun isJpegUri(context: Context, uri: Uri): Boolean {
+        if (isJpeg(context.contentResolver.getType(uri))) return true
+        val head = runCatching {
+            MediaPublisher.openOriginal(context, uri).use { readFully(it, JPEG_HEAD_SIZE) }
+        }.getOrNull()
+        return isJpeg(null, head = head)
+    }
+
+    /** Up to the first [JPEG_HEAD_SIZE] bytes of the file at [path]; null if unreadable. */
+    private fun readHead(path: String): ByteArray? = runCatching {
+        java.io.File(path).inputStream().use { readFully(it, JPEG_HEAD_SIZE) }
+    }.getOrNull()
+
+    /** Up to [count] bytes from [input], fewer only at the end of the stream. */
+    fun readFully(input: InputStream, count: Int): ByteArray {
+        val out = ByteArray(count)
+        var n = 0
+        while (n < count) {
+            val r = input.read(out, n, count - n)
+            if (r == -1) break
+            n += r
+        }
+        return if (n == count) out else out.copyOf(n)
+    }
+
+    /** The unsigned byte at [index] of [data]. */
+    private fun byteAt(data: ByteArray, index: Int): Int = data[index].toInt() and 0xFF
 
     /** Where a signature was read from, which decides the hashes it may cover. */
     enum class SignatureSource {

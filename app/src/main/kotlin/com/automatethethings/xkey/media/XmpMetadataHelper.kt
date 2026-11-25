@@ -115,7 +115,7 @@ object XmpMetadataHelper {
         val mimeType = getMimeType(filePath)
         val format = XmpContainers.formatOf(mimeType)
         return when {
-            mimeType.startsWith("image/jpeg") || mimeType.startsWith("image/jpg") -> {
+            MediaHasher.isJpegFile(filePath) -> {
                 writeExifSignature(filePath, data)
                 null
             }
@@ -244,7 +244,7 @@ object XmpMetadataHelper {
         val mimeType = getMimeType(filePath)
         val format = XmpContainers.formatOf(mimeType)
         return when {
-            mimeType.startsWith("image/jpeg") || mimeType.startsWith("image/jpg") -> {
+            MediaHasher.isJpegFile(filePath) -> {
                 readExifSignature(filePath) ?: readSidecarSignature(filePath)
             }
             format != null -> {
@@ -259,8 +259,10 @@ object XmpMetadataHelper {
     /**
      * The signature embedded in the content at [uri], typed by [mimeType]:
      * EXIF for JPEG, the XMP box or chunk for MP4/MOV, PNG and WebP (read by
-     * walking the container's headers, so a video is never loaded whole). A
-     * URI has no sidecar beside it, so anything else reads as unsigned.
+     * walking the container's headers, so a video is never loaded whole). Content
+     * of no type or application/octet-stream is a JPEG when its first bytes
+     * say so ([MediaHasher.isJpeg]). A URI has no sidecar beside it, so
+     * anything else reads as unsigned.
      *
      * Read as [contentResolver] serves it: for a MediaStore capture that is
      * the redacted view. App code reads source media through the Context
@@ -304,14 +306,23 @@ object XmpMetadataHelper {
         readSignature(snapshot, mimeType) { snapshot.inputStream() }
 
     private inline fun readSignature(uri: Any, mimeType: String?, open: () -> InputStream?): ContentAuthenticityData? {
-        val type = mimeType ?: ""
-        val jpeg = type.startsWith("image/jpeg") || type.startsWith("image/jpg")
-        val format = if (jpeg) null else XmpContainers.formatOf(type) ?: return null
+        val jpeg = isJpeg(mimeType.orEmpty())
+        val format = if (jpeg) null else XmpContainers.formatOf(mimeType.orEmpty())
+        if (!jpeg && format == null && !isUntyped(mimeType)) return null
         // A failed open propagates for every type, a JPEG included:
         // unreadable media is not unsigned media. Only a JPEG whose bytes
         // carry no readable signature reads as unsigned.
-        val input = open() ?: throw IOException("cannot open $uri")
-        return input.use { if (format == null) readExifSignatureFromStream(it) else readEmbeddedSignatureFromStream(it, format) }
+        val input = open()?.buffered() ?: throw IOException("cannot open $uri")
+        return input.use {
+            if (format != null) return@use readEmbeddedSignatureFromStream(it, format)
+            if (!jpeg) {
+                it.mark(MediaHasher.JPEG_HEAD_SIZE)
+                val head = MediaHasher.readFully(it, MediaHasher.JPEG_HEAD_SIZE)
+                it.reset()
+                if (!MediaHasher.isJpeg(null, head = head)) return@use null
+            }
+            readExifSignatureFromStream(it)
+        }
     }
 
     /**
@@ -420,9 +431,12 @@ object XmpMetadataHelper {
     class SourceChangedException :
         IOException("the media changed after it was signed; sign it again to save a signed copy")
 
-    private fun isJpeg(mimeType: String): Boolean {
-        val type = mimeType.lowercase()
-        return type.startsWith("image/jpeg") || type.startsWith("image/jpg")
+    private fun isJpeg(mimeType: String): Boolean = MediaHasher.isJpeg(mimeType)
+
+    /** Whether [mimeType] says nothing of the content: none, or application/octet-stream. */
+    internal fun isUntyped(mimeType: String?): Boolean {
+        val type = mimeType.orEmpty().substringBefore(';').trim().lowercase()
+        return type.isEmpty() || type == "application/octet-stream"
     }
 
     private fun signedCopy(
@@ -758,7 +772,7 @@ object XmpMetadataHelper {
     private fun getMimeType(filePath: String): String {
         val lower = filePath.lowercase()
         return when {
-            lower.endsWith(".jpg") || lower.endsWith(".jpeg") -> "image/jpeg"
+            lower.endsWith(".jpg") || lower.endsWith(".jpeg") -> MediaHasher.JPEG_MIME_TYPE
             lower.endsWith(".png") -> "image/png"
             lower.endsWith(".webp") -> "image/webp"
             lower.endsWith(".mp4") -> "video/mp4"
@@ -775,7 +789,7 @@ object XmpMetadataHelper {
      * maps to its own container through [stagingSuffix].
      */
     val EMBEDDED_MIME_TYPES: List<String> = listOf(
-        "image/jpeg", "image/png", "image/webp", "video/mp4", "video/quicktime"
+        MediaHasher.JPEG_MIME_TYPE, "image/png", "image/webp", "video/mp4", "video/quicktime"
     )
 
     /**
@@ -786,7 +800,7 @@ object XmpMetadataHelper {
      */
     fun stagingSuffix(mimeType: String?): String {
         val type = mimeType.orEmpty().substringBefore(';').trim().lowercase()
-        if (type.startsWith("image/jpeg") || type.startsWith("image/jpg")) return ".jpg"
+        if (MediaHasher.isJpeg(type)) return ".jpg"
         return when (XmpContainers.formatOf(type)) {
             XmpContainers.Format.PNG -> ".png"
             XmpContainers.Format.WEBP -> ".webp"

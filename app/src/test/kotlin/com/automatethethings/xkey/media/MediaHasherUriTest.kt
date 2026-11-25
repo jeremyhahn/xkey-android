@@ -21,9 +21,13 @@ import io.mockk.mockk
 import io.mockk.unmockkAll
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
+import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.TemporaryFolder
 import java.io.ByteArrayInputStream
 import java.io.IOException
 import java.io.InputStream
@@ -44,6 +48,9 @@ import java.io.InputStream
  * would exhaust the process.
  */
 class MediaHasherUriTest {
+
+    @get:Rule
+    val folder = TemporaryFolder()
 
     @After
     fun tearDown() {
@@ -80,6 +87,28 @@ class MediaHasherUriTest {
         val resolver = mockk<ContentResolver>()
         every { resolver.openInputStream(any()) } returns stream
         return resolver
+    }
+
+    // -------------------------------------------------------------------------
+    // The signer's hash of a JPEG the resolver does not type as JPEG
+    // -------------------------------------------------------------------------
+
+    private fun assertCanonicalJpegHash(type: String?) {
+        val jpeg = jpeg("camera=test")
+        val canonical = MediaHasher.hashCanonical(jpeg, "image/jpeg")
+        assertNotEquals(MediaHasher.hashBytes(jpeg), canonical)
+
+        assertEquals("a JPEG typed $type is hashed canonically", canonical, hashCanonicalUri(jpeg, type))
+    }
+
+    @Test
+    fun `contentHashUri hashes a JPEG typed application octet-stream canonically`() {
+        assertCanonicalJpegHash("application/octet-stream")
+    }
+
+    @Test
+    fun `contentHashUri hashes a JPEG with no resolver type canonically`() {
+        assertCanonicalJpegHash(null)
     }
 
     // -------------------------------------------------------------------------
@@ -125,5 +154,140 @@ class MediaHasherUriTest {
         )
 
         assertEquals(MediaHasher.hashBytes(data), fromUri)
+    }
+
+    // -------------------------------------------------------------------------
+    // The signer's content hash over a URI (AutoSignHash.contentHashUri)
+    // -------------------------------------------------------------------------
+
+    private fun resolverOf(stream: InputStream, mimeType: String?): ContentResolver {
+        val resolver = resolverReturning(stream)
+        every { resolver.getType(any()) } returns mimeType
+        return resolver
+    }
+
+    private fun segment(marker: Int, payload: ByteArray): ByteArray {
+        val length = payload.size + 2
+        return byteArrayOf(0xFF.toByte(), marker.toByte(), (length shr 8).toByte(), length.toByte()) + payload
+    }
+
+    /** A JPEG with an EXIF APP1 segment holding [exif], then a table, a scan and EOI. */
+    private fun jpeg(exif: String): ByteArray =
+        byteArrayOf(0xFF.toByte(), 0xD8.toByte()) +
+            segment(0xE1, "Exif\u0000\u0000$exif".toByteArray()) +
+            segment(0xDB, ByteArray(65) { it.toByte() }) +
+            segment(0xDA, byteArrayOf(1, 1, 0, 0, 63, 0)) +
+            byteArrayOf(0x12, 0x34, 0x56, 0xFF.toByte(), 0xD9.toByte())
+
+    private fun hashCanonicalUri(data: ByteArray, mimeType: String?): String =
+        contentHashUri(resolverOf(ByteArrayInputStream(data), mimeType))
+
+    private fun contentHashUri(resolver: ContentResolver): String =
+        AutoSignHash.contentHashUri(resolver, mockk<Uri>(relaxed = true), folder.root)
+
+    @Test
+    fun `contentHashUri of a JPEG is its canonical hash, not the whole-file hash`() {
+        val data = jpeg("camera=test")
+
+        val hash = hashCanonicalUri(data, "image/jpeg")
+
+        assertEquals(MediaHasher.hashCanonical(data, "image/jpeg"), hash)
+        assertNotEquals("the APP1 segment must be left out", MediaHasher.hashBytes(data), hash)
+    }
+
+    @Test
+    fun `contentHashUri of a JPEG keeps its value across a metadata-only change`() {
+        assertEquals(
+            hashCanonicalUri(jpeg("camera=test"), "image/jpeg"),
+            hashCanonicalUri(jpeg("camera=test;signed=yes;comment=longer"), "image/jpeg")
+        )
+    }
+
+    @Test
+    fun `contentHashUri canonicalises an uppercase JPEG type`() {
+        val data = jpeg("camera=test")
+
+        assertEquals(MediaHasher.hashCanonical(data, "image/jpeg"), hashCanonicalUri(data, "IMAGE/JPEG"))
+    }
+
+    @Test
+    fun `contentHashUri of JPEG content is canonical whatever the type`() {
+        val data = jpeg("camera=test")
+
+        for (type in listOf("video/mp4", "application/octet-stream", null)) {
+            assertEquals("type $type", MediaHasher.hashCanonical(data, "image/jpeg"), hashCanonicalUri(data, type))
+        }
+    }
+
+    @Test
+    fun `contentHashUri hashes anything but a JPEG whole`() {
+        val data = jpeg("camera=test").copyOfRange(2, 60)
+
+        for (type in listOf("video/mp4", "image/png", null)) {
+            assertEquals("type $type", MediaHasher.hashBytes(data), hashCanonicalUri(data, type))
+        }
+    }
+
+    @Test
+    fun `contentHashUri rejects a URI the resolver cannot open`() {
+        val e = assertThrows(IllegalArgumentException::class.java) {
+            contentHashUri(resolverReturning(null).also { every { it.getType(any()) } returns "image/jpeg" })
+        }
+
+        assertTrue(e.message!!, e.message!!.startsWith("Cannot open URI:"))
+    }
+
+    @Test
+    fun `contentHashUri closes the resolver's stream on success`() {
+        val stream = ClosingStream(jpeg("camera=test"))
+
+        contentHashUri(resolverOf(stream, "image/jpeg"))
+
+        assertTrue("the resolver's stream must not be leaked", stream.closed)
+    }
+
+    @Test
+    fun `contentHashUri propagates a read failure and closes the stream`() {
+        val stream = FailingStream()
+
+        assertThrows(IOException::class.java) {
+            contentHashUri(resolverOf(stream, "image/jpeg"))
+        }
+
+        assertTrue("a failed read must still close the stream", stream.closed)
+    }
+
+    // -------------------------------------------------------------------------
+    // isJpeg
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun `isJpeg accepts the JPEG types in any case and with parameters`() {
+        for (type in listOf("image/jpeg", "image/jpg", "IMAGE/JPEG", "image/jpeg; q=1")) {
+            assertTrue(type, MediaHasher.isJpeg(type))
+        }
+    }
+
+    @Test
+    fun `isJpeg rejects every other type with no name or content`() {
+        for (type in listOf(null, "", "image/png", "video/mp4", "application/jpeg")) {
+            assertFalse("type $type", MediaHasher.isJpeg(type))
+        }
+    }
+
+    @Test
+    fun `isJpeg accepts a jpg or jpeg name whatever the type`() {
+        for (name in listOf("a.jpg", "B.JPEG", "/x/c.Jpg")) {
+            assertTrue(name, MediaHasher.isJpeg("application/octet-stream", name))
+        }
+        assertFalse(MediaHasher.isJpeg(null, "a.png"))
+    }
+
+    @Test
+    fun `isJpeg accepts content that starts with the JPEG SOI whatever the type`() {
+        val head = jpeg("camera=test").copyOf(MediaHasher.JPEG_HEAD_SIZE)
+        assertTrue(MediaHasher.isJpeg("application/octet-stream", "capture.bin", head))
+        assertFalse(MediaHasher.isJpeg(null, null, byteArrayOf(0xFF.toByte(), 0xD8.toByte())))
+        assertFalse(MediaHasher.isJpeg(null, null, byteArrayOf(0x89.toByte(), 0x50, 0x4E)))
     }
 }

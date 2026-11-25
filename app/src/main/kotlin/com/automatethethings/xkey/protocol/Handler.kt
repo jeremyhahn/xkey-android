@@ -25,6 +25,9 @@ import com.automatethethings.xkey.credential.UvRequirement
 import com.automatethethings.xkey.crypto.BiometricException
 import com.automatethethings.xkey.crypto.BiometricUnavailableException
 import com.automatethethings.xkey.crypto.BiometricHelper
+import com.automatethethings.xkey.ui.PromptActivityTracker
+import com.automatethethings.xkey.ui.PromptHost
+import androidx.annotation.VisibleForTesting
 import com.automatethethings.xkey.crypto.BiometricLockoutException
 import com.automatethethings.xkey.crypto.BiometricRequiredException
 import com.automatethethings.xkey.crypto.DecryptionException
@@ -47,6 +50,7 @@ import com.automatethethings.xkey.crypto.UserCancelledException
 import com.automatethethings.xkey.crypto.UserVerificationKey
 import com.automatethethings.xkey.crypto.UserVerificationPrompt
 import com.automatethethings.xkey.crypto.XKeyCryptoException
+import com.automatethethings.xkey.crypto.publicKeySizeBits
 import com.automatethethings.xkey.remote.SharePermissionLedger
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.dao.KeyDao
@@ -68,7 +72,6 @@ import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
-import java.lang.ref.WeakReference
 import kotlin.coroutines.AbstractCoroutineContextElement
 import kotlin.coroutines.CoroutineContext
 import java.util.Base64
@@ -214,11 +217,12 @@ class RequestHandler(
     // Per-key sharing policy DAO
     private val keySharingPolicyDao: KeySharingPolicyDao = XKeyDatabase.getInstance(context).keySharingPolicyDao()
 
-    // Weak reference to activity for biometric prompts
-    private var activityRef: WeakReference<FragmentActivity>? = null
-
-    // BiometricHelper instance (created when activity is set)
-    private var biometricHelper: BiometricHelper? = null
+    /**
+     * Where biometric prompts are raised: the app-wide record of the resumed
+     * screen (#320). Tests may pin it with [setActivity].
+     */
+    @VisibleForTesting
+    internal var promptHost: PromptHost = PromptActivityTracker
 
     // BiometricNotificationHelper for lock screen notifications
     private val biometricNotificationHelper = BiometricNotificationHelper(context)
@@ -454,15 +458,21 @@ class RequestHandler(
     }
 
     /**
-     * Sets the activity for biometric prompts.
-     *
-     * Must be called when the activity is available, before any sign requests
-     * that require crypto-bound biometric authentication.
+     * Test hook: pins the biometric prompts' host to [activity], or to none
+     * when null. The app never calls it; the host is [PromptActivityTracker],
+     * which follows whichever screen is in front.
      */
+    @VisibleForTesting
     fun setActivity(activity: FragmentActivity?) {
-        activityRef = if (activity != null) WeakReference(activity) else null
-        biometricHelper = if (activity != null) BiometricHelper(activity) else null
+        promptHost = PromptHost { activity }
     }
+
+    /**
+     * A [BiometricHelper] on the activity in front, or null when none is
+     * resumed: callers then refuse, never prompt from the background.
+     */
+    private fun biometricHelper(): BiometricHelper? =
+        promptHost.current()?.let { BiometricHelper(it) }
 
     /**
      * Handles a raw request that arrived on a session this phone *opened* — the
@@ -724,7 +734,7 @@ class RequestHandler(
                 }
             } else {
                 // Fall back to BiometricHelper (for activity context)
-                val helper = biometricHelper
+                val helper = biometricHelper()
                     ?: throw ProtocolException(
                         "No activity available for biometric prompt",
                         errorCode = ErrorCodes.INTERNAL_ERROR
@@ -998,7 +1008,7 @@ class RequestHandler(
             }
 
             // Fall back to crypto-bound BiometricHelper flow (requires activity)
-            val helper = biometricHelper
+            val helper = biometricHelper()
                 ?: throw ProtocolException(
                     "No activity available for biometric prompt",
                     errorCode = ErrorCodes.INTERNAL_ERROR
@@ -1202,18 +1212,32 @@ class RequestHandler(
      * A paired-device store that cannot be read fails closed: the peer's
      * settings may require an attestation the phone cannot check.
      *
-     * @return True if attestation is current or not required, false if attestation is required but expired
-     *   or the peer's record cannot be read.
+     * Every request reaches this handler from a desktop connection, so for
+     * key use a request with no authenticated peer, a peer with no paired
+     * record or a handler with no paired-device store is refused: no device
+     * policy can be checked for it. Key attestation still allows them.
+     *
+     * @return True if attestation is current or not required, false if attestation is required but expired,
+     *   the peer's record cannot be read, or (for key use) the peer is unknown or not paired.
      */
     private suspend fun isDeviceAttestationCurrent(forKeyUse: Boolean): Boolean {
-        val publicKeyHex = attestingPeerPublicKeyHex() ?: return true  // Unknown device, allow
-        val repo = pairedDeviceRepository ?: return true
+        val publicKeyHex = attestingPeerPublicKeyHex() ?: run {
+            if (forKeyUse) Log.w(TAG, "Key use with no authenticated peer; refusing")
+            return !forKeyUse
+        }
+        val repo = pairedDeviceRepository ?: run {
+            if (forKeyUse) Log.w(TAG, "Key use with no paired-device store; refusing")
+            return !forKeyUse
+        }
         val found = repo.lookupDevice(publicKeyHex)
         if (found is DeviceLookup.Unreadable) {
             Log.w(TAG, "Paired-device store unreadable; refusing until attestation can be checked", found.cause)
             return false
         }
-        val device = (found as? DeviceLookup.Paired)?.device ?: return true  // Not in repo, no device policy
+        val device = (found as? DeviceLookup.Paired)?.device ?: run {
+            if (forKeyUse) Log.w(TAG, "Key use from a peer that is not paired; refusing")
+            return !forKeyUse
+        }
 
         val requiresAttestation = if (forKeyUse) {
             device.requireAttestationForKeyUse
@@ -1421,7 +1445,7 @@ class RequestHandler(
                     notice.close()
                 }
             } else {
-                val helper = biometricHelper
+                val helper = biometricHelper()
                     ?: throw ProtocolException(
                         "No activity available for biometric prompt",
                         errorCode = ErrorCodes.INTERNAL_ERROR
@@ -1484,12 +1508,12 @@ class RequestHandler(
         if (isSymmetric) {
             // Symmetric or HMAC key
             if (algorithmName.startsWith("AES")) {
-                val bits = if (algorithmName.contains("128")) 128 else 256
+                val bits = genParams.resolvedKeySizeBits() ?: 256
                 keystoreManager.generateSymmetricKey(genParams.keyId, bits, authDurationSeconds)
                 keySizeBits = bits
             } else {
                 keystoreManager.generateHMACKey(genParams.keyId, algorithmName)
-                keySizeBits = if (algorithmName.contains("512")) 512 else 256
+                keySizeBits = genParams.resolvedKeySizeBits() ?: 256
             }
             publicKeyDer = ByteArray(0) // No public key for symmetric/HMAC
             // The exact alias just generated (xkey_key_<id>), never a
@@ -1540,9 +1564,14 @@ class RequestHandler(
             keyId = genParams.keyId,
             algorithm = algorithmName,
             authDurationSeconds = authDurationSeconds,
-            preferStrongBox = genParams.preferStrongBox
+            preferStrongBox = genParams.preferStrongBox,
+            keySizeBits = if (CoseAlgorithms.isRsa(genParams.algorithm)) genParams.keySizeBits else null
         )
-        keySizeBits = CoseAlgorithms.getKeySizeBits(genParams.algorithm)
+        // The size of the key that was made, read off its public key; only a
+        // key with no readable size (EdDSA) falls back to the algorithm's own.
+        keySizeBits = generatedKeySize(genParams, publicKeyDer)
+            ?: genParams.resolvedKeySizeBits()
+            ?: CoseAlgorithms.getKeySizeBits(genParams.algorithm)
         val level = generatedKeyLevel(
             genParams.keyId,
             read = { keystoreManager.generalKeySecurityLevel(genParams.keyId) },
@@ -1617,6 +1646,26 @@ class RequestHandler(
     }
 
     /**
+     * The size of the asymmetric key local.generateKey just made, read off
+     * [publicKeyDer] by [publicKeySizeBits], or null when it has no readable
+     * size (EdDSA). A key whose size is not the one asked for (an RSA
+     * modulus from keySizeBits, else the algorithm's own) is discarded and
+     * the request fails before anything is stored: the row and the response
+     * never describe a key that was not produced.
+     */
+    private fun generatedKeySize(genParams: LocalGenerateKeyParams, publicKeyDer: ByteArray): Int? {
+        val made = publicKeySizeBits(publicKeyDer) ?: return null
+        val requested = genParams.resolvedKeySizeBits()
+        if (made == requested) return made
+        runCatching { keystoreManager.deleteGeneralKey(genParams.keyId) }
+        Log.e(TAG, "Generated key ${genParams.keyId} is $made bits, $requested were requested")
+        throw ProtocolException(
+            "Generated key ${genParams.keyId} is $made bits, not the $requested requested",
+            errorCode = ErrorCodes.INTERNAL_ERROR
+        )
+    }
+
+    /**
      * The security level of the key generateKey or local.generateKey just
      * made, read by [read] from its exact alias. A missing key or a KeyInfo
      * read that fails is an error, never a software-backed key: the key is
@@ -1667,11 +1716,7 @@ class RequestHandler(
             )
         }
 
-        val keySizeBits = when {
-            algorithmName.startsWith("AES") -> if (algorithmName.contains("128")) 128 else 256
-            algorithmName.contains("512") -> 512
-            else -> 256
-        }
+        val keySizeBits = genParams.resolvedKeySizeBits() ?: 256
         val material = ByteArray(keySizeBits / 8).also { java.security.SecureRandom().nextBytes(it) }
 
         com.automatethethings.xkey.crypto.SoftwareKeyStore(context).put(
@@ -1859,12 +1904,11 @@ class RequestHandler(
             ?: throw ProtocolException("Missing parameters", errorCode = ErrorCodes.INVALID_PARAMS)
 
         val decryptParams = LocalDecryptParams.fromJson(params)
+        val ciphertext = decodeBase64Strict("ciphertext", decryptParams.ciphertext)
         // The requesting desktop, captured before anything can suspend.
         val caller = auditCaller()
         val startTime = System.currentTimeMillis()
-        val decrypted = keystoreManager.rsaDecryptWithAlgorithm(
-            decryptParams.keyId, decryptParams.getCiphertextBytes()
-        )
+        val decrypted = keystoreManager.rsaDecryptWithAlgorithm(decryptParams.keyId, ciphertext)
         val durationMs = System.currentTimeMillis() - startTime
 
         keyDao.recordUsage(decryptParams.keyId)
@@ -1898,16 +1942,34 @@ class RequestHandler(
         val params = request.params
             ?: throw ProtocolException("Missing parameters", errorCode = ErrorCodes.INVALID_PARAMS)
 
-        val symParams = LocalSymmetricParams.fromJson(params)
+        val symParams = LocalSymmetricParams.forEncrypt(params)
+        val plaintext = decodeBase64Strict("plaintext", symParams.data)
+        val aad = symParams.aad?.let { decodeBase64Strict("aad", it) }
         // The requesting desktop, captured before anything can suspend.
         val caller = auditCaller()
 
         // Software-backed keys are operated on outside the Keystore.
-        com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(symParams.keyId)?.let { sw ->
-            val ct = com.automatethethings.xkey.crypto.SoftwareKeyOps.aesGcmEncrypt(
-                sw.material, symParams.getDataBytes(), symParams.getAadBytes()
-            )
+        com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(symParams.keyId)?.useAndZero { sw ->
+            requireSoftwareKeyType(sw, otherType = "HMAC", operation = "AES-GCM")
+            requireKnownSoftwareAlgorithm(sw, operation = "AES-GCM")
+            val swStart = System.currentTimeMillis()
+            // Bad key material answers as the Keystore path does.
+            val ct = try {
+                com.automatethethings.xkey.crypto.SoftwareKeyOps.aesGcmEncrypt(sw.material, plaintext, aad)
+            } catch (e: java.security.GeneralSecurityException) {
+                throw EncryptionException("AES-GCM encryption failed", e)
+            } catch (e: IllegalArgumentException) {
+                throw EncryptionException("invalid AES key", e)
+            }
+            val swDurationMs = System.currentTimeMillis() - swStart
             keyDao.recordUsage(symParams.keyId)
+            logKeyUse(
+                KeyUse.ENCRYPT, symParams.keyId,
+                executedAlgorithm = KeystoreManager.EXECUTED_AES_GCM,
+                durationMs = swDurationMs,
+                caller = caller,
+                softwareKey = sw
+            )
             return Response.success(
                 request.id,
                 LocalSymmetricResult(data = Base64.getEncoder().encodeToString(ct), payloadField = LocalSymmetricResult.FIELD_CIPHERTEXT).toJson()
@@ -1915,9 +1977,7 @@ class RequestHandler(
         }
 
         val startTime = System.currentTimeMillis()
-        val ciphertext = keystoreManager.symmetricEncrypt(
-            symParams.keyId, symParams.getDataBytes(), symParams.getAadBytes()
-        )
+        val ciphertext = keystoreManager.symmetricEncrypt(symParams.keyId, plaintext, aad)
         val durationMs = System.currentTimeMillis() - startTime
 
         keyDao.recordUsage(symParams.keyId)
@@ -1952,16 +2012,34 @@ class RequestHandler(
         val params = request.params
             ?: throw ProtocolException("Missing parameters", errorCode = ErrorCodes.INVALID_PARAMS)
 
-        val symParams = LocalSymmetricParams.fromJson(params)
+        val symParams = LocalSymmetricParams.forDecrypt(params)
+        val ciphertext = decodeBase64Strict("ciphertext", symParams.data)
+        val aad = symParams.aad?.let { decodeBase64Strict("aad", it) }
         // The requesting desktop, captured before anything can suspend.
         val caller = auditCaller()
 
         // Software-backed keys are operated on outside the Keystore.
-        com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(symParams.keyId)?.let { sw ->
-            val pt = com.automatethethings.xkey.crypto.SoftwareKeyOps.aesGcmDecrypt(
-                sw.material, symParams.getDataBytes(), symParams.getAadBytes()
-            )
+        com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(symParams.keyId)?.useAndZero { sw ->
+            requireSoftwareKeyType(sw, otherType = "HMAC", operation = "AES-GCM")
+            requireKnownSoftwareAlgorithm(sw, operation = "AES-GCM")
+            val swStart = System.currentTimeMillis()
+            // A tag mismatch or a short input answers as the Keystore path does.
+            val pt = try {
+                com.automatethethings.xkey.crypto.SoftwareKeyOps.aesGcmDecrypt(sw.material, ciphertext, aad)
+            } catch (e: java.security.GeneralSecurityException) {
+                throw DecryptionException("AES-GCM decryption failed", e)
+            } catch (e: IllegalArgumentException) {
+                throw DecryptionException("ciphertext too short", e)
+            }
+            val swDurationMs = System.currentTimeMillis() - swStart
             keyDao.recordUsage(symParams.keyId)
+            logKeyUse(
+                KeyUse.DECRYPT, symParams.keyId,
+                executedAlgorithm = KeystoreManager.EXECUTED_AES_GCM,
+                durationMs = swDurationMs,
+                caller = caller,
+                softwareKey = sw
+            )
             return Response.success(
                 request.id,
                 LocalSymmetricResult(data = Base64.getEncoder().encodeToString(pt), payloadField = LocalSymmetricResult.FIELD_PLAINTEXT).toJson()
@@ -1969,9 +2047,7 @@ class RequestHandler(
         }
 
         val startTime = System.currentTimeMillis()
-        val plaintext = keystoreManager.symmetricDecrypt(
-            symParams.keyId, symParams.getDataBytes(), symParams.getAadBytes()
-        )
+        val plaintext = keystoreManager.symmetricDecrypt(symParams.keyId, ciphertext, aad)
         val durationMs = System.currentTimeMillis() - startTime
 
         keyDao.recordUsage(symParams.keyId)
@@ -2086,13 +2162,16 @@ class RequestHandler(
             ?: throw ProtocolException("Missing parameters", errorCode = ErrorCodes.INVALID_PARAMS)
 
         val hmacParams = LocalHMACParams.fromJson(params)
+        val hmacData = decodeBase64Strict("data", hmacParams.data)
         val caller = auditCaller()
 
         // Software-backed keys are operated on outside the Keystore.
-        com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(hmacParams.keyId)?.let { sw ->
+        com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(hmacParams.keyId)?.useAndZero { sw ->
+            requireSoftwareKeyType(sw, otherType = "AES", operation = "HMAC")
+            requireKnownSoftwareAlgorithm(sw, operation = "HMAC")
             val swStart = System.currentTimeMillis()
             val swMac = com.automatethethings.xkey.crypto.SoftwareKeyOps.hmac(
-                sw.material, hmacParams.getDataBytes(), sw.algorithm
+                sw.material, hmacData, sw.algorithm
             )
             val swDurationMs = System.currentTimeMillis() - swStart
             keyDao.recordUsage(hmacParams.keyId)
@@ -2111,7 +2190,7 @@ class RequestHandler(
         }
 
         val startTime = System.currentTimeMillis()
-        val hmac = keystoreManager.computeHMACWithAlgorithm(hmacParams.keyId, hmacParams.getDataBytes())
+        val hmac = keystoreManager.computeHMACWithAlgorithm(hmacParams.keyId, hmacData)
         val durationMs = System.currentTimeMillis() - startTime
 
         keyDao.recordUsage(hmacParams.keyId)
@@ -2149,11 +2228,10 @@ class RequestHandler(
             ?: throw ProtocolException("Missing parameters", errorCode = ErrorCodes.INVALID_PARAMS)
 
         val ecdhParams = LocalECDHParams.fromJson(params)
+        val peerPublicKey = decodeBase64Strict("peerPublicKey", ecdhParams.peerPublicKey)
         val caller = auditCaller()
         val startTime = System.currentTimeMillis()
-        val sharedSecret = keystoreManager.performECDH(
-            ecdhParams.keyId, ecdhParams.getPeerPublicKeyBytes()
-        )
+        val sharedSecret = keystoreManager.performECDH(ecdhParams.keyId, peerPublicKey)
         val durationMs = System.currentTimeMillis() - startTime
 
         keyDao.recordUsage(ecdhParams.keyId)
@@ -2193,9 +2271,75 @@ class RequestHandler(
     }
 
     /**
+     * Refuses software key [sw] for [operation] when its stored algorithm
+     * names the other symmetric key type ([otherType], "AES" or "HMAC"): an
+     * AES key's material is no MAC key and an HMAC key's no AES key. The
+     * code is the one a Keystore key of the wrong type answers
+     * (KeystoreManager finds no key of the class the operation needs).
+     */
+    private fun requireSoftwareKeyType(
+        sw: com.automatethethings.xkey.crypto.SoftwareKey,
+        otherType: String,
+        operation: String
+    ) {
+        if (sw.algorithm.startsWith(otherType, ignoreCase = true)) {
+            throw ProtocolException(
+                "Key ${sw.keyId} cannot be used for $operation",
+                errorCode = ErrorCodes.KEY_NOT_FOUND
+            )
+        }
+    }
+
+    /**
+     * Refuses software key [sw] for [operation] ("AES-GCM" or "HMAC") unless
+     * its stored algorithm is one this handler runs for that operation: "AES"
+     * or an AES-128/192/256 name for AES-GCM, an HMAC-SHA256/384/512 name for
+     * HMAC. Any other name is never mapped to a default algorithm.
+     */
+    private fun requireKnownSoftwareAlgorithm(
+        sw: com.automatethethings.xkey.crypto.SoftwareKey,
+        operation: String
+    ) {
+        val cose = runCatching { CoseAlgorithms.fromName(sw.algorithm) }.getOrNull()
+        val known = when (operation) {
+            "AES-GCM" -> sw.algorithm.trim().equals("AES", ignoreCase = true) || cose in setOf(
+                CoseAlgorithms.A128GCM, CoseAlgorithms.A192GCM, CoseAlgorithms.A256GCM
+            )
+            else -> cose in setOf(CoseAlgorithms.HMAC_256, CoseAlgorithms.HMAC_384, CoseAlgorithms.HMAC_512)
+        }
+        if (!known) {
+            throw ProtocolException(
+                "Key ${sw.keyId} has algorithm ${sw.algorithm}, which $operation does not support",
+                errorCode = ErrorCodes.INVALID_PARAMS
+            )
+        }
+    }
+
+    /**
+     * Runs [block] with this software key, then zeroes its decrypted
+     * material whatever the outcome: SoftwareKeyStore.get decrypts a fresh
+     * copy for each call, and nothing may keep it past the operation.
+     */
+    private inline fun <R> com.automatethethings.xkey.crypto.SoftwareKey.useAndZero(
+        block: (com.automatethethings.xkey.crypto.SoftwareKey) -> R
+    ): R =
+        try {
+            block(this)
+        } finally {
+            material.fill(0)
+        }
+
+    /**
      * Handles local.getPublicKey - export public key in specified format.
      */
     private suspend fun handleLocalGetPublicKey(request: Request): Response {
+        if (!isDeviceAttestationCurrent(forKeyUse = true)) {
+            throw ProtocolException(
+                "Device attestation required before key use",
+                errorCode = ErrorCodes.DEVICE_ATTESTATION_REQUIRED
+            )
+        }
+        val caller = auditCaller()
         val params = request.params
             ?: throw ProtocolException("Missing parameters", errorCode = ErrorCodes.INVALID_PARAMS)
 
@@ -2227,6 +2371,17 @@ class RequestHandler(
                 errorCode = ErrorCodes.UNSUPPORTED_FORMAT
             )
         }
+
+        // Log the export; the entry names the key, the format and the desktop.
+        val keyType = auditKeyType(pubKeyParams.keyId)
+        AuditLogger.logKeyExported(
+            keyId = pubKeyParams.keyId,
+            keyLabel = keyEntity.label,
+            keyType = keyType,
+            format = pubKeyParams.format,
+            deviceId = caller.peerPublicKeyHex,
+            deviceName = caller.deviceName
+        )
 
         val result = LocalGetPublicKeyResult(
             publicKey = publicKey,
@@ -2692,7 +2847,7 @@ class RequestHandler(
                 // The activity's own prompt answers no launcher request; it
                 // takes its queue turn, and the notification only wakes the
                 // phone for it.
-                val helper = biometricHelper
+                val helper = biometricHelper()
                     ?: throw ProtocolException(
                         "No activity available for biometric prompt",
                         errorCode = ErrorCodes.INTERNAL_ERROR
@@ -3068,7 +3223,7 @@ class RequestHandler(
                 onLaunch = notice.onLaunch
             )
         }
-        val helper = biometricHelper
+        val helper = biometricHelper()
             ?: throw ProtocolException(
                 "No activity available for biometric prompt",
                 errorCode = ErrorCodes.INTERNAL_ERROR
@@ -3694,9 +3849,27 @@ class RequestHandler(
     // -------------------------------------------------------------------------
 
     /**
+     * The OATH methods hand out one-time codes and change the credential
+     * store, so they are key use: a paired desktop whose settings require a
+     * current attestation for key use is refused until it attests, and a
+     * paired-device store that cannot be read refuses, as for the key
+     * operations ([isDeviceAttestationCurrent]). Called before each handler's
+     * own try block, so the refusal reaches dispatch as its error code.
+     */
+    private suspend fun requireOathAttestation() {
+        if (!isDeviceAttestationCurrent(forKeyUse = true)) {
+            throw ProtocolException(
+                "Device attestation required before key use",
+                errorCode = ErrorCodes.DEVICE_ATTESTATION_REQUIRED
+            )
+        }
+    }
+
+    /**
      * Lists all local OATH credentials (without secrets).
      */
     private suspend fun handleOathList(request: Request): Response {
+        requireOathAttestation()
         return try {
             val db = XKeyDatabase.getInstance(context)
             val credentials = db.oathCredentialDao().getAll()
@@ -3718,7 +3891,7 @@ class RequestHandler(
             Response.success(request.id, result)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to list OATH credentials", e)
-            Response.error(request.id, ErrorCodes.INTERNAL_ERROR, "Failed to list OATH credentials: ${e.message}")
+            Response.error(request.id, ErrorCodes.INTERNAL_ERROR, "Failed to list OATH credentials")
         }
     }
 
@@ -3726,6 +3899,7 @@ class RequestHandler(
      * Generates and returns the current OTP code for a credential.
      */
     private suspend fun handleOathGenerate(request: Request): Response {
+        requireOathAttestation()
         val params = request.params
             ?: return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Missing params")
 
@@ -3740,20 +3914,30 @@ class RequestHandler(
                 db.oathCredentialDao(),
                 com.automatethethings.xkey.oath.OathSecretManager()
             )
+            // Read once, before the code: a removal landing after the code is
+            // computed must not turn expires_in into 0 or the audit entry's
+            // account into an empty one.
+            val cred = db.oathCredentialDao().getByOathId(credentialId)
+                ?: return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Credential not found: $credentialId")
             val code = try {
                 oathRepository.generateCode(credentialId)
             } catch (_: NoSuchElementException) {
                 return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Credential not found: $credentialId")
+            } catch (_: com.automatethethings.xkey.oath.OathCounterExhaustedException) {
+                return Response.error(request.id, ErrorCodes.OPERATION_DENIED, "HOTP counter exhausted")
             }
 
-            val cred = db.oathCredentialDao().getByOathId(credentialId)
             // expires_in: seconds until the current TOTP window ends (0 for HOTP).
-            val expiresIn = if (cred?.oathType == "TOTP") {
-                val period = cred.periodSeconds.toLong()
+            // A period that is not positive never produced a code above.
+            val period = cred.periodSeconds.toLong()
+            val expiresIn = if (cred.oathType == "TOTP" && period > 0) {
                 (period - (System.currentTimeMillis() / 1000 % period)).toInt()
             } else 0
 
-            AuditLogger.logOathCodeGenerated(credentialId, cred?.issuer, cred?.accountName ?: "")
+            val caller = auditCaller()
+            AuditLogger.logOathCodeGenerated(
+                credentialId, cred.issuer, cred.accountName, caller.peerPublicKeyHex, caller.deviceName
+            )
 
             val result = JSONObject().apply {
                 put("code", code)
@@ -3761,8 +3945,9 @@ class RequestHandler(
             }
             Response.success(request.id, result)
         } catch (e: Exception) {
+            // The exception text stays in the log: it can name stored values.
             Log.e(TAG, "Failed to generate OATH code", e)
-            Response.error(request.id, ErrorCodes.INTERNAL_ERROR, "Failed to generate code: ${e.message}")
+            Response.error(request.id, ErrorCodes.INTERNAL_ERROR, "Failed to generate code")
         }
     }
 
@@ -3770,6 +3955,7 @@ class RequestHandler(
      * Adds (imports) an OATH credential pushed from the desktop (local.oathAdd).
      */
     private suspend fun handleOathAdd(request: Request): Response {
+        requireOathAttestation()
         val params = request.params
             ?: return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Missing params")
 
@@ -3808,16 +3994,24 @@ class RequestHandler(
                 counter = credential.optLong("counter", 0)
             )
 
-            AuditLogger.logOathCredentialCreated(name, issuer, accountName, type.uppercase())
+            // The entry names the stored credential, not the caller's free-form name.
+            val caller = auditCaller()
+            AuditLogger.logOathCredentialCreated(
+                credentialId, issuer, accountName, type.uppercase(), caller.peerPublicKeyHex, caller.deviceName
+            )
 
             val result = JSONObject().apply {
                 put("success", true)
                 put("credential_id", credentialId)
             }
             Response.success(request.id, result)
+        } catch (e: IllegalArgumentException) {
+            // The importer's validation: its messages never name the secret.
+            Log.w(TAG, "Refused OATH credential: ${e.message}")
+            Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Invalid credential: ${e.message}")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to add OATH credential", e)
-            Response.error(request.id, ErrorCodes.INTERNAL_ERROR, "Failed to add: ${e.message}")
+            Response.error(request.id, ErrorCodes.INTERNAL_ERROR, "Failed to add credential")
         }
     }
 
@@ -3825,6 +4019,7 @@ class RequestHandler(
      * Removes an OATH credential (local.oathRemove).
      */
     private suspend fun handleOathRemove(request: Request): Response {
+        requireOathAttestation()
         val params = request.params
             ?: return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Missing params")
 
@@ -3840,15 +4035,19 @@ class RequestHandler(
                 // Nothing has that id: say so rather than claim a deletion.
                 return Response.success(request.id, JSONObject().apply { put("deleted", false) })
             }
-            db.oathCredentialDao().deleteByOathId(credentialId)
+            // Recorded and deleted in one transaction, so no sync with another paired device adds it back.
+            db.oathCredentialDao().deleteAndRecordDeletion(credentialId, System.currentTimeMillis())
 
-            AuditLogger.logOathCredentialDeleted(credentialId, cred.issuer, cred.accountName)
+            val caller = auditCaller()
+            AuditLogger.logOathCredentialDeleted(
+                credentialId, cred.issuer, cred.accountName, caller.peerPublicKeyHex, caller.deviceName
+            )
 
             val result = JSONObject().apply { put("deleted", true) }
             Response.success(request.id, result)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to remove OATH credential", e)
-            Response.error(request.id, ErrorCodes.INTERNAL_ERROR, "Failed to remove: ${e.message}")
+            Response.error(request.id, ErrorCodes.INTERNAL_ERROR, "Failed to remove credential")
         }
     }
 
@@ -3861,13 +4060,25 @@ class RequestHandler(
      * those already present by fingerprint) and returns the phone's certs so the
      * desktop can merge them back.
      */
+    /**
+     * Merges the desktop's certificates (stored as synced, never as trust
+     * anchors) and returns the phone's. Records one audit entry per sync,
+     * success or failure, with counts and the desktop that asked, never a
+     * certificate body. The reply keeps its `added`/`skipped`/`remote` shape.
+     */
     private suspend fun handleSyncTrustStore(request: Request): Response {
+        val peerId = currentPeerPublicKeyHex()
+        val peerName = auditPeerName(peerId)
         return try {
             val params = request.params ?: JSONObject()
             val engine = com.automatethethings.xkey.sync.SyncEngine(context)
             val counts = engine.mergeCertificates(params.optJSONArray("certificates") ?: org.json.JSONArray())
             val remote = engine.gatherCertificates()
             engine.markSynced()
+            AuditLogger.logTrustStoreSyncPerformed(
+                peerId, peerName, remote.length(), AuditLogger.SYNC_INBOUND,
+                added = counts.added, skipped = counts.skipped
+            )
             Response.success(request.id, JSONObject().apply {
                 put("added", counts.added)
                 put("skipped", counts.skipped)
@@ -3875,6 +4086,10 @@ class RequestHandler(
             })
         } catch (e: Exception) {
             Log.e(TAG, "syncTrustStore failed", e)
+            AuditLogger.logTrustStoreSyncPerformed(
+                peerId, peerName, 0, AuditLogger.SYNC_INBOUND,
+                success = false, errorMessage = "syncTrustStore failed: ${e.javaClass.simpleName}"
+            )
             Response.error(request.id, ErrorCodes.INTERNAL_ERROR, "syncTrustStore failed: ${e.message}")
         }
     }
@@ -4320,8 +4535,11 @@ class RequestHandler(
         }
         val peerPublicKeyHex = requireConfirmedPeer("sharePublicKey")
         return try {
-            val der = com.automatethethings.xkey.crypto.SyncCodec.pemToDer(pem)
-                ?: return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Invalid public_key_pem")
+            val der = try {
+                com.automatethethings.xkey.crypto.SyncCodec.pemToDer(pem)
+            } catch (e: com.automatethethings.xkey.crypto.MalformedSyncValueException) {
+                return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Invalid public_key_pem")
+            }
             val fingerprint = com.automatethethings.xkey.crypto.SyncCodec.sha256Hex(der)
             val keyId = params.optString("key_id", "")
             val label = params.optString("label", "").ifBlank { keyId.ifBlank { "shared-key" } }
@@ -4891,16 +5109,7 @@ class RequestHandler(
      * Reads a PIV algorithm, accepting go-xkms spellings ("ECDSA-P256",
      * "RSA-2048") alongside the [PivAlgorithm] enum names.
      */
-    private fun pivAlgorithmOf(name: String): PivAlgorithm? {
-        if (name.isBlank()) return null
-        runCatching { return PivAlgorithm.valueOf(name) }
-        return when (name.uppercase().replace("_", "-")) {
-            "ECDSA-P256", "EC-P256", "P256" -> PivAlgorithm.ES256
-            "ECDSA-P384", "EC-P384", "P384" -> PivAlgorithm.ES384
-            "RSA-2048", "RSA2048" -> PivAlgorithm.RS2048
-            else -> null
-        }
-    }
+    private fun pivAlgorithmOf(name: String): PivAlgorithm? = PivAlgorithm.fromWireName(name)
 
     private suspend fun handlePivListSlots(request: Request): Response {
         val pkm = pivKeyManager ?: return Response.error(request.id, ErrorCodes.FEATURE_UNAVAILABLE, "PIV support is not available on this transport")

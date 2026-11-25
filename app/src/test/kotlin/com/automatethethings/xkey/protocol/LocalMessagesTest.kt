@@ -37,10 +37,8 @@ import java.util.Base64
  * path, the missing-required-field path (which must raise a [ProtocolException]
  * carrying [ErrorCodes.INVALID_PARAMS]), wrong JSON types and defaults.
  *
- * `LocalGenerateKeyResult` gets extra attention: it previously emitted
- * `publicKey`/`strongBoxBacked` where Go expects `publicKeyDer`/`securityLevel`,
- * so the tests below guard both the presence of the correct keys and the
- * absence of the old ones.
+ * `LocalGenerateKeyResult` must emit `publicKeyDer`/`securityLevel`, as Go
+ * expects, and never `publicKey`/`strongBoxBacked`.
  */
 class LocalMessagesTest {
 

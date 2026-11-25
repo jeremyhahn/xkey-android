@@ -241,13 +241,10 @@ class GattServerMessageLoopTest {
      */
     @Test
     fun aServerWithoutARouterDispatchesDirectly(): Unit = runBlocking {
-        val direct = GattServerProbe(
-            context,
-            pairedDeviceRepository = null,
-            withMessageRouter = false
-        )
+        val direct = GattServerProbe(context, withMessageRouter = false)
         extraProbes += direct
         direct.establishSession(device)
+        direct.confirmPairing()
 
         val response = direct.interceptOrRoute(request(11, "local.getCapabilities"))
 

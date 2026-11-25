@@ -236,7 +236,7 @@ class SessionAuthManagerTest {
         assertTrue(manager.isBiometricRequired(perSession, "device-b"))
         // device-b stays unauthenticated until it verifies.
         assertTrue(manager.isBiometricRequired(perSession, "device-b"))
-        // A request on device-b, still live, does not discard device-a's approval (#134).
+        // A request on device-b, still live, does not discard device-a's approval.
         assertFalse(manager.isBiometricRequired(perSession, "device-a"))
     }
 

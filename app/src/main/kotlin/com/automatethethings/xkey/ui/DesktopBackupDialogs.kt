@@ -43,8 +43,8 @@ import kotlinx.coroutines.launch
  * (`remote.listBackups`) and says whether the desktop holds it, then asks for
  * its password once. The
  * password is read from its field into a [CharArray] only when it is sent,
- * the fields are wiped, and [XKeyGattService] zeroes the array once the
- * request is done. The fields keep no saved state, offer nothing to autofill
+ * the fields are wiped, and the array is zeroed once the request is done,
+ * whether it returned or threw. The fields keep no saved state, offer nothing to autofill
  * and ask the keyboard not to learn from them.
  */
 class DesktopBackupDialogs(
@@ -55,7 +55,7 @@ class DesktopBackupDialogs(
 
     /** Offers create or restore, or explains that no desktop is connected. */
     fun show() {
-        if (service() == null) {
+        if (connectedService() == null) {
             Snackbar.make(root, R.string.sync_not_connected, Snackbar.LENGTH_LONG).show()
             return
         }
@@ -78,6 +78,10 @@ class DesktopBackupDialogs(
         val oath = toggle(R.string.desktop_backup_include_oath)
         val passwords = toggle(R.string.desktop_backup_include_passwords)
         val form = column(password, confirm, trustStore, oath, passwords)
+        // The nothing-selected error sits on the first toggle; any change of choice clears it.
+        listOf(trustStore, oath, passwords).forEach { box ->
+            box.setOnCheckedChangeListener { _, _ -> trustStore.error = null }
+        }
 
         val dialog = MaterialAlertDialogBuilder(activity)
             .setTitle(R.string.desktop_backup_create_title)
@@ -95,12 +99,18 @@ class DesktopBackupDialogs(
                 )
                 val problem = DesktopBackupForm.checkCreate(password.text, confirm.text, include)
                 if (problem != null) {
-                    (if (password.text.isEmpty()) password else confirm).error = activity.getString(problem)
+                    val field = when {
+                        problem == R.string.desktop_backup_error_nothing_selected -> trustStore
+                        password.text.isEmpty() -> password
+                        else -> confirm
+                    }
+                    field.error = activity.getString(problem)
                     return@setOnClickListener
                 }
+                if (desktopGone(dialog)) return@setOnClickListener
                 val secret = take(password)
                 dialog.dismiss()
-                runWithNotice(R.string.desktop_backup_in_progress, onRetry = null) { gatt ->
+                runWithNotice(R.string.desktop_backup_in_progress, secret, onRetry = null) { gatt ->
                     val result = gatt.createDesktopBackup(secret, include)
                     Snackbar.make(
                         root,
@@ -120,7 +130,7 @@ class DesktopBackupDialogs(
      * restore dialog and does not block the restore.
      */
     private fun pickLatestAndRestore() {
-        val gatt = service()
+        val gatt = connectedService()
         if (gatt == null) {
             Snackbar.make(root, R.string.sync_not_connected, Snackbar.LENGTH_LONG).show()
             return
@@ -163,9 +173,14 @@ class DesktopBackupDialogs(
                     password.error = activity.getString(problem)
                     return@setOnClickListener
                 }
+                if (desktopGone(dialog)) return@setOnClickListener
                 val secret = take(password)
                 dialog.dismiss()
-                runWithNotice(R.string.desktop_backup_restore_in_progress, onRetry = { showRestore(backupId, note) }) { gatt ->
+                runWithNotice(
+                    R.string.desktop_backup_restore_in_progress,
+                    secret,
+                    onRetry = { showRestore(backupId, note) }
+                ) { gatt ->
                     showRestoreResult(gatt.restoreDesktopBackup(backupId, secret))
                 }
             }
@@ -203,10 +218,12 @@ class DesktopBackupDialogs(
      * Shows the progress notice [progress] while [block] runs, then dismisses
      * it on every exit: success, a typed failure, or cancellation when the
      * activity goes away. A failure [DesktopBackupForm.canRetry] allows offers
-     * [onRetry].
+     * [onRetry]. [secret], the password copied for the call, is zeroed on
+     * every exit too, whether or not the service got to zero it.
      */
     private fun runWithNotice(
         @StringRes progress: Int,
+        secret: CharArray,
         onRetry: (() -> Unit)?,
         block: suspend (XKeyGattService) -> Unit
     ) {
@@ -231,9 +248,29 @@ class DesktopBackupDialogs(
                 }
                 failure.show()
             } finally {
+                secret.fill('\u0000')
                 notice.dismiss()
             }
         }
+    }
+
+    /**
+     * The service when a desktop is connected to it, else null. A bound
+     * service outlives the desktop session, so being bound is not enough.
+     */
+    private fun connectedService(): XKeyGattService? =
+        service()?.takeIf { it.connectedDesktop() != null }
+
+    /**
+     * When the desktop went away after [dialog] opened, closes it (which
+     * wipes its fields) and says so, before any password is copied; returns
+     * whether it did.
+     */
+    private fun desktopGone(dialog: DialogInterface): Boolean {
+        if (connectedService() != null) return false
+        dialog.dismiss()
+        Snackbar.make(root, R.string.sync_not_connected, Snackbar.LENGTH_LONG).show()
+        return true
     }
 
     /** A password field: no autofill, no keyboard learning, no saved state. */

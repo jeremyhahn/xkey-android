@@ -14,6 +14,7 @@
  */
 package com.automatethethings.xkey.media
 
+import android.app.Application
 import android.content.ContentResolver
 import android.net.Uri
 import io.mockk.every
@@ -31,16 +32,54 @@ import org.junit.Assert.assertThrows
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
 
 /**
- * Unit tests for [XmpMetadataHelper] sidecar signature path.
- *
- * JPEG/EXIF paths require ExifInterface which depends on the Android
- * framework, so those are covered by instrumented tests. These unit
- * tests exercise the sidecar file (.xkeysig) code path which uses
- * plain file I/O.
+ * Unit tests for [XmpMetadataHelper]: the sidecar (.xkeysig) path, and the
+ * embedded EXIF read through a URI, which runs under Robolectric.
  */
+@RunWith(RobolectricTestRunner::class)
+@Config(application = Application::class, sdk = [34])
 class XmpMetadataHelperTest {
+
+    /** A JPEG with [data] embedded, served by a resolver that types it [type]. */
+    private fun assertEmbeddedSignatureFound(type: String?) {
+        val jpegFile = tempFolder.newFile("photo.jpg")
+        jpegFile.writeBytes(MediaSigningServiceFixture.jpeg())
+        val data = ContentAuthenticityData(
+            contentHash = "hash-embedded",
+            signatures = listOf(
+                SignatureEntry(
+                    keyFingerprint = "fp",
+                    signerName = "Alice",
+                    algorithm = "ES256",
+                    value = "sig",
+                    timestamp = "2025-01-01T00:00:00Z"
+                )
+            )
+        )
+        XmpMetadataHelper.writeSignature(jpegFile.absolutePath, data)
+        val signed = jpegFile.readBytes()
+        val resolver = mockk<ContentResolver>()
+        every { resolver.openInputStream(any()) } answers { ByteArrayInputStream(signed) }
+
+        val result = XmpMetadataHelper.readSignatureFromUri(resolver, mockk<Uri>(relaxed = true), type)
+
+        assertNotNull("an EXIF-signed JPEG typed $type must be read", result)
+        assertEquals("hash-embedded", result!!.contentHash)
+    }
+
+    @Test
+    fun `readSignatureFromUri reads the EXIF signature of a JPEG typed application octet-stream`() {
+        assertEmbeddedSignatureFound("application/octet-stream")
+    }
+
+    @Test
+    fun `readSignatureFromUri reads the EXIF signature of a JPEG with no type`() {
+        assertEmbeddedSignatureFound(null)
+    }
 
     @get:Rule
     val tempFolder = TemporaryFolder()

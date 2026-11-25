@@ -171,6 +171,31 @@ public class TrustStoreRepository(
         }
 
     /**
+     * Store a certificate a paired desktop sent through sync.
+     *
+     * The entry is stored with source [SOURCE_SYNC]: it is shown in the trust
+     * store and synced back out, but never anchors [verifyIDevIDChain]. Only a
+     * certificate added on the phone does.
+     *
+     * Never throws for a bad certificate: an unparsable or self-signed
+     * certificate returns null, as does one already present.
+     *
+     * @return the stored entry, or null if skipped
+     */
+    public suspend fun importSyncedCertificate(certDER: ByteArray, label: String? = null): TrustedCA? =
+        withContext(Dispatchers.IO) {
+            val cert = try {
+                certFactory.generateCertificate(ByteArrayInputStream(certDER)) as X509Certificate
+            } catch (e: Exception) {
+                return@withContext null
+            }
+            if (isSelfSigned(cert)) {
+                return@withContext null
+            }
+            storeIfAbsent(cert, label, SOURCE_SYNC)
+        }
+
+    /**
      * Verify an IDevID certificate chain.
      *
      * @param chain List of DER-encoded certificates (leaf first, root last)
@@ -193,7 +218,9 @@ public class TrustStoreRepository(
                 return@withContext VerificationResult.SelfSigned
             }
 
-            val trustedCAs = getAllCertificates()
+            // A certificate that arrived through sync never anchors: a paired
+            // desktop must not be able to make the phone trust an endorsement key.
+            val trustedCAs = getAllCertificates().filterNot { isSyncedSource(it.source) }
             if (trustedCAs.isEmpty()) {
                 return@withContext VerificationResult.NoTrustAnchors
             }
@@ -365,11 +392,7 @@ public class TrustStoreRepository(
             "$METADATA_NOT_UPDATED: ${e.message}"
         }
 
-        // The failed rewrite left the previous metadata, rows of the removed
-        // certificates included: write their files back so they stay trusted
-        // everywhere (listed and chain anchors). One whose file is not on disk
-        // anchors no chain, so it counts as removed; its stale row is left
-        // for a later delete or clear.
+        // After a failed rewrite, restore the removed certificates' files so they stay trusted.
         val restored = if (metadataError == null) {
             emptyList()
         } else {
@@ -564,14 +587,25 @@ public class TrustStoreRepository(
      * Store [cert] unless its file is already present, deciding and writing
      * under the store lock so two imports of one certificate store it once.
      *
+     * A certificate first stored through sync is re-stored under [source]
+     * when the phone itself adds it, which is what makes it a trust anchor.
+     *
      * @return the stored entry, or null if the certificate was already present
      */
     private fun storeIfAbsent(cert: X509Certificate, label: String?, source: String): TrustedCA? =
         withStoreLock {
-            if (getCertificateFile(computeFingerprint(cert)).exists()) {
-                null
-            } else {
+            val fingerprint = computeFingerprint(cert)
+            if (!getCertificateFile(fingerprint).exists()) {
                 storeCertificate(cert, label, source)
+            } else if (!isSyncedSource(source)) {
+                val existing = readMetadataSync().firstOrNull { it.fingerprint == fingerprint }
+                if (existing != null && isSyncedSource(existing.source)) {
+                    storeCertificate(cert, label ?: existing.label, source)
+                } else {
+                    null
+                }
+            } else {
+                null
             }
         }
 
@@ -652,6 +686,12 @@ public class TrustStoreRepository(
         const val METADATA_NOT_UPDATED = "could not update the trust store metadata"
         const val METADATA_ROW_LEFT = "certificate file removed, its metadata row left"
 
+        /** Source of a certificate a paired desktop sent through sync; never a trust anchor. */
+        const val SOURCE_SYNC = "sync"
+
+        fun isSyncedSource(source: String?): Boolean =
+            source == SOURCE_SYNC || source?.startsWith("$SOURCE_SYNC:") == true
+
         /**
          * One lock per trust store directory, shared by every repository
          * instance in the process: SyncEngine and the screens each create
@@ -691,10 +731,7 @@ public class TrustStoreRepository(
             }
             val scheme = uri.scheme
             if (uri.isOpaque || scheme == null) return UNPARSEABLE_URL
-            // No host: a registry-based authority (e.g. a host with "_") keeps
-            // the userinfo in its raw text, and a hostless URI such as
-            // "https:///user:secret@host/" puts it in the path, which OkHttp
-            // still fetches from that host. Record nothing of either.
+            // No host: record nothing, since the userinfo may sit in the raw authority or the path.
             val host = uri.host ?: return UNPARSEABLE_URL
             val port = if (uri.port != -1) ":${uri.port}" else ""
             return "$scheme://$host$port${uri.path.orEmpty()}"
@@ -718,11 +755,7 @@ public class TrustStoreRepository(
                 }
             )
         }
-        // Write a temp file and rename it over the metadata, so a write that
-        // fails part-way leaves the previous document in place. The temp file
-        // is this writer's own: created exclusively under a unique name, it is
-        // written, renamed and removed by this call alone. Callers hold the
-        // store lock, so no other writer reads or replaces the metadata between.
+        // Write an exclusive temp file and rename it over the metadata; callers hold the store lock.
         val metadataFile = File(trustStoreDir, "metadata.json")
         val tempFile = File.createTempFile("metadata.json.", ".tmp", trustStoreDir)
         try {

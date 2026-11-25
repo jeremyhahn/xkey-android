@@ -121,6 +121,7 @@ class GattServerReconnectTest {
 
     @Before
     fun setUp() {
+        NoiseTestKeyStore.install()
         mockkStatic(Log::class)
         every { Log.v(any(), any<String>()) } returns 0
         every { Log.d(any(), any<String>()) } returns 0
@@ -225,6 +226,35 @@ class GattServerReconnectTest {
         assertEquals(true, getField<Boolean>("pairingConfirmed"))
         call("handleApplicationMessage", device, desktop.encrypt(GENERATE_KEY))
         coVerify(exactly = 1) { requestHandler.handleRawRequest(any<ByteArray>()) }
+    }
+
+    /**
+     * A server built without a paired-device repository cannot approve a
+     * peer, so it serves nothing: requests are refused and pairing.confirm is
+     * refused rather than answered or crashing.
+     */
+    @Test
+    fun aServerWithoutARepositoryRefusesEveryRequest() = runBlocking<Unit> {
+        server.destroy()
+        awaitScopeFinished(server)
+        server = GattServer(context, requestHandler, messageRouter = router, pairingCallback = callback)
+        setField("gattServer", gatt)
+        setField("responseCharacteristic", mockk<BluetoothGattCharacteristic>(relaxed = true))
+        coEvery { callback.onPairingConfirmationRequired(any(), any(), any()) } returns true
+        val desktop = NoiseInitiatorSession(randomKey())
+        val keyHex = desktop.getLocalStaticPublicKey().hex()
+        val fragments = captureFragments()
+
+        reconnect(desktop, claimedPeerKeyHex = keyHex)
+
+        call("handleApplicationMessage", device, desktop.encrypt(GENERATE_KEY))
+        val refusal = JSONObject(String(desktop.decrypt(reassemble(fragments).single())))
+        assertEquals(ErrorCodes.PAIRING_REQUIRED, refusal.getJSONObject("error").getInt("code"))
+
+        call("handleApplicationMessage", device, desktop.encrypt(pairingConfirm(keyHex)))
+        assertEquals(false, getField<Boolean>("pairingConfirmed"))
+        call("handleApplicationMessage", device, desktop.encrypt(GENERATE_KEY))
+        coVerify(exactly = 0) { requestHandler.handleRawRequest(any<ByteArray>()) }
     }
 
     /**

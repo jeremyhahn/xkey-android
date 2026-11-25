@@ -255,6 +255,42 @@ class FragmentProtocolTest {
         assertEquals(0, reassembler.getExpectedTotal())
     }
 
+    /**
+     * A partial message older than 30 s is dropped: its late tail cannot
+     * complete it, and the next message then reassembles on its own.
+     */
+    @Test
+    fun aPartialMessageOlderThanTheTimeoutIsDropped() {
+        var now = 1_000_000L
+        val stale = Fragmenter(PAYLOAD).fragment(randomBytes(3 * PAYLOAD))
+        val fresh = randomBytes(2 * PAYLOAD)
+        val reassembler = FragmentReassembler(clock = { now })
+
+        assertNull(reassembler.addFragment(stale[0]))
+        now += 30_001L
+
+        assertNull(reassembler.addFragment(stale[1]))
+        assertEquals("the stale first fragment is gone", 1, reassembler.getFragmentCount())
+        assertEquals(0, reassembler.getExpectedTotal())
+        assertNull("the stale tail cannot complete it", reassembler.addFragment(stale[2]))
+
+        assertArrayEquals(fresh, reassembleAll(Fragmenter(PAYLOAD).fragment(fresh), reassembler))
+    }
+
+    /** A partial message exactly 30 s old is still within the window. */
+    @Test
+    fun aPartialMessageAtTheTimeoutStillCompletes() {
+        var now = 1_000_000L
+        val message = randomBytes(2 * PAYLOAD)
+        val fragments = Fragmenter(PAYLOAD).fragment(message)
+        val reassembler = FragmentReassembler(clock = { now })
+
+        assertNull(reassembler.addFragment(fragments[0]))
+        now += 30_000L
+
+        assertArrayEquals(message, reassembler.addFragment(fragments[1]))
+    }
+
     // -----------------------------------------------------------------
     // Malformed input
     // -----------------------------------------------------------------
@@ -337,8 +373,10 @@ class FragmentProtocolTest {
     // Helpers
     // -----------------------------------------------------------------
 
-    private fun reassembleAll(fragments: List<ByteArray>): ByteArray {
-        val reassembler = FragmentReassembler()
+    private fun reassembleAll(
+        fragments: List<ByteArray>,
+        reassembler: FragmentReassembler = FragmentReassembler()
+    ): ByteArray {
         var complete: ByteArray? = null
         for (fragment in fragments) {
             reassembler.addFragment(fragment)?.let {

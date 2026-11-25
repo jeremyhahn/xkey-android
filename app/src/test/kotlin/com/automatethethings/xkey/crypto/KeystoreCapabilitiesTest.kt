@@ -61,6 +61,23 @@ class KeystoreCapabilitiesTest {
     }
 
     @Test
+    fun `every release lists P-521, AES-192, HMAC-SHA384 and every RSA hash`() {
+        for (sdk in 28..37) {
+            val algorithms = KeystoreCapabilities.supportedAlgorithms(sdk)
+            for (name in listOf("ES512", "AES192", "HMAC-SHA384", "RS256", "RS384", "RS512")) {
+                assertTrue("API $sdk lists $name", algorithms.contains(name))
+            }
+        }
+    }
+
+    @Test
+    fun `every listed algorithm is one local generateKey parses`() {
+        for (name in KeystoreCapabilities.BASE_ALGORITHMS) {
+            com.automatethethings.xkey.protocol.CoseAlgorithms.fromName(name)
+        }
+    }
+
+    @Test
     fun `every release lists the Keystore algorithms available since minSdk`() {
         for (sdk in 28..37) {
             val algorithms = KeystoreCapabilities.supportedAlgorithms(sdk)

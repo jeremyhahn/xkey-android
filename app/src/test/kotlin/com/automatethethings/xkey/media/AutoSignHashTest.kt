@@ -235,7 +235,7 @@ class AutoSignHashTest {
         val start = signing.indexOf("private fun contentHashOfFile(")
         assertTrue("contentHashOfFile is declared", start >= 0)
         val body = signing.substring(start).substringBefore("\n    }\n")
-        val jpeg = body.substringAfter("isCanonicalisedJpeg(mimeType)").substringBefore("\n        }")
+        val jpeg = body.substringAfter("isJpeg(type)").substringBefore("\n        }")
         assertTrue("the one refusal is contentHashOfFile's JPEG check: $body", "TooLargeException(" in jpeg)
 
         // Spelled in two parts so this scan does not name the removed parameter itself.
