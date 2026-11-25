@@ -154,10 +154,7 @@ internal class PendingCryptoSignatures(
                                 // The caller cancelled: its cancellation
                                 // handler has released the entry already.
                                 if (!isActive) throw e
-                                // A cancellation of the preparation's own
-                                // (a timeout inside it) while the caller
-                                // still waits: a failure, or the request
-                                // would hold the screen with nothing shown.
+                                // A timeout inside the preparation while the caller waits is a failure.
                                 fail(IllegalStateException("The signing request's preparation was cancelled", e))
                                 return@launch
                             } catch (e: Exception) {

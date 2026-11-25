@@ -463,7 +463,7 @@ class ProtocolIntegrationTest {
 
     /**
      * A certificate for another key is refused with INVALID_PARAMS and the
-     * slot keeps the certificate it had (#173).
+     * slot keeps the certificate it had.
      */
     @Test
     fun pivImportRefusesACertificateForAnotherKey() {
@@ -547,9 +547,7 @@ class ProtocolIntegrationTest {
         )
     }
 
-    // ------------------------------------------------------------------
     // OATH family
-    // ------------------------------------------------------------------
 
     @Test
     fun oathLifecycle() {
@@ -737,9 +735,7 @@ class ProtocolIntegrationTest {
     @Test
     fun hardwareKeyExportsPublicOnly() {
         val keyId = "itest-hw-share-$runId"
-        // Marked shareable so the policy gate admits the peer; the point of
-        // this test is the BACKING boundary — even a fully shareable hardware
-        // key must never yield private material.
+        // Even a shareable hardware key must never yield private material.
         client.call(
             "local.generateKey",
             JSONObject()
@@ -883,13 +879,7 @@ class ProtocolIntegrationTest {
     // Protocol error handling
     // ------------------------------------------------------------------
 
-    // ------------------------------------------------------------------
-    // Request generation echo (#10, go-xkms#128)
-    //
-    // Checked on the raw response text: this runs on the platform org.json,
-    // which reads an integer above Long as a Double, so only the text shows
-    // whether a uint64 came back digit for digit.
-    // ------------------------------------------------------------------
+    // Request generation echo, checked on the raw text: org.json reads a uint64 above Long as a Double.
 
     @Test
     fun everyMethodFamilyEchoesTheGeneration() {

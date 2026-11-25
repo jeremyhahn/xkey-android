@@ -18,6 +18,7 @@ import com.automatethethings.xkey.protocol.ErrorCodes
 import com.automatethethings.xkey.protocol.ProtocolException
 import com.automatethethings.xkey.protocol.Request
 import com.automatethethings.xkey.protocol.RequestHandler
+import com.automatethethings.xkey.protocol.RpcId
 import io.mockk.mockk
 import io.mockk.unmockkAll
 import kotlinx.coroutines.test.runTest
@@ -345,7 +346,7 @@ class RemoteKeyClientTest {
         succeedWith("""{"backends":[{"name":"soft","type":"software"}]}""")
 
         assertEquals(1, client.listBackends().size)
-        assertEquals(1_000_001L, lastRequest.id)
+        assertEquals(RpcId.of(1_000_001L), lastRequest.id)
     }
 
     @Test

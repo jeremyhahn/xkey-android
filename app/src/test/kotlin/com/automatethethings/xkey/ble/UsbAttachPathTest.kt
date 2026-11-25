@@ -54,7 +54,7 @@ import java.io.RandomAccessFile
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * The service's USB attach path (#134): an attach that resumes late, after
+ * The service's USB attach path: an attach that resumes late, after
  * its server closed and a replacement attached, must not take the desktop
  * session's observer away from the replacement.
  *

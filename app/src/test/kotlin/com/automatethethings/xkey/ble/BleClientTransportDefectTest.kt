@@ -267,12 +267,8 @@ class BleClientTransportDefectTest {
     // -----------------------------------------------------------------
 
     /**
-     * PR #42: the ack invoked the write's completion and
-     * only then cleared the slot. Invoking it resumes the writer, and the
-     * writer's next fragment installs its own completion — so a callback still
-     * running when that happened cleared the *next* write's completion, and the
-     * next ack found nothing to resume. The request then hung with `writeMutex`
-     * and `stateMutex` held.
+     * An ack must clear the slot before invoking the write's completion: the resumed
+     * writer's next fragment installs its own completion, which a late clear would drop.
      *
      * The harness keeps each callback open until the next write has started,
      * across a request of [MULTI_FRAGMENT_WRITES] fragments, and the timeout

@@ -1,9 +1,9 @@
 # FIDO2 phone backend architecture
 
-> **Status: REFERENCE** · Last verified: 2026-11-17
-> As-built description of how a paired desktop (`xkey fido2 --backend phone`) discovers and uses passkeys held on the phone, and of the phone's CTAP2 BLE authenticator.
+> Status: reference. Last checked against main on 2026-11-23 (names spot-checked).
+> This page describes how a paired desktop (`xkey fido2 --backend phone`) discovers and uses passkeys held on the phone, and of the phone's CTAP2 BLE authenticator.
 
-## Summary
+## Overview
 
 The desktop authenticator speaks CTAP2 to the browser; the phone does not parse
 CTAP2 frames. For the phone backend it serves two JSON-RPC methods over the
@@ -94,7 +94,7 @@ reads `keys.sign_count` and `credential_metadata.sign_count`, and writes
 max + 1 to both before it returns the value. Stores that disagree continue
 from the larger value. The counter advances before signing, so a failed
 signature leaves a gap. A relying party accepts a gap, and no value is ever
-signed twice. The handler no longer writes `sign_count` itself.
+signed twice. The handler does not write `sign_count` itself.
 
 ## Main flow
 
@@ -138,7 +138,7 @@ sequenceDiagram
 | Unknown credential | `ProtocolException`, `ErrorCodes.KEY_NOT_FOUND` |
 | Key is not `KeyTypes.FIDO2`; stored `rpId` differs from the request | `ProtocolException`, `ErrorCodes.KEY_NOT_FOUND` ("Credential not found"): the lookup offers only FIDO2 passkeys of the requested `rpId`, so such a key cannot be named |
 | Sharing policy refuses this peer | `ProtocolException`, `ErrorCodes.OPERATION_DENIED` (list omits the credential instead) |
-| UV required but not performed, with strict user verification on | `UserVerificationRequiredException` from `UserVerificationCompliance.enforce`; `RequestHandler.dispatch` answers `ErrorCodes.BIOMETRIC_FAILED` (-32003) with the exception's message |
+| UV required but not performed, with strict user verification on | `UserVerificationRequiredException` from `UserVerificationCompliance.enforce`; `RequestHandler.dispatch` answers `ErrorCodes.BIOMETRIC_FAILED` (-32002) with the exception's message |
 
 When the relying party requires user verification and none was performed, both
 `local.listFido2Credentials` and `local.signFido2Assertion` return

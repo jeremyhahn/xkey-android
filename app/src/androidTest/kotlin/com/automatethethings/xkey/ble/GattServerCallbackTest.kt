@@ -128,9 +128,7 @@ class GattServerCallbackTest {
         assertNull("expected no bound sender without a Noise session", probe.server.boundSender())
     }
 
-    // -----------------------------------------------------------------
     // The GATT service definition
-    // -----------------------------------------------------------------
 
     /**
      * The service and its three characteristics are what a desktop discovers.
@@ -223,9 +221,7 @@ class GattServerCallbackTest {
         awaitMtu(517, "above the supported maximum")
     }
 
-    // -----------------------------------------------------------------
     // CCCD subscription
-    // -----------------------------------------------------------------
 
     /**
      * `sendResponse` refuses to send until this flag is set, so getting the

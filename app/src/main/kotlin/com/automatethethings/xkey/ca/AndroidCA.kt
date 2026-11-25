@@ -557,8 +557,13 @@ class AndroidCA internal constructor(
 
     /**
      * Delete all CA keys and certificates.
+     *
+     * @throws com.automatethethings.xkey.crypto.KeyDeletionException if a CA
+     *   key could not be deleted: its private key may still be on the device,
+     *   so the reset is never reported complete. The stored certificates are
+     *   cleared only once both keys are gone.
      */
-    suspend fun reset() = withContext(Dispatchers.Default) {
+    suspend fun reset(): Unit = withContext(Dispatchers.Default) {
         try {
             if (keyStore.containsAlias(ROOT_CA_ALIAS)) {
                 keyStore.deleteEntry(ROOT_CA_ALIAS)
@@ -566,11 +571,12 @@ class AndroidCA internal constructor(
             if (keyStore.containsAlias(INTERMEDIATE_CA_ALIAS)) {
                 keyStore.deleteEntry(INTERMEDIATE_CA_ALIAS)
             }
-            clearStoredCertificates()
-            Log.i(TAG, "CA reset complete")
         } catch (e: Exception) {
             Log.e(TAG, "CA reset failed", e)
+            throw com.automatethethings.xkey.crypto.KeyDeletionException("A CA key could not be deleted", e)
         }
+        clearStoredCertificates()
+        Log.i(TAG, "CA reset complete")
     }
 
     /**

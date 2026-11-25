@@ -86,9 +86,7 @@ class CryptoSigningActivityUiTest {
         receiver = null
     }
 
-    // ---------------------------------------------------------------
     // createIntent() factory
-    // ---------------------------------------------------------------
 
     @Test
     fun createIntent_includesAllProvidedExtras() {

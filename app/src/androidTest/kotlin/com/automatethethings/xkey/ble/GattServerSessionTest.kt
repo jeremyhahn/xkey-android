@@ -375,24 +375,19 @@ class GattServerSessionTest {
 
     /**
      * A server built without a paired-device store has no notion of approval,
-     * so it cannot gate on one. This is the posture a transport with its own
-     * out-of-band trust would use, and it must route rather than refuse.
+     * so it fails closed: every request is refused as unpaired.
      */
     @Test
-    fun aServerWithoutAPairedDeviceStoreRoutesWithoutGating(): Unit = runBlocking {
+    fun aServerWithoutAPairedDeviceStoreRefusesEveryRequest(): Unit = runBlocking {
         val ungated = GattServerProbe(context, pairedDeviceRepository = null)
         try {
             ungated.establishSession(device)
 
             val response = ungated.interceptOrRoute(request(1, "local.getCapabilities"))
 
-            assertNotNull("an ungated server must answer", response)
+            assertNotNull("the refusal must be answered", response)
             val json = JSONObject(String(response!!, Charsets.UTF_8))
-            assertFalse(
-                "the pairing gate cannot apply without a device store",
-                json.has("error") &&
-                    json.getJSONObject("error").getInt("code") == ErrorCodes.PAIRING_REQUIRED
-            )
+            assertEquals(ErrorCodes.PAIRING_REQUIRED, json.getJSONObject("error").getInt("code"))
         } finally {
             ungated.close()
         }

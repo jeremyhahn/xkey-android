@@ -120,14 +120,7 @@ class BiometricNotificationHelper(private val context: Context) {
         }
         Log.d(TAG, "Showing biometric notification: operation=$operationType, rpName=$rpName")
 
-        // The full-screen intent: the launcher's own prompt when there is one,
-        // else a generic TransparentBiometricActivity.
-        // The launcher has already started its prompt, so the copy carries no
-        // CLEAR_TOP: that would destroy the live prompt and recreate it,
-        // answering the request as closed. A repeat delivery of the copy is
-        // refused by the prompt that owns the request (for signing,
-        // CryptoSigningCancellations; TransparentBiometricActivity is
-        // singleTop and on top while it prompts).
+        // Full-screen intent: the launcher's prompt without CLEAR_TOP, which would recreate it, else TransparentBiometricActivity.
         val fullScreenIntent = promptIntent?.let { Intent(it) }?.apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         } ?: Intent(context, TransparentBiometricActivity::class.java).apply {
@@ -137,12 +130,7 @@ class BiometricNotificationHelper(private val context: Context) {
             putExtra(TransparentBiometricActivity.EXTRA_SUBTITLE, rpName ?: operationType)
             putExtra(TransparentBiometricActivity.EXTRA_SHOW_ON_LOCK_SCREEN, true)
         }
-        // The key, whole, in the intent's data: extras do not tell two pending
-        // intents apart, and two keys' hashCode() can be equal, so without it
-        // posting one request would rewrite another's pending intent. A
-        // launcher prompt already carries it (BiometricActivityLauncher sets
-        // it before the direct start), so the copy stays the same intent as
-        // the live prompt and Android routes it there (onNewIntent).
+        // The key goes in the intent data so two requests' pending intents never collide.
         fullScreenIntent.data = intentData(requestId)
 
         val fullScreenPendingIntent = PendingIntent.getActivity(
@@ -152,8 +140,18 @@ class BiometricNotificationHelper(private val context: Context) {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        // Create the notification content
+        // Create the notification content. It names the relying party, so it
+        // is private: a locked screen shows the public version, which names
+        // none.
         val displayName = rpName ?: context.getString(R.string.app_name)
+        val publicVersion = NotificationCompat.Builder(context, XKeyApplication.BIOMETRIC_CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_fingerprint)
+            .setContentTitle(context.getString(R.string.biometric_notification_title))
+            .setContentText(context.getString(R.string.biometric_notification_public_text))
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setCategory(NotificationCompat.CATEGORY_CALL)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .build()
         val notification = NotificationCompat.Builder(context, XKeyApplication.BIOMETRIC_CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_fingerprint)
             .setContentTitle(context.getString(R.string.biometric_notification_title))
@@ -165,7 +163,8 @@ class BiometricNotificationHelper(private val context: Context) {
             .setAutoCancel(true)
             .setOngoing(true)
             .setTimeoutAfter(timeoutMs)
-            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+            .setPublicVersion(publicVersion)
             .build()
 
         val notificationManager = context.getSystemService(NotificationManager::class.java)

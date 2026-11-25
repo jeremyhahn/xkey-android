@@ -84,27 +84,28 @@ object AuditLogger {
     /**
      * Initialize the audit logger with application context.
      *
-     * Must be called once during application startup before any logging operations.
+     * Must be called once during application startup before any logging
+     * operations. The wiring happens once; every call then applies the
+     * retention policy (entries older than 90 days, then beyond the
+     * [MAX_ENTRIES] newest) in the background.
      *
      * @param context Application context for database access.
      */
     fun initialize(context: Context) {
-        val existing = daoRef.get()
-        if (existing != null) return
-
-        val database = XKeyDatabase.getInstance(context)
-        val dao = database.auditLogDao()
-        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-
-        if (daoRef.compareAndSet(null, dao)) {
-            scopeRef.set(scope)
-            // Apply retention policy on startup
-            scope.launch {
-                try {
-                    applyRetentionPolicy(dao)
-                } catch (e: Exception) {
-                    Log.w(TAG, "Failed to apply retention policy", e)
-                }
+        if (daoRef.get() == null) {
+            val dao = XKeyDatabase.getInstance(context).auditLogDao()
+            val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+            if (daoRef.compareAndSet(null, dao)) {
+                scopeRef.set(scope)
+            }
+        }
+        val dao = daoRef.get() ?: return
+        val scope = scopeRef.get() ?: return
+        scope.launch {
+            try {
+                applyRetentionPolicy(dao)
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to apply retention policy", e)
             }
         }
     }
@@ -888,6 +889,12 @@ object AuditLogger {
     data class SettingChange(val oldValue: String?, val newValue: String)
 
     /**
+     * The named change for [editAuditedSettings], or null when [oldValue] equals [newValue].
+     */
+    fun changeOf(settingName: String, oldValue: String, newValue: String): Pair<String, SettingChange>? =
+        if (oldValue == newValue) null else settingName to SettingChange(oldValue, newValue)
+
+    /**
      * The one path for an audited settings write: runs [dataStore]'s edit
      * with [transform] and then records the [SettingChange] it returns, both
      * under [NonCancellable]. DataStore can commit a write while a caller
@@ -908,14 +915,32 @@ object AuditLogger {
         settingName: String,
         transform: (MutablePreferences) -> SettingChange?
     ) {
+        editAuditedSettings(dataStore) { preferences ->
+            listOfNotNull(transform(preferences)?.let { settingName to it })
+        }
+    }
+
+    /**
+     * [editAuditedSetting] for a write that changes several settings: runs
+     * [dataStore]'s edit with [transform] and records one entry per named
+     * [SettingChange] it returns, both under [NonCancellable]. Leave an
+     * unchanged setting out of the list and it records nothing.
+     *
+     * @param dataStore The settings DataStore to write.
+     * @param transform Applies the write and returns the setting names and changes to audit.
+     */
+    suspend fun editAuditedSettings(
+        dataStore: DataStore<Preferences>,
+        transform: (MutablePreferences) -> List<Pair<String, SettingChange>>
+    ) {
         withContext(NonCancellable) {
-            var change: SettingChange? = null
-            dataStore.edit { preferences -> change = transform(preferences) }
-            change?.let {
+            var changes: List<Pair<String, SettingChange>> = emptyList()
+            dataStore.edit { preferences -> changes = transform(preferences) }
+            for ((settingName, change) in changes) {
                 logSettingsChanged(
                     settingName = settingName,
-                    oldValue = it.oldValue,
-                    newValue = it.newValue
+                    oldValue = change.oldValue,
+                    newValue = change.newValue
                 )
             }
         }
@@ -1054,16 +1079,20 @@ object AuditLogger {
      * @param deviceId The device ID involved (if applicable).
      * @param deviceName The device name (if applicable).
      * @param reason The reason for denial.
+     * @param operation The refused request method (for example
+     *   `local.signFido2Assertion`), if applicable.
      */
     fun logPolicyDenied(
         keyId: String? = null,
         keyLabel: String? = null,
         deviceId: String? = null,
         deviceName: String? = null,
-        reason: String
+        reason: String,
+        operation: String? = null
     ) {
         val details = JSONObject().apply {
             put("reason", reason)
+            operation?.let { put("operation", it) }
         }
         log(
             AuditLogEntity(
@@ -1360,7 +1389,14 @@ object AuditLogger {
     // OATH/TOTP Operations
     // -------------------------------------------------------------------------
 
-    fun logOathCredentialCreated(oathId: String, issuer: String?, accountName: String, oathType: String) {
+    fun logOathCredentialCreated(
+        oathId: String,
+        issuer: String?,
+        accountName: String,
+        oathType: String,
+        deviceId: String? = null,
+        deviceName: String? = null
+    ) {
         val details = JSONObject().apply {
             issuer?.let { put("issuer", it) }
             put("accountName", accountName)
@@ -1371,29 +1407,47 @@ object AuditLogger {
                 operationType = AuditOperationType.OATH_CREDENTIAL_CREATED,
                 keyId = oathId,
                 keyLabel = issuer?.let { "$it:$accountName" } ?: accountName,
+                deviceId = deviceId,
+                deviceName = deviceName,
                 success = true,
                 details = details.toString()
             )
         )
     }
 
-    fun logOathCredentialDeleted(oathId: String, issuer: String?, accountName: String) {
+    fun logOathCredentialDeleted(
+        oathId: String,
+        issuer: String?,
+        accountName: String,
+        deviceId: String? = null,
+        deviceName: String? = null
+    ) {
         log(
             AuditLogEntity(
                 operationType = AuditOperationType.OATH_CREDENTIAL_DELETED,
                 keyId = oathId,
                 keyLabel = issuer?.let { "$it:$accountName" } ?: accountName,
+                deviceId = deviceId,
+                deviceName = deviceName,
                 success = true
             )
         )
     }
 
-    fun logOathCodeGenerated(oathId: String, issuer: String?, accountName: String) {
+    fun logOathCodeGenerated(
+        oathId: String,
+        issuer: String?,
+        accountName: String,
+        deviceId: String? = null,
+        deviceName: String? = null
+    ) {
         log(
             AuditLogEntity(
                 operationType = AuditOperationType.OATH_CODE_GENERATED,
                 keyId = oathId,
                 keyLabel = issuer?.let { "$it:$accountName" } ?: accountName,
+                deviceId = deviceId,
+                deviceName = deviceName,
                 success = true
             )
         )
@@ -1440,6 +1494,63 @@ object AuditLogger {
                 success = success,
                 errorMessage = errorMessage,
                 details = details.toString()
+            )
+        )
+    }
+
+    /**
+     * Records one trust-store sync with a paired device: counts only, never
+     * a certificate body. Same shape as [logOathSyncPerformed] so it plugs
+     * into the shared sync audit helpers; [updated] is always zero here.
+     *
+     * @param count Certificates sent to the peer.
+     * @param added Certificates the merge stored on the phone (as synced).
+     * @param skipped Certificates the merge skipped: present, self-signed,
+     *   unparsable or rejected.
+     */
+    @Suppress("UNUSED_PARAMETER")
+    fun logTrustStoreSyncPerformed(
+        deviceId: String?,
+        deviceName: String?,
+        count: Int,
+        direction: String = SYNC_INBOUND,
+        added: Int = 0,
+        updated: Int = 0,
+        skipped: Int = 0,
+        success: Boolean = true,
+        errorMessage: String? = null
+    ) {
+        val details = JSONObject().apply {
+            put("direction", direction)
+            put("certificateCount", count)
+            put("added", added)
+            put("skipped", skipped)
+        }
+        log(
+            AuditLogEntity(
+                operationType = AuditOperationType.TRUST_STORE_SYNC_PERFORMED,
+                deviceId = deviceId,
+                deviceName = deviceName,
+                success = success,
+                errorMessage = errorMessage,
+                details = details.toString()
+            )
+        )
+    }
+
+    /**
+     * Records a synced OATH item the merge refused: the phone holds [oathId]
+     * with other key material (secret, type, algorithm, digits or period)
+     * and the wire item carries no timestamp to say which copy is newer, so
+     * the phone's copy is kept. Only the id is recorded, never a secret.
+     */
+    fun logOathSyncConflict(oathId: String) {
+        log(
+            AuditLogEntity(
+                operationType = AuditOperationType.OATH_SYNC_PERFORMED,
+                keyId = oathId,
+                success = false,
+                errorMessage = "sync conflict: key material differs, local copy kept"
             )
         )
     }
@@ -1642,6 +1753,43 @@ object AuditLogger {
         }
         log(AuditLogEntity(operationType = AuditOperationType.BACKUP_RESTORED, deviceId = deviceId, deviceName = deviceName, success = true, details = details.toString()))
     }
+
+    /**
+     * Clears the whole audit log at the user's request and records the
+     * clearing (AUDIT_LOG_CLEARED with the count) in the same Room
+     * transaction on [dao]: both commit or neither does, so a cancel or a
+     * crash inside the transaction rolls the delete back and the history is
+     * never erased without its record.
+     *
+     * @param dao The audit table to clear.
+     * @return Rows the clear removed.
+     */
+    suspend fun clearAuditLog(dao: AuditLogDao): Int =
+        dao.deleteAllAndRecord(::auditLogClearedEntry)
+
+    /**
+     * Deletes audit entries older than [olderThan] at the user's request and
+     * records the prune (AUDIT_LOG_PRUNED with the count and cutoff) in the
+     * same transaction, as [clearAuditLog] does.
+     *
+     * @param dao The audit table to prune.
+     * @param olderThan The epoch-millisecond cutoff.
+     * @return Rows the prune removed.
+     */
+    suspend fun pruneAuditLog(dao: AuditLogDao, olderThan: Long): Int =
+        dao.deleteOlderThanAndRecord(olderThan) { auditLogPrunedEntry(it, olderThan) }
+
+    internal fun auditLogClearedEntry(deleted: Int): AuditLogEntity = AuditLogEntity(
+        operationType = AuditOperationType.AUDIT_LOG_CLEARED,
+        success = true,
+        details = JSONObject().put("deleted", deleted).toString()
+    )
+
+    internal fun auditLogPrunedEntry(deleted: Int, olderThan: Long): AuditLogEntity = AuditLogEntity(
+        operationType = AuditOperationType.AUDIT_LOG_PRUNED,
+        success = true,
+        details = JSONObject().put("deleted", deleted).put("olderThan", olderThan).toString()
+    )
 
     // -------------------------------------------------------------------------
     // Internal Methods

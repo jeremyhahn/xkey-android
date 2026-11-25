@@ -34,6 +34,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
+import org.junit.Assume.assumeTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -188,20 +189,20 @@ class GattServerTcgEnrollmentTest {
             originalSettings.copy(enabled = true, caSource = CertificateAuthoritySource.THIS_DEVICE)
         )
         val outbound = enrollmentServer()
-        // A request is only opened toward a connected device; with none the
-        // ceremony refuses before its first step.
-        val adapter = context.getSystemService(android.bluetooth.BluetoothManager::class.java)?.adapter
-            ?: throw AssertionError("the ceremony needs a Bluetooth adapter to name its peer")
-        outbound.connectedDevice = adapter.getRemoteDevice("AA:BB:CC:DD:EE:F8")
+        // A connected device, so the first request is numbered and handed to
+        // the transport; with none it is refused before it takes an id.
+        val device = GattServerProbe.remoteDevice(context)
+        assumeTrue("this device has no Bluetooth adapter", device != null)
+        outbound.connectedDevice = device
         val before = outbound.nextEnrollmentRequestId
 
         try {
             outbound.performPostPairingEnrollment(deviceKeyHex, deviceName)
-            fail("enrollment cannot succeed with no session to carry it")
+            fail("enrollment cannot succeed with no channel to carry it")
         } catch (e: Exception) {
-            // The first step reaches sendEncryptedMessage, which has no Noise
-            // session to encrypt with. What matters is that it is the *first*
-            // step that fails, not a later one.
+            // The first step reaches the transport, which has no open
+            // notification channel to send on. What matters is that it is the
+            // *first* step that fails, not a later one.
             assertTrue(
                 "expected a transport failure, got ${e::class.java.name}: ${e.message}",
                 e is java.io.IOException || e is com.automatethethings.xkey.protocol.ProtocolException

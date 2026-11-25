@@ -18,6 +18,7 @@ import android.util.Log
 import com.automatethethings.xkey.protocol.ErrorCodes
 import com.automatethethings.xkey.protocol.RequestHandler
 import com.automatethethings.xkey.protocol.Response
+import com.automatethethings.xkey.protocol.RpcId
 import kotlinx.coroutines.CompletableDeferred
 import org.json.JSONObject
 import java.util.concurrent.ConcurrentHashMap
@@ -112,7 +113,9 @@ class BidirectionalMessageRouter(
     private fun handleIncomingResponse(json: String) {
         try {
             val response = Response.fromJson(json)
-            val deferred = pendingResponses.remove(response.id)
+            // The phone numbers its own requests with Longs; an answer with
+            // any other id is to no request of ours.
+            val deferred = response.id.longValueOrNull()?.let { pendingResponses.remove(it) }
             if (deferred != null) {
                 Log.d(TAG, "Routing response for request id=${response.id}")
                 deferred.complete(response)
@@ -134,7 +137,7 @@ class BidirectionalMessageRouter(
         pendingResponses.clear()
         for ((id, deferred) in entries) {
             deferred.complete(
-                Response.error(id, ErrorCodes.INTERNAL_ERROR, "Connection lost")
+                Response.error(RpcId.of(id), ErrorCodes.INTERNAL_ERROR, "Connection lost")
             )
         }
         if (entries.isNotEmpty()) {

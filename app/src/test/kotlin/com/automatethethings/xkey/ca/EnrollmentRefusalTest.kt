@@ -26,7 +26,7 @@ import org.junit.Test
  * happened: a device that answered the credential challenge with the wrong
  * secret does not hold the keys it presented — an attack or a broken device —
  * while a device that never answered at all is an interoperability problem to
- * chase. Both used to be free text, and free text cannot be filtered on.
+ * chase. Free text cannot be filtered on.
  *
  * The case names are therefore pinned here as literals rather than derived from
  * the enum-like structure: they are written into the audit log and into stored

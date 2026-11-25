@@ -96,9 +96,7 @@ class OathEngineRfcVectorTest {
         assertEquals("65353130", totp(seedSha1, "SHA1", 20_000_000_000L))
     }
 
-    // -------------------------------------------------------------------------
     // TOTP is HOTP over the time step
-    // -------------------------------------------------------------------------
 
     @Test
     fun `TOTP is exactly HOTP applied to the floor of the time step`() {

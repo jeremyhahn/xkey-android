@@ -129,22 +129,25 @@ class GattServerOutboundProbe(val server: GattServer) {
         invoke(sendNotificationMethod, device, characteristic, data)
     }
 
+    /**
+     * Sends on the server's current [noiseSession], as the enrollment ceremony
+     * does on the session it was started for.
+     *
+     * The session is passed as the server holds it, null included: a private
+     * Kotlin parameter carries no null check, and the refusals these suites
+     * pin (no router, no device, no channel) all come before it is read.
+     */
     suspend fun sendRequestAndWaitForResponse(method: String, params: JSONObject): JSONObject =
-        callSuspend(sendRequestMethod, currentSession(), method, params) as JSONObject
+        callSuspend(sendRequestMethod, noiseSession, method, params) as JSONObject
 
     /**
-     * Runs the ceremony on the server's live session or, when a test set none
-     * up, on a session no handshake ever established: the server's callers
-     * always hand it one, and a session with no transport keys is what "no
-     * session to carry it" is now.
+     * Runs the ceremony on the server's current [noiseSession], the one
+     * `pairing.confirm` hands it when the desktop pairs. As with
+     * [sendRequestAndWaitForResponse], a null session is passed through.
      */
     suspend fun performPostPairingEnrollment(publicKeyHex: String, deviceName: String) {
-        callSuspend(enrollmentMethod, publicKeyHex, deviceName, noiseSession ?: NoiseSession())
+        callSuspend(enrollmentMethod, publicKeyHex, deviceName, noiseSession)
     }
-
-    // The server's live session, which its own callers pass to these seams.
-    private fun currentSession(): NoiseSession =
-        noiseSession ?: throw AssertionError("establish a session before driving the outbound path")
 
     /**
      * Refuses an enrollment exactly as a verification step in the ceremony does.
@@ -205,6 +208,10 @@ class GattServerOutboundProbe(val server: GattServer) {
     suspend fun interceptOrRoute(plaintext: ByteArray): ByteArray? =
         callSuspend(interceptOrRouteMethod, plaintext) as ByteArray?
 
+    /**
+     * Passes the server's current session (null when it has none), as
+     * `interceptOrRoute` does for a request that arrived on it.
+     */
     suspend fun handlePairingConfirmIfNeeded(plaintext: ByteArray): ByteArray? =
         callSuspend(pairingConfirmMethod, plaintext, noiseSession) as ByteArray?
 

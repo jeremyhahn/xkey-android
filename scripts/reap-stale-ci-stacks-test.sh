@@ -1,14 +1,5 @@
 #!/usr/bin/env bash
-# Tests reap-stale-ci-stacks.sh's image and lease rules against a stubbed
-# docker: the image families (<prefix>it and
-# REAP_IMAGE_REPOS) and their untagged images, the in-use check, the last-use
-# age and the lease expiry. Needs bash and GNU date only, no Docker.
-# `make reaper-test`.
-#
-# The stub serves two fixture files and logs every removal:
-#   containers: id name state finished created expires image
-#   images:     id ref created last-tag-unix label   (ref <none>: untagged)
-# A dash is an empty field. An image with two tags is two lines, one id.
+# Tests reap-stale-ci-stacks.sh's image and lease rules against a stubbed docker. `make reaper-test`.
 set -euo pipefail
 
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
@@ -155,13 +146,7 @@ $(sha 11) <none> $(ago $((5 * H))) $((now - 5 * H)) other-toolchain
 $(sha 12) <none> $(ago $((5 * H))) -62135596800 ${PREFIX}it
 $(sha 13) ${PREFIX}it:iiii $(ago $((5 * H))) $((now - 5 * H)) ${PREFIX}it
 $(sha 14) ${PREFIX}it:jjjj $(ago $((3 * H))) $((now - 60)) ${PREFIX}it"
-# Removed: the expired lease (c2) and the one past <min-age-seconds> despite
-# its far expiry (c3), then their images; the idle tag (1); the untagged
-# images of both families older than 2 h (9, 12); the idle it image (13).
-# Kept: an image re-tagged 10 min ago (2, 14), both tags of an image an
-# unexpired lease holds (3), an image a lease without expiry holds within
-# <min-age-seconds> (6), an image a running stage uses (7), another repo's
-# images and containers (8, 11, c6), a young untagged image (10).
+# Expected removals and keeps for the fixture containers and images.
 reap "image rules" "\
 rm c2
 rm c3

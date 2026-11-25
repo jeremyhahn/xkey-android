@@ -7,8 +7,15 @@
 package com.automatethethings.xkey.crypto
 
 import java.security.MessageDigest
+import java.time.DateTimeException
 import java.time.Instant
 import java.util.Base64
+
+/**
+ * A value from a sync peer (a PEM body, a timestamp) that does not decode.
+ * The message names the field's problem and never quotes the value.
+ */
+class MalformedSyncValueException(message: String) : IllegalArgumentException(message)
 
 /**
  * Stateless codec/format helpers shared by the sync engine, key-sharing, and
@@ -28,15 +35,24 @@ object SyncCodec {
     fun storeChecksum(items: List<String>): String =
         sha256Hex(items.sorted().joinToString("\n").toByteArray(Charsets.UTF_8))
 
-    /** Decodes a PEM block body to DER bytes, or null if malformed/empty. */
-    fun pemToDer(pem: String): ByteArray? = try {
+    /**
+     * Decodes a PEM block body to DER bytes.
+     *
+     * @throws MalformedSyncValueException when the body is empty or not
+     *   base64; the message never quotes the input.
+     */
+    fun pemToDer(pem: String): ByteArray {
         val b64 = pem.lineSequence()
             .filterNot { it.startsWith("-----") }
             .joinToString("")
             .replace("\\s".toRegex(), "")
-        if (b64.isEmpty()) null else Base64.getDecoder().decode(b64)
-    } catch (e: Exception) {
-        null
+        if (b64.isEmpty()) throw MalformedSyncValueException("PEM body is empty")
+        return try {
+            Base64.getDecoder().decode(b64)
+        } catch (e: IllegalArgumentException) {
+            // The decoder's message quotes a character of the input: not carried.
+            throw MalformedSyncValueException("PEM body is not base64")
+        }
     }
 
     /** Encodes DER certificate bytes as a PEM CERTIFICATE block. */
@@ -49,11 +65,21 @@ object SyncCodec {
     fun toRfc3339(millis: Long): String =
         if (millis <= 0) "" else Instant.ofEpochMilli(millis).toString()
 
-    /** Parses an RFC 3339 timestamp to epoch millis, or 0 on failure/blank. */
-    fun parseRfc3339(value: String): Long =
-        if (value.isBlank()) 0L else try {
+    /**
+     * Parses an RFC 3339 timestamp to epoch millis. A blank value means "no
+     * timestamp" and is 0.
+     *
+     * @throws MalformedSyncValueException when a non-blank value is not an
+     *   RFC 3339 timestamp with a zone; the message never quotes the input.
+     */
+    fun parseRfc3339(value: String): Long {
+        if (value.isBlank()) return 0L
+        return try {
             Instant.parse(value).toEpochMilli()
-        } catch (e: Exception) {
-            0L
+        } catch (e: DateTimeException) {
+            throw MalformedSyncValueException("timestamp is not RFC 3339")
+        } catch (e: ArithmeticException) {
+            throw MalformedSyncValueException("timestamp is out of range")
         }
+    }
 }

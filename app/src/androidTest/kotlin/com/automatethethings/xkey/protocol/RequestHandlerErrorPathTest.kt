@@ -218,18 +218,17 @@ class RequestHandlerErrorPathTest {
     @Test
     fun rawRequestRoundTripsASuccessfulCall() {
         val response = rawCall("""{"id":77,"method":"ping"}""")
-        assertEquals(77L, response.id)
+        assertEquals(RpcId.of(77), response.id)
         assertTrue(response.ok().getBoolean("pong"))
     }
 
     @Test
     fun rawRequestWithNonJsonBytesIsRejected() {
-        val response = rawCall("this is not json at all")
-        assertTrue(response.isError())
-        assertEquals(
-            "an unparseable frame is answered on the reserved id 0",
-            0L,
-            response.id
+        val answer = rawAnswer("this is not json at all")
+        assertTrue(answer.has("error"))
+        assertTrue(
+            "an unparseable frame is answered with a null id: $answer",
+            answer.has("id") && answer.isNull("id")
         )
     }
 
@@ -240,9 +239,9 @@ class RequestHandlerErrorPathTest {
 
     @Test
     fun rawRequestWithoutAnIdIsRejected() {
-        val response = rawCall("""{"method":"ping"}""")
-        assertTrue(response.isError())
-        assertTrue(response.errorMessage().contains("id"))
+        val answer = rawAnswer("""{"method":"ping"}""")
+        assertTrue("a missing id is answered with a null id: $answer", answer.isNull("id"))
+        assertTrue(answer.getJSONObject("error").getString("message").contains("id"))
     }
 
     @Test
@@ -259,21 +258,23 @@ class RequestHandlerErrorPathTest {
 
     @Test
     fun rawRequestWithAJsonArrayBodyIsRejected() {
-        assertTrue(rawCall("""["id",1]""").isError())
+        val answer = rawAnswer("""["id",1]""")
+        assertTrue(answer.has("error"))
+        assertTrue("an array body is answered with a null id: $answer", answer.isNull("id"))
     }
 
     @Test
     fun rawRequestForAnUnknownMethodIsAWellFormedErrorFrame() {
         val response = rawCall("""{"id":9,"method":"local.notAMethod"}""")
-        assertEquals(9L, response.id)
+        assertEquals(RpcId.of(9), response.id)
         assertEquals(ErrorCodes.METHOD_NOT_FOUND, response.errorCode())
     }
 
     @Test
     fun createErrorResponseProducesAParseableFrame() {
-        val bytes = handler.createErrorResponse(5L, ErrorCodes.RATE_LIMITED, "slow down")
+        val bytes = handler.createErrorResponse(RpcId.of(5), ErrorCodes.RATE_LIMITED, "slow down")
         val response = Response.fromJson(bytes)
-        assertEquals(5L, response.id)
+        assertEquals(RpcId.of(5), response.id)
         assertEquals(ErrorCodes.RATE_LIMITED, response.errorCode())
         assertEquals("slow down", response.errorMessage())
     }
@@ -524,11 +525,13 @@ class RequestHandlerErrorPathTest {
         }
     }
 
-    /** Deleting something that is already gone is a success, not an error, and claims no deletion. */
+    /** Deleting something that is already gone is a success, not an error. */
     @Test
-    fun deletingAnUnknownKeyIsIdempotent() {
+    fun deletingAnUnknownKeyReportsNothingDeleted() {
+        // local.deleteKey answers deleted = materialRemoved || rowsDeleted > 0:
+        // an unknown key succeeds but says nothing was deleted (#143).
         val response = call("local.deleteKey", JSONObject().put("keyId", "never-existed-$runId"))
-        assertFalse("a delete that removes nothing must not report deleted=true", response.ok().getBoolean("deleted"))
+        assertFalse(response.ok().getBoolean("deleted"))
     }
 
     @Test
@@ -637,7 +640,10 @@ class RequestHandlerErrorPathTest {
         assertEquals(ErrorCodes.ENCRYPTION_FAILED, response.errorCode())
     }
 
-    /** HMAC-SHA384 has a COSE id but no Keystore support: UnsupportedAlgorithmException. */
+    /**
+     * EdDSA has a COSE id but no Keystore key behind local.generateKey (only
+     * the name Ed25519 makes one): UnsupportedAlgorithmException.
+     */
     @Test
     fun unsupportedAlgorithmMapsToInvalidAlgorithm() {
         val keyId = "unsupported-$runId"
@@ -646,8 +652,8 @@ class RequestHandlerErrorPathTest {
             "local.generateKey",
             JSONObject()
                 .put("keyId", keyId)
-                .put("keyType", "hmac")
-                .put("algorithm", "HMAC-SHA384")
+                .put("keyType", "signing")
+                .put("algorithm", "EdDSA")
                 .put("requireUserVerification", false)
                 .put("preferStrongBox", false)
         )
@@ -789,22 +795,26 @@ class RequestHandlerErrorPathTest {
         )
     }
 
-    /** With no connected identity there is no device policy to apply. */
+    /** Key use needs a paired peer; an anonymous session is refused. */
     @Test
-    fun anAnonymousSessionIsNotGated() {
-        requireAttestation(forKeyUse = true, forKeyAttestation = true, graceMinutes = 60)
+    fun anAnonymousSessionIsRefusedKeyUse() {
         servedPeer = null
 
-        assertEquals(ErrorCodes.KEY_NOT_FOUND, signMissingKey().errorCode())
+        assertEquals(
+            expectedCode("local.sign", ErrorCodes.DEVICE_ATTESTATION_REQUIRED),
+            signMissingKey().errorCode()
+        )
     }
 
-    /** A peer with no record in the repository has no policy either. */
+    /** Key use needs a paired peer; a peer with no stored record is refused. */
     @Test
-    fun aPeerWithNoStoredRecordIsNotGated() {
-        requireAttestation(forKeyUse = true, forKeyAttestation = true, graceMinutes = 60)
+    fun aPeerWithNoStoredRecordIsRefusedKeyUse() {
         servedPeer = UNKNOWN_PEER_HEX
 
-        assertEquals(ErrorCodes.KEY_NOT_FOUND, signMissingKey().errorCode())
+        assertEquals(
+            expectedCode("local.sign", ErrorCodes.DEVICE_ATTESTATION_REQUIRED),
+            signMissingKey().errorCode()
+        )
     }
 
     // ------------------------------------------------------------------
@@ -1245,11 +1255,23 @@ class RequestHandlerErrorPathTest {
             ErrorCodes.INVALID_PARAMS,
             call("local.pinSet", JSONObject().put("pinType", "SO_PIN")).errorCode()
         )
+        // docs/plans/190.md r3: no newPin is INVALID_PARAMS (checked first),
+        // no currentPin is PIN_REQUIRED; the new PIN length check runs after both.
+        assertEquals(
+            ErrorCodes.PIN_REQUIRED,
+            call(
+                "local.pinChange",
+                JSONObject().put("pinType", "USER_PIN").put("newPin", "1")
+            ).errorCode()
+        )
         assertEquals(
             ErrorCodes.INVALID_PARAMS,
             call(
                 "local.pinChange",
-                JSONObject().put("pinType", "USER_PIN").put("currentPin", "123456").put("newPin", "1")
+                JSONObject()
+                    .put("pinType", "USER_PIN")
+                    .put("currentPin", "123456")
+                    .put("newPin", "1")
             ).errorCode()
         )
         assertEquals(
@@ -1333,6 +1355,13 @@ class RequestHandlerErrorPathTest {
         val bytes = json.toByteArray()
         val response = runBlocking(servedCaller()) { handler.handleRawRequest(bytes) }
         return Response.fromJson(response)
+    }
+
+    /** The answer to [text] as raw JSON, for answers whose `id` is `null` and so not a [Response]. */
+    private fun rawAnswer(text: String): JSONObject {
+        val bytes = text.toByteArray()
+        val response = runBlocking(servedCaller()) { handler.handleRawRequest(bytes) }
+        return JSONObject(String(response, Charsets.UTF_8))
     }
 
     /**

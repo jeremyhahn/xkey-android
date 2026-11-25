@@ -192,8 +192,7 @@ class SignerVerificationTest {
         assertEquals("key-without-publ...", result.displayName)
     }
 
-    // The badge name comes from the key the signature was checked against;
-    // the name the file embeds is only a claim (#196).
+    // The badge name comes from the verifying key; the embedded name is only a claim.
 
     @Test
     fun `a contact match verifies under the contact name and reports the embedded name as a claim`() {

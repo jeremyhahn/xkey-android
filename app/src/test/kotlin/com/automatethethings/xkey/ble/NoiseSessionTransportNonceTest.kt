@@ -30,7 +30,7 @@ import org.junit.Before
 import org.junit.Test
 
 /**
- * [NoiseSession]'s transport counters follow the Noise framework (#236):
+ * [NoiseSession]'s transport counters follow the Noise framework:
  * a frame that fails authentication leaves the receive counter where it was,
  * and the reserved counter value 2^64-1 (`-1L` as a signed Long) is never
  * used to encrypt or decrypt.
@@ -55,6 +55,7 @@ class NoiseSessionTransportNonceTest {
 
     @Before
     fun setUp() {
+        NoiseTestKeyStore.install()
         mockkStatic(Log::class)
         every { Log.v(any(), any<String>()) } returns 0
         every { Log.d(any(), any<String>()) } returns 0

@@ -20,6 +20,7 @@ import com.automatethethings.xkey.protocol.ProtocolException
 import com.automatethethings.xkey.protocol.Request
 import com.automatethethings.xkey.protocol.RequestHandler
 import com.automatethethings.xkey.protocol.Response
+import com.automatethethings.xkey.protocol.RpcId
 import com.automatethethings.xkey.sync.SyncEngine
 import io.mockk.coEvery
 import io.mockk.every
@@ -129,7 +130,7 @@ class RemoteClientInteropTest {
         keyClient.listKeys("tpm2")
         syncClient.syncAll()
 
-        val ids = sender.sent.map { it.id }
+        val ids = sender.sent.map { it.id.longValueOrNull()!! }
         assertEquals(listOf(1_000_000L, 1_000_001L), listOf(ids[0], ids[2]))
         // The sync counter is shared by every RemoteSyncClient in the process,
         // so its ids are consecutive from wherever earlier tests left it.
@@ -155,9 +156,9 @@ class RemoteClientInteropTest {
         syncClient.syncTrustStore()
         backupClient.restoreBackup(bytes("{}"), "pw".toCharArray())
 
-        val ids = sender.sent.map { it.id }
+        val ids = sender.sent.map { it.id.longValueOrNull()!! }
         assertEquals("every id on the shared router is unique", ids.size, ids.toSet().size)
-        val backupIds = sender.sent.filter { it.method == "remote.restoreBackup" }.map { it.id }
+        val backupIds = sender.sent.filter { it.method == "remote.restoreBackup" }.map { it.id.longValueOrNull()!! }
         assertTrue(backupIds.all { it >= RemoteBackupClient.BASE_REQUEST_ID })
     }
 
@@ -191,7 +192,7 @@ class RemoteClientInteropTest {
         repeat(5) { syncClient.syncOath() }
         keyClient.listBackends()
 
-        assertEquals(1_000_000L, sender.lastRequest.id)
+        assertEquals(RpcId.of(1_000_000L), sender.lastRequest.id)
     }
 
     // -------------------------------------------------------------------------
@@ -232,7 +233,7 @@ class RemoteClientInteropTest {
         runCurrent()
 
         router.processMessage(
-            bytes("""{"id":${holding.sent[0].id},"error":{"code":-32001,"message":"no such key"}}""")
+            bytes("""{"id":${holding.sent[0].id},"error":{"code":-32000,"message":"no such key"}}""")
         )
         router.processMessage(holding.replyFor(1, """{"backends":[]}"""))
 
