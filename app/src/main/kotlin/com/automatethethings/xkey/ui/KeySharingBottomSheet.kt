@@ -731,13 +731,8 @@ class KeySharingBottomSheet : BottomSheetDialogFragment() {
         // the row describes (#270 review r5): a credential
         // that lives only under its credential alias shares its public key
         // too, and a key whose delete was acknowledged sends nothing.
-        val shareable = try {
-            keyPolicyStore.readShareable(context, keyId, KeystoreManager(context), entity) { SoftwareKeyStore(context).get(it) }
-        } catch (e: kotlin.coroutines.cancellation.CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            com.automatethethings.xkey.storage.ShareableKey(null, null)
-        }
+        // A read that fails reaches the desktop refresh's failed branch.
+        val shareable = keyPolicyStore.readShareable(context, keyId, KeystoreManager(context), entity) { SoftwareKeyStore(context).get(it) }
         ShareInputs(entity, shareable.software, shareable.publicKeyPem)
     }
 
