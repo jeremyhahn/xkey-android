@@ -428,6 +428,68 @@ class LocalGenerateKeyMlDsaHandlerTest {
         assertEquals("ML-DSA-44", hardware.getString(0))
     }
 
+    @Test
+    fun `each set is made by name and by COSE id and returns its SPKI and a software level`() = runTest {
+        val expectedDer = Base64.getEncoder().encodeToString(spki)
+        for (set in MlDsaParameterSet.entries) {
+            for (algorithm in listOf("\"${set.wireName}\"", set.coseAlgorithm.toString())) {
+                backings.clear()
+                val response = generate(
+                    """{"keyId":"k","algorithm":$algorithm,"keyBacking":"software","requireUserVerification":false}"""
+                )
+
+                val result = response.optJSONObject("result")
+                assertTrue("$algorithm must succeed, got $response", result != null)
+                assertEquals(algorithm, listOf(PqcBacking.SOFTWARE), backings)
+                assertEquals(algorithm, set.wireName, result!!.getString("algorithm"))
+                assertEquals(algorithm, expectedDer, result.getString("publicKeyDer"))
+                assertEquals(algorithm, "software", result.getString("securityLevel"))
+                assertEquals(algorithm, set.wireName, stored.captured.algorithm)
+            }
+        }
+    }
+
+    @Test
+    fun `a keyBacking that is not a string is INVALID_PARAMS`() = runTest {
+        for (raw in listOf("1", "true", "{}", "[\"software\"]")) {
+            assertError(
+                ErrorCodes.INVALID_PARAMS,
+                generate("""{"keyId":"x","algorithm":"ML-DSA-65","keyBacking":$raw,"requireUserVerification":false}""")
+            )
+        }
+        assertEquals(emptyList<PqcBacking>(), backings)
+    }
+
+    @Test
+    fun `a keyBacking on a key that is not ML-DSA is INVALID_PARAMS`() = runTest {
+        for (algorithm in listOf("ES256", "RS256", "AES-256")) {
+            for (backing in listOf("software", "hardware")) {
+                assertError(
+                    ErrorCodes.INVALID_PARAMS,
+                    generate(
+                        """{"keyId":"x","algorithm":"$algorithm","keyBacking":"$backing","requireUserVerification":false}"""
+                    )
+                )
+            }
+        }
+        coVerify(exactly = 0) { keystore.generateKeyForAlgorithm(any(), any(), any(), any(), any()) }
+        coVerify(exactly = 0) { keyDao.insert(any()) }
+    }
+
+    @Test
+    fun `an ML-DSA FIDO2 credential is INVALID_ALGORITHM`() = runTest {
+        for (set in MlDsaParameterSet.entries) {
+            assertError(
+                ErrorCodes.INVALID_ALGORITHM,
+                generate(
+                    """{"keyId":"x","algorithm":"${set.wireName}","keyType":"fido2","rpId":"example.com","requireUserVerification":false}"""
+                )
+            )
+        }
+        assertEquals(emptyList<PqcBacking>(), backings)
+        coVerify(exactly = 0) { keyDao.insert(any()) }
+    }
+
     private fun assertError(code: Int, response: JSONObject) {
         assertTrue("expected error $code, got $response", response.has("error"))
         assertEquals(response.toString(), code, response.getJSONObject("error").getInt("code"))
