@@ -93,6 +93,14 @@ class KeyPresenceUnreadableTest {
             }
         }
         every { keystore.softwareKeys() } returns software
+        pqcReadable = true
+        every { keystore.pqcPresence(any()) } answers {
+            when {
+                !pqcReadable -> KeyPresence.UNREADABLE
+                firstArg<String>() in pqcKeys -> KeyPresence.PRESENT
+                else -> KeyPresence.ABSENT
+            }
+        }
     }
 
     /** Ids the software key store holds. */
@@ -100,6 +108,12 @@ class KeyPresenceUnreadableTest {
 
     /** Whether the software key store can be read. */
     private var softwareReadable = true
+
+    /** Aliases the software ML-DSA store holds. */
+    private val pqcKeys = HashSet<String>()
+
+    /** Whether the software ML-DSA store can be read. */
+    private var pqcReadable = true
 
     @After
     fun tearDown() {
@@ -211,6 +225,7 @@ class KeyPresenceUnreadableTest {
             KeyBackend.KEYSTORE -> entries += "xkey_key_$id"
             KeyBackend.ED25519 -> ed25519["xkey_key_$id"] = "ed25519"
             KeyBackend.SOFTWARE -> softwareKeys += id
+            KeyBackend.PQC -> pqcKeys += "xkey_key_$id"
         }
     }
 
@@ -221,6 +236,7 @@ class KeyPresenceUnreadableTest {
                 java.security.KeyStoreException("keystore unavailable")
             KeyBackend.ED25519 -> readable = false
             KeyBackend.SOFTWARE -> softwareReadable = false
+            KeyBackend.PQC -> pqcReadable = false
         }
     }
 
@@ -234,7 +250,7 @@ class KeyPresenceUnreadableTest {
     fun everyGeneralBackendHoldsItsIdAndNoneIsSkipped() {
         assertEquals(KeyBackend.entries, keystore.backendsOf(UserKeyKind.GENERAL))
         for (backend in KeyBackend.entries) {
-            entries.clear(); ed25519.clear(); softwareKeys.clear()
+            entries.clear(); ed25519.clear(); softwareKeys.clear(); pqcKeys.clear()
             generalKeyIn(backend, GENERAL_AND_CREDENTIAL)
             entries += "xkey_credential_$GENERAL_AND_CREDENTIAL"
             assertTrue("$backend", keystore.holdsUserKey(GENERAL_AND_CREDENTIAL, UserKeyKind.GENERAL))
@@ -249,7 +265,7 @@ class KeyPresenceUnreadableTest {
     @Test
     fun anyUnreadableGeneralBackendRefusesEveryResolverPath() {
         for (backend in KeyBackend.entries) {
-            entries.clear(); ed25519.clear(); softwareKeys.clear()
+            entries.clear(); ed25519.clear(); softwareKeys.clear(); pqcKeys.clear()
             setUp()
             givenKeys()
             softwareKeys += GENERAL_AND_CREDENTIAL

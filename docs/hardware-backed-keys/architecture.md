@@ -55,6 +55,12 @@ graph TB
 | RS384 | RSA 3072 | SHA384withRSA | `PURPOSE_SIGN` |
 | RS512 | RSA 4096 | SHA512withRSA | `PURPOSE_SIGN` |
 | Ed25519 | Curve25519 | Ed25519 (JCE) | Software only |
+| ML-DSA-44 | FIPS 204, COSE -48 | Pure ML-DSA (Bouncy Castle, or the Keystore backend) | Software (Keystore-wrapped) or hardware where reported |
+| ML-DSA-65 | FIPS 204, COSE -49 | Pure ML-DSA (Bouncy Castle, or the Keystore backend) | Software (Keystore-wrapped) or hardware where reported |
+| ML-DSA-87 | FIPS 204, COSE -50 | Pure ML-DSA (Bouncy Castle, or the Keystore backend) | Software (Keystore-wrapped) or hardware where reported |
+
+ML-DSA keys and their two backings are described in
+[../pqc-keys/architecture.md](../pqc-keys/architecture.md).
 
 ### Symmetric encryption
 
@@ -282,25 +288,26 @@ A paired desktop drives these keys over the Noise session with the methods in
 
 | Method | Does |
 |--------|------|
-| `local.generateKey` | Creates an EC, RSA, AES or HMAC key, or an exportable software key; returns `publicKeyDer` and `securityLevel` |
-| `local.sign` | Signs with an EC or RSA key |
+| `local.generateKey` | Creates an EC, RSA, AES, HMAC or ML-DSA key (ML-DSA takes an optional `keyBacking`: `hardware` or `software`), or an exportable software key; returns `publicKeyDer` and `securityLevel` |
+| `local.sign` | Signs with an EC, RSA or ML-DSA key (pure ML-DSA) |
 | `local.decrypt` | RSA-OAEP decryption |
 | `local.symmetricEncrypt`, `local.symmetricDecrypt` | AES-GCM with an AES key |
 | `local.hmac` | HMAC-SHA256 or HMAC-SHA512 |
 | `local.ecdh` | ECDH with an EC key (API 31+) |
-| `local.getPublicKey` | Public key as DER, PEM, SSH or COSE |
+| `local.getPublicKey` | Public key as DER, PEM, SSH or COSE (ML-DSA: DER or PEM only) |
 | `local.listKeys`, `local.getKeyInfo` | Key metadata |
 | `local.deleteKey` | Deletes the key and its row |
 | `local.setKeyPolicy` | Opens or closes a key to peers (below) |
 | `local.attestKey` | Keystore attestation chain for a key |
 | `local.attestDevice` | Device attestation (see `docs/device-attestation/`) |
-| `local.getCapabilities` | Algorithms, StrongBox, biometrics, ECDH, export formats and key count |
+| `local.getCapabilities` | Algorithms, the hardware-backed ML-DSA sets (`hardwareAlgorithms`), StrongBox, biometrics, ECDH, export formats and key count |
 
 The base protocol also keeps the original `generateKey`, `sign`,
 `deleteKey`, `listKeys` and `getInfo` methods for FIDO2 credentials.
 `local.getCapabilities` lists the algorithms from
 `KeystoreCapabilities.supportedAlgorithms`: ES256, ES384, ES512, RS256,
-RS384, RS512, AES128, AES256, HMAC-SHA256 and HMAC-SHA512.
+RS384, RS512, AES128, AES256, HMAC-SHA256 and HMAC-SHA512, then ML-DSA-44,
+ML-DSA-65 and ML-DSA-87 (held in software on every device).
 
 # Application architecture
 

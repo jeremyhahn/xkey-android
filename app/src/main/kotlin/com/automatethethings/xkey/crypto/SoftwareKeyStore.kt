@@ -630,7 +630,7 @@ class SoftwareKeyStore(
         stem == fileId(id) || stem == id || !HEX_64.matches(stem)
 
     companion object {
-        private const val KEY_ALIAS = "xkey_software_key_store"
+        private const val KEY_ALIAS = KeystoreAeadCipher.SOFTWARE_KEY_STORE_ALIAS
 
         /** Each store directory's write count, shared by every instance over it. */
         private val WRITES = java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicLong>()

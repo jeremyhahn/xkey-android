@@ -702,12 +702,7 @@ class FileOperationActivity : AppCompatActivity() {
         lifecycleScope.launch(Dispatchers.IO) {
             val allKeys = keyDao.getAll()
             // Signing-type keys: signing, fido2, ca, or any key with signing algorithm
-            signingKeys = allKeys.filter { key ->
-                key.keyType in listOf("signing", "fido2", "ca", "attestation") ||
-                    key.algorithm.startsWith("ES") ||
-                    key.algorithm.startsWith("RS") ||
-                    key.algorithm == "Ed25519"
-            }
+            signingKeys = fileSigningKeys(allKeys)
             // Encryption-type keys: encryption keys or EC keys that can do ECDH
             encryptionKeys = allKeys.filter { key ->
                 key.keyType == "encryption" ||
@@ -1384,6 +1379,11 @@ class FileOperationActivity : AppCompatActivity() {
         }
         return data
     }
+}
+
+/** The keys the file-signing picker offers: those signWithAlgorithm has a JCA signature for. */
+internal fun fileSigningKeys(keys: List<KeyEntity>): List<KeyEntity> = keys.filter { key ->
+    KeystoreManager.hasJcaSignature(key.algorithm)
 }
 
 /** The staged file one save picker is open for. */

@@ -134,6 +134,20 @@ class KeyStoreSyncManagerTest {
         coVerify(exactly = 0) { keyDao.deleteByKeyId(generalId) }
     }
 
+    @Test
+    fun `no internal wrap key is discovered as a key`() = runBlocking<Unit> {
+        val internal = listOf(
+            "xkey_pqc_wrap", "xkey_software_key_store", "xkey_password_encryption_key",
+            "xkey_seal_store_key", "xkey_oath_secret_encryption_key", "xkey_pqc_probe_ml_dsa_65"
+        )
+        every { keyStore.aliases() } answers { Collections.enumeration(internal + generalAlias) }
+
+        val discovered = KeyStoreSyncManager(keystoreManager, credentialDao, keyDao, tables.store()).discoverKeystoreEntries()
+
+        assertEquals(1, discovered)
+        coVerify(exactly = 0) { keyDao.insert(match { it.keyId in internal }) }
+    }
+
     /**
      * Round 9 (2): material whose key row is deleted and whose material
      * delete is still owed (a deletion tombstone) is never listed again as a

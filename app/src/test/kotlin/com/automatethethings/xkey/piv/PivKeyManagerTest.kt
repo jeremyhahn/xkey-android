@@ -14,9 +14,18 @@
  */
 package com.automatethethings.xkey.piv
 
+import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.util.Log
 import com.automatethethings.xkey.audit.AuditLogger
+import com.automatethethings.xkey.crypto.KeystoreAeadCipher
+import com.automatethethings.xkey.crypto.MlDsaParameterSet
+import com.automatethethings.xkey.crypto.PqcBacking
+import com.automatethethings.xkey.crypto.PqcHardware
+import com.automatethethings.xkey.crypto.PqcHardwareBackend
+import com.automatethethings.xkey.crypto.PqcKeysTest
+import com.automatethethings.xkey.crypto.PqcSoftwareKeyStore
+import com.automatethethings.xkey.crypto.UnsupportedAlgorithmException
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.coVerifyOrder
@@ -41,6 +50,7 @@ import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder
 import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -88,10 +98,13 @@ class PivKeyManagerTest {
         every { AuditLogger.logKeyDeleted(any(), any(), any()) } returns Unit
         every { AuditLogger.logKeyCreated(any(), any(), any(), any()) } returns Unit
         every { AuditLogger.logPivCertImported(any(), any()) } returns Unit
+        // No shared software ML-DSA store from another test class.
+        PqcSoftwareKeyStore.clearSharedForTest()
     }
 
     @After
     fun tearDown() {
+        PqcSoftwareKeyStore.clearSharedForTest()
         unmockkAll()
     }
 
@@ -393,6 +406,131 @@ class PivKeyManagerTest {
             .generateCertificate(cert.inputStream())
 
         assertArrayEquals(slotKey.public.encoded, parsed.publicKey.encoded)
+    }
+
+    @Test
+    fun `a hardware ML-DSA-87 slot asked for ML-DSA-44 refuses before it signs`() = runTest {
+        val slotCertificate = mockk<Certificate>()
+        every { slotCertificate.publicKey.encoded } returns PqcKeysTest.spkiOf(MlDsaParameterSet.ML_DSA_87)
+        every { keystore.keyStore.getCertificate(PivSlot.AUTHENTICATION.keystoreAlias) } returns slotCertificate
+        val saved = PqcHardware.backend
+        PqcHardware.backend = object : PqcHardwareBackend {
+            override fun supportedParameterSets() = MlDsaParameterSet.entries.toSet()
+            override fun generate(
+                alias: String,
+                set: MlDsaParameterSet,
+                authDurationSeconds: Int,
+                preferStrongBox: Boolean
+            ): ByteArray = throw UnsupportedOperationException()
+            override fun jcaSignatureAlgorithm(set: MlDsaParameterSet) = "ML-DSA"
+        }
+        try {
+            val error = runCatching {
+                PivKeyManager(pivSlotDao).sign(PivSlot.AUTHENTICATION, byteArrayOf(1), PivAlgorithm.ML_DSA_44)
+            }.exceptionOrNull()
+            assertTrue("$error", error is UnsupportedAlgorithmException)
+            coVerify(exactly = 0) { pivSlotDao.recordUsage(any()) }
+        } finally {
+            PqcHardware.backend = saved
+        }
+    }
+
+    @Test
+    fun `a software ML-DSA slot key whose record cannot be removed keeps its row and is not audited as deleted`() =
+        runTest {
+            keystore.live = null
+            val store = softwareStore()
+            val alias = PivSlot.AUTHENTICATION.keystoreAlias
+            store.generate(alias, MlDsaParameterSet.ML_DSA_44)
+            store.removeFile = { false }
+
+            val error = runCatching { PivKeyManager(pivSlotDao, pqcStore = store).deleteKey(PivSlot.AUTHENTICATION) }
+                .exceptionOrNull()
+
+            assertTrue("delete must fail, got $error", error != null)
+            coVerify(exactly = 0) { pivSlotDao.deleteBySlotId(any()) }
+            verify(exactly = 0) { AuditLogger.logKeyDeleted(any(), any(), any()) }
+            assertTrue(store.contains(alias))
+        }
+
+    @Test
+    fun `a PIV delete keeps the slot row and skips the audit whenever the store delete throws`() = runTest {
+        keystore.live = null
+        val store = io.mockk.spyk(softwareStore())
+        val alias = PivSlot.AUTHENTICATION.keystoreAlias
+        store.generate(alias, MlDsaParameterSet.ML_DSA_44)
+        every { store.delete(any()) } throws java.io.IOException("Cannot delete ML-DSA key")
+
+        val error = runCatching { PivKeyManager(pivSlotDao, pqcStore = store).deleteKey(PivSlot.AUTHENTICATION) }
+            .exceptionOrNull()
+
+        assertTrue("delete must fail, got $error", error is java.io.IOException)
+        coVerify(exactly = 0) { pivSlotDao.deleteBySlotId(any()) }
+        verify(exactly = 0) { AuditLogger.logKeyDeleted(any(), any(), any()) }
+    }
+
+    /** A software ML-DSA store over a temporary directory and a stand-in seal. */
+    private fun softwareStore(): PqcSoftwareKeyStore {
+        val cipher = mockk<KeystoreAeadCipher>()
+        every { cipher.encrypt(any()) } answers { firstArg<ByteArray>().reversedArray() }
+        every { cipher.decrypt(any()) } answers { firstArg<ByteArray>().reversedArray() }
+        val context = mockk<Context>(relaxed = true)
+        every { context.filesDir } returns java.nio.file.Files.createTempDirectory("piv-pqc").toFile()
+        return PqcSoftwareKeyStore(context, cipher)
+    }
+
+    private fun stubSigningAudit() {
+        every {
+            AuditLogger.logSigningRequest(any(), any(), any(), any(), any(), any(), any(), any(), any())
+        } returns Unit
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun `a software ML-DSA sign holds the slot lock until it has recorded its use`() = runTest(StandardTestDispatcher()) {
+        stubSigningAudit()
+        keystore.live = null
+        val store = softwareStore()
+        val alias = PivSlot.AUTHENTICATION.keystoreAlias
+        store.generate(alias, MlDsaParameterSet.ML_DSA_44)
+        val usageGate = CompletableDeferred<Unit>()
+        coEvery { pivSlotDao.recordUsage(any(), any()) } coAnswers { usageGate.await() }
+
+        val sign = async {
+            PivKeyManager(pivSlotDao, pqcStore = store)
+                .sign(PivSlot.AUTHENTICATION, byteArrayOf(1), PivAlgorithm.ML_DSA_44)
+        }
+        runCurrent()
+        assertFalse("sign ended before it recorded its use: ${runCatching { sign.getCompleted() }}", sign.isCompleted)
+        val generate = launch {
+            PivKeyManager(pivSlotDao, pqcStore = store)
+                .generateKey(PivSlot.AUTHENTICATION, PivAlgorithm.ML_DSA_87, PqcBacking.SOFTWARE)
+        }
+        runCurrent()
+
+        assertFalse("generateKey ran while a sign held the slot", generate.isCompleted)
+        assertEquals(MlDsaParameterSet.ML_DSA_44, store.parameterSet(alias))
+
+        usageGate.complete(Unit)
+        assertEquals(MlDsaParameterSet.ML_DSA_44.signatureBytes, sign.await().size)
+        generate.join()
+        assertEquals(MlDsaParameterSet.ML_DSA_87, store.parameterSet(alias))
+    }
+
+    @Test
+    fun `a software slot regenerated as ML-DSA-87 refuses an ML-DSA-44 sign`() = runTest {
+        stubSigningAudit()
+        keystore.live = null
+        val store = softwareStore()
+        val manager = PivKeyManager(pivSlotDao, pqcStore = store)
+        manager.generateKey(PivSlot.AUTHENTICATION, PivAlgorithm.ML_DSA_44, PqcBacking.SOFTWARE)
+        manager.generateKey(PivSlot.AUTHENTICATION, PivAlgorithm.ML_DSA_87, PqcBacking.SOFTWARE)
+
+        val error = runCatching {
+            manager.sign(PivSlot.AUTHENTICATION, byteArrayOf(1), PivAlgorithm.ML_DSA_44)
+        }.exceptionOrNull()
+        assertTrue("$error", error is IllegalStateException)
+        coVerify(exactly = 0) { pivSlotDao.recordUsage(any()) }
     }
 
     private suspend fun importError(certDer: ByteArray): Throwable? =

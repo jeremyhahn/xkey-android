@@ -17,6 +17,7 @@ package com.automatethethings.xkey.storage
 import android.util.Log
 import androidx.annotation.VisibleForTesting
 import com.automatethethings.xkey.crypto.FileEncryptor
+import com.automatethethings.xkey.crypto.KeystoreAeadCipher
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.piv.PIV_KEYSTORE_ALIAS_PREFIX
 import com.automatethethings.xkey.remote.SharePermissionLedger
@@ -204,6 +205,7 @@ class KeyStoreSyncManager(
         for (alias in keyStore.aliases()) {
             if (alias.startsWith(PIV_KEYSTORE_ALIAS_PREFIX)) continue
             if (alias.startsWith(EPHEMERAL_ALIAS_PREFIX)) continue
+            if (KeystoreAeadCipher.isInternalAlias(alias)) continue
             val (keyId, isFido2, isCA) = when {
                 alias in CA_ALIASES -> {
                     Triple(alias, false, true)
@@ -265,7 +267,8 @@ class KeyStoreSyncManager(
         }
 
     /**
-     * Removes keys table entries for local keys whose Keystore entries no longer exist.
+     * Removes keys table entries for local keys whose key material no longer
+     * exists in any backend ([KeystoreManager.holdsAnyKey]).
      *
      * Only removes entries with local sources (not "xkmsd" remote references).
      * A PIV slot alias listed by an earlier sync is removed as well, because
@@ -281,6 +284,7 @@ class KeyStoreSyncManager(
             // Classify by the resolved alias, never the logical id: a general
             // key "xkey_piv_x" lives at xkey_key_xkey_piv_x and resolves, while
             // a raw PIV slot alias row never resolves and so is removed here.
+            // A software ML-DSA key has no Keystore alias; its record counts.
             if (!keystoreManager.holdsAnyKey(key.keyId)) {
                 SharePermissionLedger.revoking(key.keyId) { keyDao.deleteByKeyId(key.keyId) }
                 removed++

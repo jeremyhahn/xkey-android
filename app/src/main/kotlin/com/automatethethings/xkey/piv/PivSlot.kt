@@ -14,6 +14,8 @@
  */
 package com.automatethethings.xkey.piv
 
+import com.automatethethings.xkey.crypto.MlDsaParameterSet
+
 /**
  * Represents the standard PIV (Personal Identity Verification) smart card key slots
  * as defined by NIST SP 800-73-4.
@@ -109,11 +111,13 @@ enum class PivAlgorithm(
     val displayName: String,
     val keyAlgorithm: String,
     val keySizeBits: Int,
-    val pivAlgorithmId: Int
+    val pivAlgorithmId: Int?,
+    val mlDsaSet: MlDsaParameterSet? = null
 ) {
     // Algorithm ids: NIST SP 800-78 (Table 6-2: RSA 2048 0x07, RSA 3072
     // 0x05, ECC P-256 0x11, ECC P-384 0x14) and the YubiKey PIV extension
     // for RSA 4096 (0x16, Yubico PIV algorithm table, firmware 5.7).
+    // SP 800-78 assigns no ML-DSA id yet, so the ML-DSA entries have none.
 
     /** ECDSA with NIST P-256 curve. */
     ES256("ECDSA P-256", "EC", 256, 0x11),
@@ -128,18 +132,34 @@ enum class PivAlgorithm(
     RS3072("RSA 3072", "RSA", 3072, 0x05),
 
     /** RSA with 4096-bit key. */
-    RS4096("RSA 4096", "RSA", 4096, 0x16);
+    RS4096("RSA 4096", "RSA", 4096, 0x16),
+
+    /** ML-DSA-44 (FIPS 204). */
+    ML_DSA_44(MlDsaParameterSet.ML_DSA_44),
+
+    /** ML-DSA-65 (FIPS 204). */
+    ML_DSA_65(MlDsaParameterSet.ML_DSA_65),
+
+    /** ML-DSA-87 (FIPS 204). */
+    ML_DSA_87(MlDsaParameterSet.ML_DSA_87);
+
+    constructor(set: MlDsaParameterSet) :
+        this(set.wireName, "ML-DSA", set.publicKeyBytes * 8, null, set)
 
     companion object {
         /**
          * The algorithm a peer names: an enum name, the desktop's spellings
-         * ("ECCP256", "RSA3072") or the dashed ones ("ECDSA-P256",
-         * "RSA-4096"). Case and `_`/`-` do not matter. Null for any other
-         * name; callers refuse it, never default it.
+         * ("ECCP256", "RSA3072"), the dashed ones ("ECDSA-P256",
+         * "RSA-4096") or an ML-DSA set ("ML-DSA-65", "MLDSA65"). Case and
+         * `_`/`-` do not matter. Null for any other name; callers refuse it,
+         * never default it.
          */
         fun fromWireName(name: String): PivAlgorithm? {
             if (name.isBlank()) return null
             entries.firstOrNull { it.name == name }?.let { return it }
+            MlDsaParameterSet.fromWireName(name.trim())?.let { set ->
+                return entries.first { it.mlDsaSet == set }
+            }
             return when (name.trim().uppercase().replace("_", "-")) {
                 "ES256", "ECDSA-P256", "EC-P256", "P256", "ECCP256", "ECC-P256" -> ES256
                 "ES384", "ECDSA-P384", "EC-P384", "P384", "ECCP384", "ECC-P384" -> ES384

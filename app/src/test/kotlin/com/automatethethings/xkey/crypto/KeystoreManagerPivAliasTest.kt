@@ -73,14 +73,17 @@ class KeystoreManagerPivAliasTest {
         every { fake.keyStore.deleteEntry(generalAlias) } answers { generalPresent = false }
         fake.install()
         // A real files directory: the general namespace's presence reads the
-        // software key store there (#255 review r6).
+        // software key store and the software ML-DSA store there (#255 review r6).
+        PqcSoftwareKeyStore.clearSharedForTest()
         val context = mockk<Context>(relaxed = true)
+        every { context.applicationContext } returns context
         every { context.filesDir } returns tmp.root
         keystoreManager = KeystoreManager(context)
     }
 
     @After
     fun tearDown() {
+        PqcSoftwareKeyStore.clearSharedForTest()
         unmockkAll()
     }
 

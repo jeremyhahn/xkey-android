@@ -55,6 +55,10 @@ import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
 import com.automatethethings.xkey.R
 import com.automatethethings.xkey.crypto.KeystoreManager
+import com.automatethethings.xkey.crypto.MlDsaParameterSet
+import com.automatethethings.xkey.crypto.PqcBacking
+import com.automatethethings.xkey.crypto.PqcHardware
+import com.automatethethings.xkey.crypto.generateMlDsaKeyAndCommit
 import com.automatethethings.xkey.crypto.publicKeySizeBits
 import com.automatethethings.xkey.storage.KeyStoreSyncManager
 import com.automatethethings.xkey.storage.KeyPolicyStore
@@ -65,8 +69,10 @@ import com.automatethethings.xkey.storage.entity.SharingPolicyType
 import com.google.android.material.card.MaterialCardView
 import com.google.android.material.floatingactionbutton.ExtendedFloatingActionButton
 import com.google.android.material.snackbar.Snackbar
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -1074,6 +1080,41 @@ class KeyManagementActivity : AppCompatActivity() {
         val algorithmSpinner = Spinner(this)
         dialogLayout.addView(algorithmSpinner)
 
+        // ML-DSA only: hardware is listed only for the sets the device makes there.
+        val storageLabel = TextView(this).apply {
+            text = getString(R.string.key_create_storage)
+            setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_LabelMedium)
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = UIHelpers.dpToPxInt(this@KeyManagementActivity, 12)
+            }
+            visibility = View.GONE
+        }
+        dialogLayout.addView(storageLabel)
+        val storageSpinner = Spinner(this).apply { visibility = View.GONE }
+        dialogLayout.addView(storageSpinner)
+        var storageOptions: List<PqcBacking> = emptyList()
+
+        fun updateStorage() {
+            val selected = purposes[purposeSpinner.selectedItemPosition]
+            val option = selected.algorithms.getOrNull(algorithmSpinner.selectedItemPosition)
+            val set = option?.let { KeyCreationAlgorithms.mlDsaSet(it.internal) }
+            storageOptions = set?.let { KeyCreationAlgorithms.storageOptions(it, PqcHardware.supported()) }
+                ?: emptyList()
+            val visibility = if (storageOptions.isEmpty()) View.GONE else View.VISIBLE
+            storageLabel.visibility = visibility
+            storageSpinner.visibility = visibility
+            val storageAdapter = ArrayAdapter(
+                this,
+                android.R.layout.simple_spinner_item,
+                storageOptions.map { storageLabelOf(it) }
+            )
+            storageAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+            storageSpinner.adapter = storageAdapter
+        }
+
         fun updateAlgorithms() {
             val selected = purposes[purposeSpinner.selectedItemPosition]
             val algAdapter = ArrayAdapter(
@@ -1083,8 +1124,16 @@ class KeyManagementActivity : AppCompatActivity() {
             )
             algAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
             algorithmSpinner.adapter = algAdapter
+            updateStorage()
         }
         updateAlgorithms()
+
+        algorithmSpinner.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, pos: Int, id: Long) {
+                updateStorage()
+            }
+            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
+        }
 
         purposeSpinner.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
             override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, pos: Int, id: Long) {
@@ -1114,7 +1163,8 @@ class KeyManagementActivity : AppCompatActivity() {
                 val algorithm = algorithmOption.internal
                 val label = labelInput.text.toString().ifBlank { "${purpose.display} Key" }
                 val biometric = biometricSwitch.isChecked
-                createKey(label, purpose.keyType, algorithm, biometric)
+                val backing = storageOptions.getOrNull(storageSpinner.selectedItemPosition)
+                createKey(label, purpose.keyType, algorithm, biometric, backing)
             }
             .setNegativeButton(getString(R.string.button_cancel), null)
             .show()
@@ -1123,7 +1173,13 @@ class KeyManagementActivity : AppCompatActivity() {
     /**
      * Creates a new key.
      */
-    private fun createKey(label: String, keyType: String, algorithm: String, biometric: Boolean) {
+    private fun createKey(
+        label: String,
+        keyType: String,
+        algorithm: String,
+        biometric: Boolean,
+        backing: PqcBacking? = null
+    ) {
         lifecycleScope.launch {
             try {
                 val keyId = UUID.randomUUID().toString()
@@ -1136,9 +1192,34 @@ class KeyManagementActivity : AppCompatActivity() {
                 var publicKeyDer: ByteArray? = null
                 var keySizeBits = 0
 
+                fun entity(der: ByteArray?, bits: Int) = KeyEntity(
+                    keyId = keyId,
+                    keyType = keyType,
+                    algorithm = algorithm,
+                    label = label,
+                    publicKeyDer = der,
+                    keySizeBits = bits,
+                    biometricRequired = biometric,
+                    source = "local",
+                    createdAt = System.currentTimeMillis()
+                )
+
+                val mlDsaSet = KeyCreationAlgorithms.mlDsaSet(algorithm)
                 // The material write and its row insert in the store's one
                 // serialisation of this id's key material (#193 r8).
                 keyPolicyStore.withKeyMaterial(keyId, com.automatethethings.xkey.storage.keyMaterialDeleter(this@KeyManagementActivity, keystoreManager)) {
+                    if (mlDsaSet != null) {
+                        // The ML-DSA path stores its own row with the key it makes.
+                        createMlDsaKeyRow(
+                            keystoreManager,
+                            keyPolicyStore,
+                            keyId,
+                            mlDsaSet,
+                            backing ?: PqcBacking.SOFTWARE,
+                            authDuration
+                        ) { der -> entity(der, mlDsaSet.publicKeyBytes * 8) }
+                        return@withKeyMaterial
+                    }
                     when (keyType) {
                         "signing", "tls", "ssh" -> {
                             publicKeyDer = keystoreManager.generateKeyForAlgorithm(keyId, algorithm, authDuration)
@@ -1167,18 +1248,7 @@ class KeyManagementActivity : AppCompatActivity() {
                         }
                     }
 
-                    val entity = KeyEntity(
-                        keyId = keyId,
-                        keyType = keyType,
-                        algorithm = algorithm,
-                        label = label,
-                        publicKeyDer = publicKeyDer,
-                        keySizeBits = keySizeBits,
-                        biometricRequired = biometric,
-                        source = "local",
-                        createdAt = System.currentTimeMillis()
-                    )
-                    keyPolicyStore.insertKey(entity)
+                    keyPolicyStore.insertKey(entity(publicKeyDer, keySizeBits))
                 }
                 Snackbar.make(rootLayout, getString(R.string.key_create_success), Snackbar.LENGTH_SHORT).show()
             } catch (e: Exception) {
@@ -1198,6 +1268,14 @@ class KeyManagementActivity : AppCompatActivity() {
      * not what was generated, and that gap is the whole reason [publicKeySizeBits]
      * exists.
      */
+    /** The storage spinner's label for [backing]. */
+    private fun storageLabelOf(backing: PqcBacking): String = getString(
+        when (backing) {
+            PqcBacking.HARDWARE -> R.string.key_storage_hardware
+            PqcBacking.SOFTWARE -> R.string.key_storage_software
+        }
+    )
+
     private fun nominalKeySizeBits(algorithm: String): Int = when (algorithm) {
         "ES256" -> 256
         "ES384" -> 384
@@ -1804,4 +1882,27 @@ internal val UserKeyDelete.refusal: Int?
         is UserKeyDelete.Refused -> message
         UserKeyDelete.PENDING -> R.string.key_delete_pending
         UserKeyDelete.DELETED, UserKeyDelete.GONE -> null
+    }
+
+/**
+ * Makes the ML-DSA [set] key [keyId] for the key screen and stores the row
+ * [row] builds from its public key with its policy row ([KeyPolicyStore.insertKey]),
+ * as one unit closing the screen cannot interrupt; a key whose row is not
+ * stored is removed. The caller holds the id's key material
+ * ([KeyPolicyStore.withKeyMaterial]).
+ *
+ * @return the SubjectPublicKeyInfo DER.
+ */
+internal suspend fun createMlDsaKeyRow(
+    keystoreManager: KeystoreManager,
+    store: KeyPolicyStore,
+    keyId: String,
+    set: MlDsaParameterSet,
+    backing: PqcBacking,
+    authDurationSeconds: Int,
+    row: (ByteArray) -> KeyEntity
+): ByteArray =
+    keystoreManager.generateMlDsaKeyAndCommit(keyId, set, backing, authDurationSeconds) { publicKeyDer ->
+        store.insertKey(row(publicKeyDer))
+        publicKeyDer
     }
