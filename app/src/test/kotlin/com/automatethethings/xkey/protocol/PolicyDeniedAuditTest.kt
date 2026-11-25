@@ -39,6 +39,7 @@ import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -64,6 +65,7 @@ class PolicyDeniedAuditTest {
 
     private val denials = mutableListOf<Denial>()
     private lateinit var handler: RequestHandler
+    private lateinit var keyDao: KeyDao
 
     @Before
     fun setUp() {
@@ -93,7 +95,7 @@ class PolicyDeniedAuditTest {
             denials += Denial(arg(2), arg(5), arg(4))
         }
 
-        val keyDao = mockk<KeyDao>(relaxed = true)
+        keyDao = mockk(relaxed = true)
         coEvery { keyDao.getByKeyId(any()) } returns null
         coEvery { keyDao.getFido2ByRpId(any()) } returns emptyList()
         coEvery { keyDao.getFido2ByRpId(RP_ID) } returns listOf(passkey(PRIVATE_ID, SharingPolicyType.PRIVATE))
@@ -136,6 +138,23 @@ class PolicyDeniedAuditTest {
         assertFalse("the row must not carry the client data", denial.reason.contains(CLIENT_DATA_B64))
     }
 
+    /**
+     * A served connection that authenticated no peer is refused, and writes
+     * no row: every row names the caller's peer, and an anonymous caller must
+     * not be able to fill the log and push real entries out.
+     */
+    @Test
+    fun `a refusal on a served connection with no peer writes no POLICY_DENIED row`() = runTest {
+        val response = withContext(
+            RequestHandler.servedConnection(SessionBindingProvider { null }, null, "test:connection")
+        ) {
+            sign(PRIVATE_ID)
+        }
+
+        assertEquals(ErrorCodes.OPERATION_DENIED, response.error?.code)
+        assertEquals(emptyList<Denial>(), denials)
+    }
+
     @Test
     fun `a request refused for another reason writes no POLICY_DENIED row`() = runTest {
         val response = sign("no-such-credential")
@@ -151,6 +170,28 @@ class PolicyDeniedAuditTest {
 
         assertNull(response.result)
         assertEquals(emptyList<Denial>(), denials)
+    }
+
+    /**
+     * A refusal the handler returns, not throws, is recorded the same way:
+     * co-signing with a key that is not a signing key answers
+     * OPERATION_DENIED and writes one row.
+     */
+    @Test
+    fun `a returned co-sign refusal writes one POLICY_DENIED row`() = runTest {
+        coEvery { keyDao.getByKeyId(PRIVATE_ID) } returns passkey(PRIVATE_ID, SharingPolicyType.PRIVATE)
+
+        val params = JSONObject()
+            .put("hash", "ab".repeat(32))
+            .put("hashAlgorithm", "SHA-256")
+            .put("keyId", PRIVATE_ID)
+        val request = Request(id = 6, method = MethodNames.COSIGN_REQUEST, params = params)
+        val response = Response.fromJson(handler.handleRawRequest(request.toJson()))
+
+        assertEquals(ErrorCodes.OPERATION_DENIED, response.error?.code)
+        val denial = denials.single()
+        assertEquals(PEER, denial.deviceId)
+        assertEquals(MethodNames.COSIGN_REQUEST, denial.operation)
     }
 
     private suspend fun sign(credentialId: String): Response {

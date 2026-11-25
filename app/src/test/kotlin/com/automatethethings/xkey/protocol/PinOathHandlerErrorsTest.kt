@@ -396,6 +396,7 @@ class PinOathHandlerErrorsTest {
     @Test
     fun `oathRemove of a known id reports deleted true`() = runTest {
         coEvery { oathDao.getByOathId("known") } returns mockk(relaxed = true)
+        coEvery { oathDao.deleteAndRecordDeletion("known", any()) } returns 1
 
         val response = call(MethodNames.LOCAL_OATH_REMOVE, """{"credential_id":"known"}""")
 

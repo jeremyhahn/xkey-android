@@ -46,7 +46,6 @@ import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.snackbar.Snackbar
 import com.google.android.material.textfield.TextInputEditText
 import com.google.android.material.textfield.TextInputLayout
-import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 
 /**
@@ -99,6 +98,8 @@ class PinManagementActivity : AppCompatActivity() {
 
     // Countdown timer for lockout display
     private var lockoutTimer: CountDownTimer? = null
+    private var lockoutDisplay: PinLockoutDisplay? = null
+    private var lockoutKey: PinLockoutDisplay.RefreshKey? = null
 
     // Current settings snapshot for action card visibility
     private var currentSettings: PinSettingsData = PinSettingsData()
@@ -658,11 +659,13 @@ class PinManagementActivity : AppCompatActivity() {
     private fun observeSettings() {
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
-                pinSettingsRepository.settingsFlow.collectLatest { settings ->
+                // collect, not collectLatest: the status read in showLockout
+                // writes settings, and its emission must not cancel the read
+                // before the refresh key is recorded.
+                pinSettingsRepository.settingsFlow.collect { settings ->
                     currentSettings = settings
                     updateHeroCard(settings)
-                    updateLockoutCard(settings)
-                    rebuildActionCards(settings)
+                    showLockout(settings)
                 }
             }
         }
@@ -693,48 +696,19 @@ class PinManagementActivity : AppCompatActivity() {
         }
     }
 
-    private fun updateLockoutCard(settings: PinSettingsData) {
+    private fun updateLockoutCard(display: PinLockoutDisplay) {
         lockoutTimer?.cancel()
         lockoutTimer = null
 
-        val now = System.currentTimeMillis()
-        val soLocked = settings.soPinLockedUntil > now
-        val userLocked = settings.userPinLockedUntil > now
-        val hasFailedSoAttempts = settings.failedSoPinAttempts > 0
-        val hasFailedUserAttempts = settings.failedUserPinAttempts > 0
-
-        val isLocked = soLocked || userLocked
-        val hasFailedAttempts = hasFailedSoAttempts || hasFailedUserAttempts
-
-        if (!isLocked && !hasFailedAttempts) {
+        if (!display.visible) {
             lockoutCard.visibility = View.GONE
             return
         }
 
         lockoutCard.visibility = View.VISIBLE
 
-        // Build detail text
-        val lockedSuffix = getString(R.string.pin_lockout_locked_suffix)
-        val details = buildString {
-            if (hasFailedSoAttempts) {
-                append(getString(
-                    R.string.pin_lockout_so_attempts,
-                    settings.failedSoPinAttempts,
-                    settings.maxPinAttempts
-                ))
-                if (soLocked) append(lockedSuffix)
-                append("\n")
-            }
-            if (hasFailedUserAttempts) {
-                append(getString(
-                    R.string.pin_lockout_user_attempts,
-                    settings.failedUserPinAttempts,
-                    settings.maxPinAttempts
-                ))
-                if (userLocked) append(lockedSuffix)
-            }
-        }.trim()
-        lockoutDetailText.text = details
+        val isLocked = display.isLocked
+        lockoutDetailText.text = lockoutDetails(display, timeText = null)
 
         // Show/hide lockout badge
         lockoutBadge.visibility = if (isLocked) View.VISIBLE else View.GONE
@@ -745,60 +719,92 @@ class PinManagementActivity : AppCompatActivity() {
             if (isLocked) R.color.security_danger else R.color.secondary
         )
 
-        // Start countdown timer if locked
-        if (isLocked) {
-            val longestLockout = maxOf(settings.soPinLockedUntil, settings.userPinLockedUntil)
-            val remaining = longestLockout - now
-
-            lockoutTimer = object : CountDownTimer(remaining, 1000L) {
-                override fun onTick(millisUntilFinished: Long) {
-                    val seconds = (millisUntilFinished / 1000).toInt()
-                    val minutes = seconds / 60
-                    val secs = seconds % 60
-                    val timeText = if (minutes > 0) {
-                        getString(R.string.pin_lockout_minutes_remaining, minutes, secs)
-                    } else {
-                        getString(R.string.pin_lockout_seconds_remaining, secs)
-                    }
-
-                    val updatedDetails = buildString {
-                        if (hasFailedSoAttempts || soLocked) {
-                            append(getString(
-                                R.string.pin_lockout_so_attempts,
-                                settings.failedSoPinAttempts,
-                                settings.maxPinAttempts
-                            ))
-                            if (soLocked) append(lockedSuffix)
-                            append("\n")
-                        }
-                        if (hasFailedUserAttempts || userLocked) {
-                            append(getString(
-                                R.string.pin_lockout_user_attempts,
-                                settings.failedUserPinAttempts,
-                                settings.maxPinAttempts
-                            ))
-                            if (userLocked) append(lockedSuffix)
-                            append("\n")
-                        }
-                        append("\n")
-                        append(getString(R.string.pin_lockout_time_remaining, timeText))
-                    }.trim()
-                    lockoutDetailText.text = updatedDetails
+        // Count down a timed lockout by the time PinManager measured on its
+        // monotonic clock; a PIN blocked until reset has no countdown.
+        val remaining = display.countdownMs ?: return
+        lockoutTimer = object : CountDownTimer(remaining, 1000L) {
+            override fun onTick(millisUntilFinished: Long) {
+                val seconds = (millisUntilFinished / 1000).toInt()
+                val minutes = seconds / 60
+                val secs = seconds % 60
+                val timeText = if (minutes > 0) {
+                    getString(R.string.pin_lockout_minutes_remaining, minutes, secs)
+                } else {
+                    getString(R.string.pin_lockout_seconds_remaining, secs)
                 }
+                lockoutDetailText.text = lockoutDetails(display, timeText)
+            }
 
-                override fun onFinish() {
-                    lockoutBadge.visibility = View.GONE
-                    lockoutDetailText.text = getString(R.string.pin_lockout_expired)
-                    lockoutCard.strokeColor = ContextCompat.getColor(
-                        this@PinManagementActivity,
-                        R.color.secondary
-                    )
+            override fun onFinish() {
+                lockoutBadge.visibility = View.GONE
+                lockoutDetailText.text = getString(R.string.pin_lockout_expired)
+                lockoutCard.strokeColor = ContextCompat.getColor(
+                    this@PinManagementActivity,
+                    R.color.secondary
+                )
+                // Measure again: hide Reset Lockout once PinManager agrees.
+                lifecycleScope.launch {
+                    showLockout(currentSettings, force = true, afterCountdown = true)
                 }
-            }.start()
-        }
+            }
+        }.start()
     }
 
-    private fun rebuildActionCards(settings: PinSettingsData) {
+    /** The lockout card's detail text, with the time left when [timeText] is given. */
+    private fun lockoutDetails(display: PinLockoutDisplay, timeText: String?): String {
+        val lockedSuffix = getString(R.string.pin_lockout_locked_suffix)
+        return buildString {
+            display.so?.let { line ->
+                append(getString(R.string.pin_lockout_so_attempts, line.failedAttempts, line.maxAttempts))
+                if (line.locked) append(lockedSuffix)
+                append("\n")
+            }
+            display.user?.let { line ->
+                append(getString(R.string.pin_lockout_user_attempts, line.failedAttempts, line.maxAttempts))
+                if (line.locked) append(lockedSuffix)
+                append("\n")
+            }
+            if (timeText != null) {
+                append("\n")
+                append(getString(R.string.pin_lockout_time_remaining, timeText))
+            }
+        }.trim()
+    }
+
+    /**
+     * Shows the lockout card and the action cards from the lockout status
+     * PinManager measures on its monotonic clock.
+     *
+     * Reading the status re-anchors a running lockout and writes settings, so
+     * the status is read again only when [PinLockoutDisplay.refreshKey]
+     * changes, when [force] is set, or when nothing has been read yet.
+     * [afterCountdown] keeps the card's "expired" text unless a PIN is still
+     * locked.
+     */
+    private suspend fun showLockout(
+        settings: PinSettingsData,
+        force: Boolean = false,
+        afterCountdown: Boolean = false
+    ) {
+        val key = PinLockoutDisplay.refreshKey(settings)
+        val cached = lockoutDisplay
+        if (!force && cached != null && key == lockoutKey) {
+            rebuildActionCards(settings, cached)
+            return
+        }
+        val display = PinLockoutDisplay.from(
+            user = pinManager.getLockoutStatus(PinType.USER_PIN),
+            so = pinManager.getLockoutStatus(PinType.SO_PIN)
+        )
+        lockoutKey = key
+        lockoutDisplay = display
+        if (!afterCountdown || display.isLocked) {
+            updateLockoutCard(display)
+        }
+        rebuildActionCards(settings, display)
+    }
+
+    private fun rebuildActionCards(settings: PinSettingsData, lockout: PinLockoutDisplay) {
         actionCardsContainer.removeAllViews()
 
         // "Set SO PIN" - only if SO PIN is not set
@@ -853,9 +859,8 @@ class PinManagementActivity : AppCompatActivity() {
             )
         }
 
-        // "Reset Lockout" - only if user PIN is locked
-        val now = System.currentTimeMillis()
-        if (settings.userPinLockedUntil > now) {
+        // "Reset Lockout" - only while PinManager holds the user PIN locked
+        if (lockout.showResetLockout) {
             actionCardsContainer.addView(
                 createActionCard(
                     title = getString(R.string.pin_action_reset_lockout_title),
@@ -960,7 +965,8 @@ class PinManagementActivity : AppCompatActivity() {
                 }
             }
             .setNegativeButton(R.string.button_cancel, null)
-            .show()
+            .create()
+            .let { SecureScreens.show(it) }
     }
 
     private fun showSetUserPinDialog() {
@@ -1006,7 +1012,8 @@ class PinManagementActivity : AppCompatActivity() {
                 }
             }
             .setNegativeButton(R.string.button_cancel, null)
-            .show()
+            .create()
+            .let { SecureScreens.show(it) }
     }
 
     private fun showChangeSoPinDialog() {
@@ -1053,7 +1060,8 @@ class PinManagementActivity : AppCompatActivity() {
                 }
             }
             .setNegativeButton(R.string.button_cancel, null)
-            .show()
+            .create()
+            .let { SecureScreens.show(it) }
     }
 
     private fun showChangeUserPinDialog() {
@@ -1103,7 +1111,8 @@ class PinManagementActivity : AppCompatActivity() {
                 }
             }
             .setNegativeButton(R.string.button_cancel, null)
-            .show()
+            .create()
+            .let { SecureScreens.show(it) }
     }
 
     private fun showResetLockoutDialog() {
@@ -1134,7 +1143,8 @@ class PinManagementActivity : AppCompatActivity() {
                 }
             }
             .setNegativeButton(R.string.button_cancel, null)
-            .show()
+            .create()
+            .let { SecureScreens.show(it) }
     }
 
     // -------------------------------------------------------------------------

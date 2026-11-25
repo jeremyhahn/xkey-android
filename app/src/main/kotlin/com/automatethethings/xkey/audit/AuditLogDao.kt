@@ -17,6 +17,7 @@ package com.automatethethings.xkey.audit
 import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.Query
+import androidx.room.Transaction
 import kotlinx.coroutines.flow.Flow
 
 /**
@@ -368,6 +369,21 @@ interface AuditLogDao {
     suspend fun deleteOlderThan(olderThan: Long): Int
 
     /**
+     * Deletes entries older than [olderThan] and inserts the entry [record]
+     * builds from the count, in one transaction: both commit or neither does.
+     * A failure or cancellation inside the transaction rolls the delete back.
+     * Call through [AuditLogger.pruneAuditLog].
+     *
+     * @return Number of entries deleted.
+     */
+    @Transaction
+    suspend fun deleteOlderThanAndRecord(olderThan: Long, record: (deleted: Int) -> AuditLogEntity): Int {
+        val deleted = deleteOlderThan(olderThan)
+        insert(record(deleted))
+        return deleted
+    }
+
+    /**
      * Delete all audit log entries for a specific key.
      *
      * Useful when a key is deleted and its audit history should be removed.
@@ -387,6 +403,21 @@ interface AuditLogDao {
      */
     @Query("DELETE FROM audit_logs")
     suspend fun deleteAll(): Int
+
+    /**
+     * Deletes every entry and inserts the entry [record] builds from the
+     * count, in one transaction: both commit or neither does. A failure or
+     * cancellation inside the transaction rolls the delete back. Call
+     * through [AuditLogger.clearAuditLog].
+     *
+     * @return Number of entries deleted.
+     */
+    @Transaction
+    suspend fun deleteAllAndRecord(record: (deleted: Int) -> AuditLogEntity): Int {
+        val deleted = deleteAll()
+        insert(record(deleted))
+        return deleted
+    }
 
     /**
      * Delete entries exceeding a maximum count, keeping the most recent.

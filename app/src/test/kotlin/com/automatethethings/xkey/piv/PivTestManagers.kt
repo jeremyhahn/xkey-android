@@ -15,6 +15,7 @@
 package com.automatethethings.xkey.piv
 
 import com.automatethethings.xkey.crypto.KeySecurityLevel
+import com.automatethethings.xkey.crypto.PqcSoftwareKeyStore
 import java.security.KeyPair
 
 /**
@@ -38,20 +39,23 @@ internal const val SUPPORTED_TEST_SDK = 33
  * keeps the manager's own probe, which generates under a disposable alias
  * with [generateKeyPair] and reads it with [securityLevelOf]; its answers are
  * kept for the process until [PivKeyManager.forgetHardwareProbes].
+ * [pqcStore] is the software ML-DSA store, as [PivKeyManager] takes it.
  */
 internal fun testPivKeyManager(
     dao: PivSlotDao,
     generateKeyPair: ((alias: String, algorithm: PivAlgorithm) -> KeyPair)? = null,
     sdkInt: Int = SUPPORTED_TEST_SDK,
     securityLevelOf: (alias: String) -> KeySecurityLevel? = { KeySecurityLevel.TEE },
-    probeSecurityLevel: ((algorithm: PivAlgorithm) -> KeySecurityLevel?)? = { KeySecurityLevel.TEE }
+    probeSecurityLevel: ((algorithm: PivAlgorithm) -> KeySecurityLevel?)? = { KeySecurityLevel.TEE },
+    pqcStore: PqcSoftwareKeyStore? = null
 ): PivKeyManager =
     if (generateKeyPair == null) {
         PivKeyManager(
             dao,
             sdkInt = sdkInt,
             securityLevelOf = securityLevelOf,
-            probeSecurityLevel = probeSecurityLevel
+            probeSecurityLevel = probeSecurityLevel,
+            pqcStore = pqcStore
         )
     } else {
         PivKeyManager(
@@ -59,6 +63,7 @@ internal fun testPivKeyManager(
             generateKeyPair = generateKeyPair,
             sdkInt = sdkInt,
             securityLevelOf = securityLevelOf,
-            probeSecurityLevel = probeSecurityLevel
+            probeSecurityLevel = probeSecurityLevel,
+            pqcStore = pqcStore
         )
     }

@@ -1755,29 +1755,29 @@ object AuditLogger {
     }
 
     /**
-     * Records that the user cleared the whole audit log, after the delete.
+     * Clears the whole audit log at the user's request and records the
+     * clearing (AUDIT_LOG_CLEARED with the count) in the same Room
+     * transaction on [dao]: both commit or neither does, so a cancel or a
+     * crash inside the transaction rolls the delete back and the history is
+     * never erased without its record.
      *
-     * Written and awaited on [dao] (the table just cleared) rather than queued,
-     * so the entry is in place when the clear returns and survives it.
-     *
-     * @param dao The audit table the rows were deleted from.
-     * @param deleted Rows the clear removed.
+     * @param dao The audit table to clear.
+     * @return Rows the clear removed.
      */
-    suspend fun logAuditLogCleared(dao: AuditLogDao, deleted: Int) {
-        dao.insert(auditLogClearedEntry(deleted))
-    }
+    suspend fun clearAuditLog(dao: AuditLogDao): Int =
+        dao.deleteAllAndRecord(::auditLogClearedEntry)
 
     /**
-     * Records that the user deleted audit entries older than [olderThan], after
-     * the delete; written and awaited as [logAuditLogCleared] is.
+     * Deletes audit entries older than [olderThan] at the user's request and
+     * records the prune (AUDIT_LOG_PRUNED with the count and cutoff) in the
+     * same transaction, as [clearAuditLog] does.
      *
-     * @param dao The audit table the rows were deleted from.
-     * @param deleted Rows the prune removed.
+     * @param dao The audit table to prune.
      * @param olderThan The epoch-millisecond cutoff.
+     * @return Rows the prune removed.
      */
-    suspend fun logAuditLogPruned(dao: AuditLogDao, deleted: Int, olderThan: Long) {
-        dao.insert(auditLogPrunedEntry(deleted, olderThan))
-    }
+    suspend fun pruneAuditLog(dao: AuditLogDao, olderThan: Long): Int =
+        dao.deleteOlderThanAndRecord(olderThan) { auditLogPrunedEntry(it, olderThan) }
 
     internal fun auditLogClearedEntry(deleted: Int): AuditLogEntity = AuditLogEntity(
         operationType = AuditOperationType.AUDIT_LOG_CLEARED,

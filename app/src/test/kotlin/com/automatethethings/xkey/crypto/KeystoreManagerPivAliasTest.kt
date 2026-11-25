@@ -69,11 +69,17 @@ class KeystoreManagerPivAliasTest {
         every { fake.keyStore.containsAlias(generalAlias) } answers { generalPresent }
         every { fake.keyStore.deleteEntry(generalAlias) } answers { generalPresent = false }
         fake.install()
-        keystoreManager = KeystoreManager(mockk<Context>(relaxed = true))
+        // Resolve and delete read the software ML-DSA store, so it needs a real directory.
+        PqcSoftwareKeyStore.clearSharedForTest()
+        val context = mockk<Context>(relaxed = true)
+        every { context.applicationContext } returns context
+        every { context.filesDir } returns java.nio.file.Files.createTempDirectory("piv-alias").toFile()
+        keystoreManager = KeystoreManager(context)
     }
 
     @After
     fun tearDown() {
+        PqcSoftwareKeyStore.clearSharedForTest()
         unmockkAll()
     }
 

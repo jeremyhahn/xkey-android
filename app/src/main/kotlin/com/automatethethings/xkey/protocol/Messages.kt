@@ -897,6 +897,18 @@ object CoseAlgorithms {
     const val HMAC_384 = 6    // HMAC w/ SHA-384
     const val HMAC_512 = 7    // HMAC w/ SHA-512
 
+    // ML-DSA (FIPS 204; IANA COSE registry).
+    const val ML_DSA_44 = -48
+    const val ML_DSA_65 = -49
+    const val ML_DSA_87 = -50
+
+    /** True for the ML-DSA parameter sets. */
+    fun isMlDsa(algorithm: Int): Boolean = mlDsaSet(algorithm) != null
+
+    /** The ML-DSA parameter set of [algorithm], or null for any other algorithm. */
+    fun mlDsaSet(algorithm: Int): com.automatethethings.xkey.crypto.MlDsaParameterSet? =
+        com.automatethethings.xkey.crypto.MlDsaParameterSet.entries.firstOrNull { it.coseAlgorithm == algorithm }
+
     /**
      * Returns true if the algorithm is supported.
      */
@@ -922,6 +934,7 @@ object CoseAlgorithms {
             HMAC_256 -> "HMAC-SHA256"
             HMAC_384 -> "HMAC-SHA384"
             HMAC_512 -> "HMAC-SHA512"
+            ML_DSA_44, ML_DSA_65, ML_DSA_87 -> mlDsaSet(algorithm)!!.wireName
             else -> throw ProtocolException(
                 "Unknown algorithm: $algorithm",
                 errorCode = ErrorCodes.INVALID_ALGORITHM
@@ -955,6 +968,9 @@ object CoseAlgorithms {
             "HMAC-SHA256", "HMAC256", "HS256" -> HMAC_256
             "HMAC-SHA384", "HMAC384", "HS384" -> HMAC_384
             "HMAC-SHA512", "HMAC512", "HS512" -> HMAC_512
+            "ML-DSA-44", "MLDSA44", "ML-DSA44" -> ML_DSA_44
+            "ML-DSA-65", "MLDSA65", "ML-DSA65" -> ML_DSA_65
+            "ML-DSA-87", "MLDSA87", "ML-DSA87" -> ML_DSA_87
             else -> throw ProtocolException(
                 "Unknown algorithm: $value",
                 errorCode = ErrorCodes.INVALID_ALGORITHM
@@ -973,6 +989,7 @@ object CoseAlgorithms {
             RS256 -> 2048
             RS384 -> 3072
             RS512 -> 4096
+            ML_DSA_44, ML_DSA_65, ML_DSA_87 -> mlDsaSet(algorithm)!!.publicKeyBytes * 8
             else -> throw ProtocolException(
                 "Unknown algorithm: $algorithm",
                 errorCode = ErrorCodes.INVALID_ALGORITHM
@@ -993,6 +1010,7 @@ object CoseAlgorithms {
      */
     fun nominalKeySizeBits(algorithm: Int): Int? = when (algorithm) {
         ES256, ES384, ES512, RS256, RS384, RS512 -> getKeySizeBits(algorithm)
+        ML_DSA_44, ML_DSA_65, ML_DSA_87 -> getKeySizeBits(algorithm)
         A128GCM -> 128
         A192GCM -> 192
         A256GCM -> 256
@@ -1238,7 +1256,13 @@ data class LocalGenerateKeyParams(
      * or 0). RSA takes its modulus from it; any other algorithm accepts only
      * its own size.
      */
-    val keySizeBits: Int? = null
+    val keySizeBits: Int? = null,
+    /**
+     * Where an ML-DSA key lives ("hardware" or "software"), or null for the
+     * default: hardware when the device makes the set, else software. Only
+     * ML-DSA takes it.
+     */
+    val keyBacking: com.automatethethings.xkey.crypto.PqcBacking? = null
 ) {
     /** The size the key is generated at: [keySizeBits], else the algorithm's own. */
     fun resolvedKeySizeBits(): Int? = keySizeBits ?: CoseAlgorithms.nominalKeySizeBits(algorithm)
@@ -1323,8 +1347,24 @@ data class LocalGenerateKeyParams(
                 userName = params.getStringOrNull("userName"),
                 userDisplayName = params.getStringOrNull("userDisplayName"),
                 isDiscoverable = params.optBoolean("isDiscoverable", false),
-                keySizeBits = keySizeBitsOf(params, algorithm)
+                keySizeBits = keySizeBitsOf(params, algorithm),
+                keyBacking = keyBackingOf(params, algorithm)
             )
+        }
+
+        /** Reads `keyBacking`: absent, "hardware" or "software", and only for ML-DSA. */
+        private fun keyBackingOf(params: JSONObject, algorithm: Int): com.automatethethings.xkey.crypto.PqcBacking? {
+            if (!params.has("keyBacking") || params.isNull("keyBacking")) return null
+            val raw = params.opt("keyBacking") as? String
+            val backing = raw?.let { com.automatethethings.xkey.crypto.PqcBacking.fromWire(it.trim().lowercase()) }
+                ?: throw ProtocolException(
+                    "'keyBacking' must be \"hardware\" or \"software\"",
+                    errorCode = ErrorCodes.INVALID_PARAMS
+                )
+            if (!CoseAlgorithms.isMlDsa(algorithm)) {
+                throw ProtocolException("'keyBacking' applies to ML-DSA keys only", errorCode = ErrorCodes.INVALID_PARAMS)
+            }
+            return backing
         }
     }
 
@@ -1345,6 +1385,7 @@ data class LocalGenerateKeyParams(
             userDisplayName?.let { put("userDisplayName", it) }
             put("isDiscoverable", isDiscoverable)
             keySizeBits?.let { put("keySizeBits", it) }
+            keyBacking?.let { put("keyBacking", it.wire) }
         }
     }
 }
@@ -2256,7 +2297,12 @@ data class LocalGetCapabilitiesResult(
     /** Export formats this device can produce; go-xkms `supportedFormats`. */
     val supportedFormats: List<String> = listOf(
         ExportFormats.DER, ExportFormats.PEM, ExportFormats.SSH, ExportFormats.COSE
-    )
+    ),
+    /**
+     * The ML-DSA sets this device makes in the Keystore; the others in
+     * [algorithms] are software keys. Empty with no hardware ML-DSA.
+     */
+    val hardwareAlgorithms: List<String> = emptyList()
 ) {
     /**
      * Serializes to go-xkms's `LocalGetCapabilitiesResult`
@@ -2295,6 +2341,7 @@ data class LocalGetCapabilitiesResult(
             put("supportsECDH", supportsECDH)
             put("supportsSymmetric", supportsSymmetric)
             put("supportsHMAC", supportsHMAC)
+            put("hardwareAlgorithms", JSONArray(hardwareAlgorithms))
         }
     }
 }

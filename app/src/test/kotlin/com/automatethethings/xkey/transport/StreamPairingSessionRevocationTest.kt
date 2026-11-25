@@ -989,7 +989,7 @@ class StreamPairingSessionRevocationTest {
             finish.await(TIMEOUT_MS, TimeUnit.MILLISECONDS)
             Unit
         }
-        val manager = testPivKeyManager(mockk<PivSlotDao>(relaxed = true))
+        val manager = testPivKeyManager(mockk<PivSlotDao>(relaxed = true), pqcStore = mockk(relaxed = true))
         assertRevokedAtAdmissionDuring(slot.keystoreAlias) { _, resumeShare ->
             val deleting = scope.async(Dispatchers.IO) { manager.deleteKey(slot) }
             try {
@@ -1018,6 +1018,7 @@ class StreamPairingSessionRevocationTest {
         val newKey = keyPair(ByteArray(91) { 5 })
         val manager = testPivKeyManager(
             mockk<PivSlotDao>(relaxed = true),
+            pqcStore = mockk(relaxed = true),
             generateKeyPair = { _, _ ->
                 replacing.complete(Unit)
                 finish.await(TIMEOUT_MS, TimeUnit.MILLISECONDS)
@@ -1050,6 +1051,7 @@ class StreamPairingSessionRevocationTest {
         val newKey = keyPair(ByteArray(91) { 7 })
         val manager = testPivKeyManager(
             mockk<PivSlotDao>(relaxed = true),
+            pqcStore = mockk(relaxed = true),
             generateKeyPair = { _, _ -> newKey },
             securityLevelOf = { KeySecurityLevel.TEE }
         )

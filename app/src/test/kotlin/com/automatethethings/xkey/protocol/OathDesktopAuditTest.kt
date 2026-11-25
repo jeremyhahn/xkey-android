@@ -90,8 +90,10 @@ class OathDesktopAuditTest {
         coEvery { dao.insert(any()) } answers { inserted += firstArg<OathCredentialEntity>(); 1L }
         coEvery { dao.getByOathId(any()) } returns null
         coEvery { dao.getByOathId(STORED_ID) } returns stored()
-        // A HOTP code claims its counter before it is shown.
-        coEvery { dao.claimCounter(STORED_ID, 3L) } returns 1
+        // A relaxed mock returns 0, which reads as a lost counter race.
+        coEvery { dao.claimAndRecordUsage(any(), any(), any(), any()) } returns true
+        // Likewise a delete count of 0 reads as a delete that removed nothing.
+        coEvery { dao.deleteAndRecordDeletion(any(), any()) } returns 1
         val database = mockk<XKeyDatabase>(relaxed = true)
         every { database.oathCredentialDao() } returns dao
         mockkObject(XKeyDatabase.Companion)
@@ -219,8 +221,8 @@ class OathDesktopAuditTest {
     }
 
     private companion object {
+        const val PEER = "aa01"
         const val SECRET = "JBSWY3DPEHPK3PXP"
         const val STORED_ID = "stored-oath-1"
-        const val PEER = "aa01"
     }
 }

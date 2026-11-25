@@ -827,10 +827,7 @@ class AuditLogActivity : AppCompatActivity() {
     private fun applyFilters() {
         var filtered = allEntries
 
-        // Apply operation type filter
-        if (currentOperationFilter != null) {
-            filtered = filtered.filter { it.operationType == currentOperationFilter }
-        }
+        filtered = AuditOperationLabels.filterByOperation(filtered, currentOperationFilter)
 
         // Apply key type filter
         if (currentKeyTypeFilter != null) {
@@ -919,8 +916,7 @@ class AuditLogActivity : AppCompatActivity() {
             .setPositiveButton(getString(R.string.key_delete_confirm)) { _, _ ->
                 lifecycleScope.launch {
                     if (!authenticated(getString(R.string.audit_clear_all))) return@launch
-                    val deleted = auditLogDao.deleteAll()
-                    AuditLogger.logAuditLogCleared(auditLogDao, deleted)
+                    AuditLogger.clearAuditLog(auditLogDao)
                     Snackbar.make(rootLayout, getString(R.string.audit_logs_cleared), Snackbar.LENGTH_SHORT).show()
                 }
             }
@@ -946,8 +942,7 @@ class AuditLogActivity : AppCompatActivity() {
                 lifecycleScope.launch {
                     if (!authenticated(getString(R.string.audit_delete_older))) return@launch
                     val cutoff = System.currentTimeMillis() - DELETE_OLDER_THAN_MS
-                    val deleted = auditLogDao.deleteOlderThan(cutoff)
-                    AuditLogger.logAuditLogPruned(auditLogDao, deleted, cutoff)
+                    val deleted = AuditLogger.pruneAuditLog(auditLogDao, cutoff)
                     Snackbar.make(rootLayout, getString(R.string.audit_old_logs_deleted, deleted), Snackbar.LENGTH_SHORT).show()
                 }
             }
@@ -1103,9 +1098,7 @@ class AuditLogActivity : AppCompatActivity() {
             ContextCompat.getColor(this, R.color.tertiary),
             ContextCompat.getColor(this, R.color.on_tertiary)
         )
-        AuditOperationType.PAIRING_DENIED,
-        AuditOperationType.POLICY_DENIED,
-        AuditOperationType.BIOMETRIC_FAILURE -> Pair(
+        in AuditOperationLabels.refusalTypes -> Pair(
             ContextCompat.getColor(this, R.color.security_warning),
             ContextCompat.getColor(this, R.color.on_primary)
         )

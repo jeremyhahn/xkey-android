@@ -159,6 +159,8 @@
     <string name="key_badge_system">System</string>
     <string name="key_badge_shared">Shared</string>
     <string name="key_deleted">Key deleted</string>
+    <string name="key_delete_failed">The key could not be deleted. It is still on this device.</string>
+    <string name="ca_reset_failed">The CA could not be reset. Its keys may still be on this device.</string>
 
     <!-- Key Context Menu -->
     <string name="key_menu_share_settings">Share Settings</string>
@@ -239,6 +241,10 @@
     <string name="key_create_purpose">Purpose</string>
     <string name="key_create_algorithm">Algorithm</string>
     <string name="key_create_biometric">Require biometric</string>
+    <string name="key_create_storage">Storage</string>
+    <string name="key_storage_hardware">Hardware</string>
+    <string name="key_storage_software">Software (encrypted with a Keystore key)</string>
+    <string name="piv_storage_title">Storage for %s</string>
     <string name="key_create_strongbox">Use StrongBox</string>
     <string name="key_create_success">Key created</string>
     <string name="key_create_error">Failed to create key</string>
@@ -958,6 +964,7 @@
     <string name="oath_field_digits">Digits</string>
     <string name="oath_field_period">Period (seconds)</string>
     <string name="oath_code_copied">Code copied to clipboard</string>
+    <string name="oath_code_copy_failed">Could not generate a code to copy</string>
     <string name="oath_code_unavailable">No code is available for this account</string>
     <string name="oath_delete_confirm">Delete this credential?</string>
     <string name="oath_delete_message">This will permanently remove the %s credential for %s.</string>

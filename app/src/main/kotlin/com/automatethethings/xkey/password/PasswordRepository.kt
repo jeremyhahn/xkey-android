@@ -146,7 +146,7 @@ class PasswordRepository(
     private val clock: () -> Long = System::currentTimeMillis
 ) {
     companion object {
-        private const val KEY_ALIAS = "xkey_password_encryption_key"
+        private const val KEY_ALIAS = KeystoreAeadCipher.PASSWORD_ALIAS
 
         /**
          * How long a deletion record ([PasswordDeletionEntity]) is kept: 180

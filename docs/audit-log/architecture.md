@@ -8,12 +8,13 @@
 
 ### AuditLogEntity (`audit_logs`)
 
-The phone's security event log. `AuditOperationType` has 63 values: key
+The phone's security event log. `AuditOperationType` has 65 values: key
 lifecycle and key use, FIDO2, pairing and connections (device attestation
 and enrollment included), settings and the trust store, biometric and policy
 denials, service start and stop, certificates, files and media, contacts,
-OATH, password and OATH sync, co-signing, PINs, PIV slots, password entries
-and desktop backups. `AuditLog.kt` holds the list.
+OATH, password and OATH sync, co-signing, PINs, PIV slots, password entries,
+desktop backups and the audit log's own clearing and pruning. `AuditLog.kt`
+holds the list.
 
 Key attestation is among the recorded events: every `local.attestKey` the
 phone answers writes one `KEY_ATTESTED` entry with the key id, label, type,
@@ -123,7 +124,23 @@ Trust store events: `TrustStoreRepository` records `TRUST_STORE_IMPORT` (subject
 ### Audit screen (`AuditLogActivity`)
 
 The full log: search, operation and key-type filters, date range, export to
-JSON or CSV, and deletion.
+JSON or CSV, and deletion. The date range limits the list and both exports.
+
+#### Export
+
+The JSON export escapes every value through `JSONObject`. The CSV export
+writes every row, header included, through one encoder (`AuditCsv.field`),
+for every column (id, key id, key type, device id, success and duration as
+well as the text columns):
+
+- each field is wrapped in double quotes, and a double quote inside it is
+  doubled;
+- a value starting with `=`, `+`, `-`, `@`, a tab or a carriage return is
+  prefixed with `'`, so a spreadsheet opens it as text and never evaluates
+  it as a formula;
+- a null value is an empty quoted field.
+
+`AuditCsvTest` (JVM) covers the quoting and every formula lead.
 
 ### Recent activity on the home screen (`MainActivity`)
 
@@ -165,8 +182,8 @@ No entries give a single "No recent activity" row.
 | Age | `AuditLogger.DEFAULT_RETENTION_MS` | 90 days | `deleteOlderThan(now - 90 days)` |
 | Count | `AuditLogger.MAX_ENTRIES` | 10,000 entries | `deleteExceedingCount(10_000)` |
 
-The policy runs once per process, when `AuditLogger.initialize` first sets up
-the logger at application start. It runs in the background on
+The policy runs on every `AuditLogger.initialize` call, application start
+included; the logger's wiring happens only on the first call. It runs in the background on
 `Dispatchers.IO`; a failure is logged and does not stop logging. The age limit
 runs first, then the count limit, so the count applies to what is left.
 
@@ -181,15 +198,27 @@ Neither limit is configurable.
 
 ### The audit screen's purge
 
-The audit log screen (`AuditLogActivity`) has its own "delete older" action.
-After a confirmation dialog it calls `deleteOlderThan(now - 30 days)` and
-shows the number deleted. This is a manual purge, separate from the 90-day
-policy, and it does not change the policy's limits. The screen's "clear all"
-action calls `deleteAll()`.
+The audit log screen (`AuditLogActivity`) has two manual deletions, both
+separate from the 90-day policy and neither changing its limits:
+
+| Action | DAO call | Recorded as |
+|--------|----------|-------------|
+| Delete older | `deleteOlderThan(now - 30 days)` | `AUDIT_LOG_PRUNED` |
+| Clear all | `deleteAll()` | `AUDIT_LOG_CLEARED` |
+
+Each action asks for confirmation in a dialog, then for the user's
+biometric or screen lock. A refused or cancelled prompt deletes nothing.
+After the delete, one entry of the type above is written with the number
+deleted, and the screen waits for it, so a cleared log always holds the
+record of its clearing. The screen shows the number deleted. The prompt step
+is swappable so instrumented tests (`AuditLogMenuTest`, `AuditLogFlowTest`)
+can confirm or refuse it. Operation types are stored by name, so the two
+new types needed no migration.
 
 ### Tests
 
 - `AuditRetentionConstantsTest` (JVM) pins the two constants above.
 - `AuditRetentionTest` and `AuditLogDaoTest` (instrumented, in-memory
   `XKeyDatabase`) cover both DAO calls, tied timestamps, and the policy's two
-  calls with the constants.
+  calls with the constants, and drive the policy through
+  `AuditLogger.initialize` on the app database.

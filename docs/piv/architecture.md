@@ -26,13 +26,27 @@ the TEE.
 | `RS4096` | RSA 4096 | `0x16` | `RS4096`, `RSA4096`, `RSA-4096` |
 | `ED25519` | Ed25519 | `0xE0` | `ED25519`, `EdDSA` |
 | `X25519` | X25519 | `0xE1` | `X25519` |
+| `ML_DSA_44` | ML-DSA-44 (FIPS 204) | none | `ML-DSA-44`, `MLDSA44`, `ML_DSA_44` |
+| `ML_DSA_65` | ML-DSA-65 (FIPS 204) | none | `ML-DSA-65`, `MLDSA65`, `ML_DSA_65` |
+| `ML_DSA_87` | ML-DSA-87 (FIPS 204) | none | `ML-DSA-87`, `MLDSA87`, `ML_DSA_87` |
 
 The ids for P-256, P-384, RSA 2048 and RSA 3072 are the NIST SP 800-78
 values; `0x16` for RSA 4096 and `0xE0`/`0xE1` for Ed25519/X25519 are the
 YubiKey extension the desktop uses. A hex id such as `0x11` is also accepted.
+SP 800-78 assigns no ML-DSA id, so `pivAlgorithmId` is null for the ML-DSA
+entries and peers name them only by wire name.
+
 `PivAlgorithm.fromWireName` matches names case-insensitively and treats `_`
-as `-`; any other name, including RSA 1024, P-521 and post-quantum names, is
-answered with `INVALID_ALGORITHM`.
+as `-`; any other name, including RSA 1024, P-521 and other post-quantum
+names such as SLH-DSA, is answered with `INVALID_ALGORITHM`.
+
+An ML-DSA slot key is held in software (`PqcSoftwareKeyStore`, under the
+slot's alias) or in the Android Keystore through `PqcHardware.backend`.
+`local.pivGenerateKey` takes an optional `keyBacking` (`hardware` or
+`software`; absent picks hardware when the device makes the set); `hardware`
+the device does not make is `FEATURE_UNAVAILABLE`, and `keyBacking` on an EC
+or RSA slot key is `INVALID_PARAMS`. Sign, public key export and delete reach
+either backing. See [../pqc-keys/architecture.md](../pqc-keys/architecture.md).
 
 The desktop drives the slots through `local.piv*`. All transports share the
 one `RequestHandler` built in `XKeyGattService` with

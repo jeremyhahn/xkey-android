@@ -51,7 +51,7 @@ class OathRepositoryImportPathTest {
     fun setUp() {
         // Every add writes an audit row (OathRepositoryAuditTest covers it).
         mockkObject(AuditLogger)
-        every { AuditLogger.logOathCredentialCreated(any(), any(), any(), any()) } returns Unit
+        every { AuditLogger.logOathCredentialCreated(any(), any(), any(), any(), any(), any()) } returns Unit
         val dao = mockk<OathCredentialDao>()
         coEvery { dao.insert(any()) } answers { inserted += firstArg<OathCredentialEntity>(); 1L }
         val secretManager = mockk<OathSecretManager>()

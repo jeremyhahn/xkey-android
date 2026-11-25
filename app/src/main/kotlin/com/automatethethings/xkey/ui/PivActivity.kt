@@ -41,6 +41,9 @@ import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import com.automatethethings.xkey.R
 import com.automatethethings.xkey.ble.XKeyGattService
+import com.automatethethings.xkey.crypto.PqcBacking
+import com.automatethethings.xkey.crypto.PqcHardware
+import com.automatethethings.xkey.crypto.PqcSoftwareKeyStore
 import com.automatethethings.xkey.piv.PivAlgorithm
 import com.automatethethings.xkey.piv.PivKeyManager
 import com.automatethethings.xkey.piv.PivSlot
@@ -143,7 +146,10 @@ class PivActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
 
         val db = XKeyDatabase.getInstance(this)
-        pivKeyManager = PivKeyManager(db.pivSlotDao())
+        pivKeyManager = PivKeyManager(
+            db.pivSlotDao(),
+            pqcStore = PqcSoftwareKeyStore.registerShared(applicationContext)
+        )
 
         buildUI()
         setContentView(rootLayout)
@@ -975,7 +981,38 @@ class PivActivity : AppCompatActivity() {
                 selectedIndex = which
             }
             .setPositiveButton(getString(R.string.piv_generate_key)) { _, _ ->
-                generateKey(slot, algorithms[selectedIndex])
+                val algorithm = algorithms[selectedIndex]
+                val set = algorithm.mlDsaSet
+                if (set == null) {
+                    generateKey(slot, algorithm)
+                } else {
+                    showStorageDialog(slot, algorithm, KeyCreationAlgorithms.storageOptions(set, PqcHardware.supported()))
+                }
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    /**
+     * Where an ML-DSA slot key lives. Hardware is listed only for the sets
+     * the device makes there; software alone needs no choice.
+     */
+    private fun showStorageDialog(slot: PivSlot, algorithm: PivAlgorithm, options: List<PqcBacking>) {
+        if (options.size == 1) {
+            generateKey(slot, algorithm, options.single())
+            return
+        }
+        val labels = options.map {
+            getString(if (it == PqcBacking.HARDWARE) R.string.key_storage_hardware else R.string.key_storage_software)
+        }.toTypedArray()
+        var selectedIndex = 0
+        MaterialAlertDialogBuilder(this)
+            .setTitle(getString(R.string.piv_storage_title, algorithm.displayName))
+            .setSingleChoiceItems(labels, selectedIndex) { _, which ->
+                selectedIndex = which
+            }
+            .setPositiveButton(getString(R.string.piv_generate_key)) { _, _ ->
+                generateKey(slot, algorithm, options[selectedIndex])
             }
             .setNegativeButton(android.R.string.cancel, null)
         if (algorithms.size < PivAlgorithm.entries.size) {
@@ -997,10 +1034,10 @@ class PivActivity : AppCompatActivity() {
     internal var generateJob: Job? = null
         private set
 
-    private fun generateKey(slot: PivSlot, algorithm: PivAlgorithm) {
+    private fun generateKey(slot: PivSlot, algorithm: PivAlgorithm, backing: PqcBacking = PqcBacking.SOFTWARE) {
         generateJob = lifecycleScope.launch {
             try {
-                pivKeyManager.generateKey(slot, algorithm)
+                pivKeyManager.generateKey(slot, algorithm, backing)
                 Snackbar.make(
                     rootLayout,
                     getString(R.string.piv_generate_success, slot.hexId),
