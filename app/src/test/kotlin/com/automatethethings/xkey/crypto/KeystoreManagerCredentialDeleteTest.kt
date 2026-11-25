@@ -72,7 +72,7 @@ class KeystoreManagerCredentialDeleteTest {
         every { keyStore.deleteEntry(any()) } answers { entries.remove(firstArg<String>()) }
         mockkStatic(KeyStore::class)
         every { KeyStore.getInstance("AndroidKeyStore") } returns keyStore
-        keystoreManager = KeystoreManager(mockk<Context>(relaxed = true))
+        keystoreManager = KeystoreManager(mockk<Context>(relaxed = true), pqcStore = noPqcKeys())
     }
 
     @After

@@ -65,7 +65,7 @@ class KeystoreManagerDeleteFailureTest {
         every { keyStore.containsAlias(any()) } returns false
         mockkStatic(KeyStore::class)
         every { KeyStore.getInstance("AndroidKeyStore") } returns keyStore
-        keystoreManager = KeystoreManager(mockk<Context>(relaxed = true))
+        keystoreManager = KeystoreManager(mockk<Context>(relaxed = true), pqcStore = noPqcKeys())
     }
 
     @After

@@ -64,7 +64,7 @@ class KeystoreManagerUncommittedRemovalTest {
         every { keyStore.containsAlias(any()) } returns false
         mockkStatic(KeyStore::class)
         every { KeyStore.getInstance("AndroidKeyStore") } returns keyStore
-        keystoreManager = KeystoreManager(mockk<Context>(relaxed = true))
+        keystoreManager = KeystoreManager(mockk<Context>(relaxed = true), pqcStore = noPqcKeys())
     }
 
     @After
@@ -253,6 +253,12 @@ internal fun awaitParkedOrDone(probe: Thread) {
     }
     error("probe neither ended nor waited")
 }
+
+/**
+ * A software ML-DSA store holding no key, for a [KeystoreManager] built on a
+ * mocked context, whose files directory the real store cannot use.
+ */
+internal fun noPqcKeys(): PqcSoftwareKeyStore = mockk(relaxed = true)
 
 /**
  * An in-memory [SharedPreferences] that behaves like Android's on a failed
