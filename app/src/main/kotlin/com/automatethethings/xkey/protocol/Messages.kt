@@ -1372,6 +1372,14 @@ data class LocalSymmetricParams(
     val aad: String? = null        // Base64-encoded additional authenticated data
 ) {
     companion object {
+        /** Parameters of local.symmetricEncrypt: input in `plaintext` or the older `data`. */
+        fun forEncrypt(params: JSONObject): LocalSymmetricParams =
+            fromJson(params, input = "plaintext", refused = "ciphertext")
+
+        /** Parameters of local.symmetricDecrypt: input in `ciphertext` or the older `data`. */
+        fun forDecrypt(params: JSONObject): LocalSymmetricParams =
+            fromJson(params, input = "ciphertext", refused = "plaintext")
+
         fun fromJson(params: JSONObject): LocalSymmetricParams {
             return LocalSymmetricParams(
                 keyId = params.getStringOrNull("keyId")
@@ -1385,6 +1393,23 @@ data class LocalSymmetricParams(
                     ?: throw ProtocolException(
                         "Missing 'plaintext'/'ciphertext'", errorCode = ErrorCodes.INVALID_PARAMS
                     ),
+                aad = params.getStringOrNull("aad")
+            )
+        }
+
+        private fun fromJson(params: JSONObject, input: String, refused: String): LocalSymmetricParams {
+            if (params.has(refused)) {
+                throw ProtocolException(
+                    "Field '$refused' is not a parameter of this method; send '$input'",
+                    errorCode = ErrorCodes.INVALID_PARAMS
+                )
+            }
+            return LocalSymmetricParams(
+                keyId = params.getStringOrNull("keyId")
+                    ?: throw ProtocolException("Missing 'keyId'", errorCode = ErrorCodes.INVALID_PARAMS),
+                data = params.getStringOrNull(input)
+                    ?: params.getStringOrNull("data")
+                    ?: throw ProtocolException("Missing '$input'", errorCode = ErrorCodes.INVALID_PARAMS),
                 aad = params.getStringOrNull("aad")
             )
         }
