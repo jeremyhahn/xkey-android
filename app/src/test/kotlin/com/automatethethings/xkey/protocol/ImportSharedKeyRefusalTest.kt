@@ -59,7 +59,6 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
-import org.junit.Ignore
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
@@ -287,11 +286,6 @@ class ImportSharedKeyRefusalTest {
      * error that keeps none of the material. The first key row lookup after
      * the read (the audit's key type) answers; the decision's own throws.
      */
-    @Ignore(
-        "Fails at 25cc60cf: the handler zeroes the material only on the refusal branch, so a " +
-            "decision that throws after the read leaves it in memory. Lift once the export zeroes " +
-            "it in a finally on every exit."
-    )
     @Test
     fun aFailedDecisionAfterTheReadKeepsNoneOfTheMaterial() = runTest {
         val material = secret()

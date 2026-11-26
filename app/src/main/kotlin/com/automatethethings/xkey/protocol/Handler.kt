@@ -5186,14 +5186,6 @@ class RequestHandler(
         }
     }
 
-    /**
-     * Exports one of the phone's keys for the desktop.
-     *
-     * Nothing leaves the device unless the connected peer is confirmed and the
-     * key's sharing policy admits it. Beyond that, software keys may return raw
-     * material (only when both stores mark them exportable + shareable), while
-     * hardware/Keystore keys return their public key alone.
-     */
     private suspend fun handleImportSharedKey(request: Request): Response {
         val params = request.params
             ?: return Response.error(request.id, ErrorCodes.INVALID_PARAMS, "Missing params")
@@ -5215,69 +5207,74 @@ class RequestHandler(
                     ?.also { key -> if (!permitted) key.material.fill(0) }
             }
             val software = shareable.software
-            val publicKeyPem = shareable.publicKeyPem
-            if (software == null && publicKeyPem == null) {
-                return Response.error(request.id, ErrorCodes.KEY_NOT_FOUND, "Key not found: $keyId")
-            }
+            // The material read is zeroed on every exit: a refusal, a
+            // decision that throws, a failed reply or a sent one.
+            try {
+                val publicKeyPem = shareable.publicKeyPem
+                if (software == null && publicKeyPem == null) {
+                    return Response.error(request.id, ErrorCodes.KEY_NOT_FOUND, "Key not found: $keyId")
+                }
 
-            val peerName = auditPeerName(peerPublicKeyHex)
-            // The key's stored type, read apart from the authorization result,
-            // so a refused export is filed under the same key type as a
-            // granted one (the audit screen filters by it).
-            val keyType = auditKeyType(keyId, software)
-            // Decided again after the read, so a revoke that committed while
-            // it ran is still honoured; a refusal keeps none of the material.
-            val entity = if (permitted) authorizeShare(keyId, peerPublicKeyHex) else null
-            if (entity == null) {
-                software?.material?.fill(0)
-                val message = "Key is not shareable with this peer: $keyId"
+                val peerName = auditPeerName(peerPublicKeyHex)
+                // The key's stored type, read apart from the authorization result,
+                // so a refused export is filed under the same key type as a
+                // granted one (the audit screen filters by it).
+                val keyType = auditKeyType(keyId, software)
+                // Decided again after the read, so a revoke that committed while
+                // it ran is still honoured; a refusal keeps none of the material.
+                val entity = if (permitted) authorizeShare(keyId, peerPublicKeyHex) else null
+                if (entity == null) {
+                    val message = "Key is not shareable with this peer: $keyId"
+                    AuditLogger.logKeyExported(
+                        keyId = keyId,
+                        keyLabel = keyId,
+                        keyType = keyType,
+                        format = if (software != null) "raw" else "public",
+                        deviceId = peerPublicKeyHex,
+                        deviceName = peerName,
+                        success = false,
+                        errorMessage = message
+                    )
+                    return Response.error(request.id, ErrorCodes.OPERATION_DENIED, message)
+                }
+
+                val result = JSONObject()
+                val format: String
+                if (software != null) {
+                    // Software-backed key: may export raw material per policy.
+                    result.put("algorithm", software.algorithm)
+                    result.put("key_type", software.keyType)
+                    val exportMaterial = entity.exportable && entity.shareable &&
+                        software.exportable && software.shareable
+                    format = if (exportMaterial) "raw" else "metadata"
+                    if (exportMaterial) {
+                        result.put("wrapped_key", android.util.Base64.encodeToString(software.material, android.util.Base64.NO_WRAP))
+                        result.put("key_size", software.keySize)
+                        result.put("exportable", true)
+                    } else {
+                        result.put("exportable", false)
+                    }
+                } else {
+                    // Hardware/Keystore key: public key only — the private half is
+                    // non-exportable by design.
+                    result.put("public_key_pem", publicKeyPem)
+                    result.put("key_type", "public")
+                    result.put("exportable", false)
+                    result.put("algorithm", entity.algorithm)
+                    format = "public"
+                }
                 AuditLogger.logKeyExported(
                     keyId = keyId,
-                    keyLabel = keyId,
+                    keyLabel = entity.label,
                     keyType = keyType,
-                    format = if (software != null) "raw" else "public",
+                    format = format,
                     deviceId = peerPublicKeyHex,
-                    deviceName = peerName,
-                    success = false,
-                    errorMessage = message
+                    deviceName = peerName
                 )
-                return Response.error(request.id, ErrorCodes.OPERATION_DENIED, message)
+                Response.success(request.id, result)
+            } finally {
+                software?.material?.fill(0)
             }
-
-            val result = JSONObject()
-            val format: String
-            if (software != null) {
-                // Software-backed key: may export raw material per policy.
-                result.put("algorithm", software.algorithm)
-                result.put("key_type", software.keyType)
-                val exportMaterial = entity.exportable && entity.shareable &&
-                    software.exportable && software.shareable
-                format = if (exportMaterial) "raw" else "metadata"
-                if (exportMaterial) {
-                    result.put("wrapped_key", android.util.Base64.encodeToString(software.material, android.util.Base64.NO_WRAP))
-                    result.put("key_size", software.keySize)
-                    result.put("exportable", true)
-                } else {
-                    result.put("exportable", false)
-                }
-            } else {
-                // Hardware/Keystore key: public key only — the private half is
-                // non-exportable by design.
-                result.put("public_key_pem", publicKeyPem)
-                result.put("key_type", "public")
-                result.put("exportable", false)
-                result.put("algorithm", entity.algorithm)
-                format = "public"
-            }
-            AuditLogger.logKeyExported(
-                keyId = keyId,
-                keyLabel = entity.label,
-                keyType = keyType,
-                format = format,
-                deviceId = peerPublicKeyHex,
-                deviceName = peerName
-            )
-            Response.success(request.id, result)
         } catch (e: KeyPolicyStore.KeyDeletedException) {
             throw e
         } catch (e: com.automatethethings.xkey.crypto.KeyPresenceUnreadableException) {
