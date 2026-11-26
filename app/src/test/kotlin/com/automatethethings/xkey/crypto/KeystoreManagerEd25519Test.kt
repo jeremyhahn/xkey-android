@@ -53,6 +53,10 @@ class KeystoreManagerEd25519Test {
     private val generator = mockk<KeyPairGenerator>(relaxed = true)
     // The stand-in Keystore pair is made before KeyPairGenerator is mocked, so no call is recorded for it.
     private val standInPair = KeyPairGenerator.getInstance("Ed25519").generateKeyPair()
+    // The shared-id pairs are made here for the same reason: a call through the static mock can be refused.
+    private val legacyPair = KeyPairGenerator.getInstance("Ed25519").generateKeyPair()
+    private val credentialPair = KeyPairGenerator.getInstance("Ed25519").generateKeyPair()
+    private val stalePair = KeyPairGenerator.getInstance("Ed25519").generateKeyPair()
 
     @Before
     fun setUp() {
@@ -193,9 +197,9 @@ class KeystoreManagerEd25519Test {
     @Test
     fun `a row matching neither the credential nor the legacy Ed25519 key under its id is refused`() {
         val prefs = InMemorySharedPreferences()
-        val legacy = KeyPairGenerator.getInstance("Ed25519").generateKeyPair()
-        val credential = KeyPairGenerator.getInstance("Ed25519").generateKeyPair()
-        val stale = KeyPairGenerator.getInstance("Ed25519").generateKeyPair()
+        val legacy = legacyPair
+        val credential = credentialPair
+        val stale = stalePair
         val manager = sharedIdManager(prefs, legacy, credential.public.encoded)
 
         assertThrows(KeyOwnershipUnknownException::class.java) {
@@ -208,8 +212,8 @@ class KeystoreManagerEd25519Test {
     @Test
     fun `a row matching the legacy Ed25519 key under a shared id is the general key's`() {
         val prefs = InMemorySharedPreferences()
-        val legacy = KeyPairGenerator.getInstance("Ed25519").generateKeyPair()
-        val credential = KeyPairGenerator.getInstance("Ed25519").generateKeyPair()
+        val legacy = legacyPair
+        val credential = credentialPair
         val manager = sharedIdManager(prefs, legacy, credential.public.encoded)
 
         assertEquals(
