@@ -142,12 +142,38 @@ class LocalGenerateKeyEd25519HandlerTest {
         }
     }
 
-    private suspend fun generate(keyId: String, algorithm: String, keySizeBits: Int? = null): JSONObject {
+    /**
+     * PR #400 review 2 (P1): no FIDO2 path signs with EdDSA (its COSE key is
+     * EC2 only), so an EdDSA FIDO2 key is refused before any key or row is
+     * made.
+     */
+    @Test
+    fun `EdDSA with keyType fido2 is refused with INVALID_PARAMS and makes no key or row`() = runBlocking<Unit> {
+        val spki = KeyPairGenerator.getInstance("Ed25519").generateKeyPair().public.encoded
+        coEvery { keystore.generateKeyForAlgorithm(any(), "EdDSA", any(), any(), any()) } returns spki
+
+        val response = generate("ed-fido2", "EdDSA", keyType = "fido2", rpId = "example.com")
+
+        assertNull("an EdDSA FIDO2 key must be refused, got $response", response.optJSONObject("result"))
+        assertEquals(ErrorCodes.INVALID_PARAMS, response.getJSONObject("error").getInt("code"))
+        io.mockk.coVerify(exactly = 0) { keystore.generateKeyForAlgorithm(any(), any(), any(), any(), any()) }
+        assertNull(tables.key("ed-fido2"))
+    }
+
+    private suspend fun generate(
+        keyId: String,
+        algorithm: String,
+        keySizeBits: Int? = null,
+        keyType: String? = null,
+        rpId: String? = null
+    ): JSONObject {
         val params = JSONObject()
             .put("keyId", keyId)
             .put("algorithm", algorithm)
             .put("requireUserVerification", false)
         if (keySizeBits != null) params.put("keySizeBits", keySizeBits)
+        if (keyType != null) params.put("keyType", keyType)
+        if (rpId != null) params.put("rpId", rpId)
         val request = JSONObject().put("jsonrpc", "2.0").put("id", 1)
             .put("method", MethodNames.LOCAL_GENERATE_KEY)
             .put("params", params)
