@@ -936,13 +936,23 @@ class KeystoreManager(
 
     /**
      * Reads the [KeyInfo] of the Keystore key held at an alias. Replaceable
-     * so tests can make the read fail.
+     * so tests can make the read fail. A Keystore Ed25519 key names its
+     * algorithm "EdDSA", which has no AndroidKeyStore KeyFactory: its KeyInfo
+     * is read through the EC factory, as PivKeyManager reads it.
      */
     @VisibleForTesting
     internal var keyInfoReader: (alias: String, key: Key) -> KeyInfo = { _, key ->
         when (key) {
-            is PrivateKey -> KeyFactory.getInstance(key.algorithm, KEYSTORE_PROVIDER)
-                .getKeySpec(key, KeyInfo::class.java)
+            is PrivateKey -> runCatching {
+                KeyFactory.getInstance(key.algorithm, KEYSTORE_PROVIDER).getKeySpec(key, KeyInfo::class.java)
+            }.recoverCatching { e ->
+                if (key.algorithm == "EdDSA" || key.algorithm == "Ed25519") {
+                    KeyFactory.getInstance(KeyProperties.KEY_ALGORITHM_EC, KEYSTORE_PROVIDER)
+                        .getKeySpec(key, KeyInfo::class.java)
+                } else {
+                    throw e
+                }
+            }.getOrThrow()
             is SecretKey -> SecretKeyFactory.getInstance(key.algorithm, KEYSTORE_PROVIDER)
                 .getKeySpec(key, KeyInfo::class.java) as KeyInfo
             else -> throw InvalidKeySpecException("no KeyInfo for a ${key.javaClass.name}")
