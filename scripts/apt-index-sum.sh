@@ -1,28 +1,5 @@
 #!/usr/bin/env bash
-# apt-index-sum: the Debian counterpart of apk-index-sum.sh — one checksum
-# of the Debian package index the devcontainer build resolves against.
-#
-# This repository's base is Debian (BASE_IMAGE in scripts/tool-pins.sh), so
-# apk-index-sum.sh, which ships unchanged, prints `none`, and a Debian
-# security fix would not change the integration image's tag. This script is
-# the Debian mirror of it. Each ci.yml job that names the integration image
-# puts the printed value in APT_INDEX_SUM, which the image's content tag
-# hashes (`make -s it-image`, image-tag.sh) and which its build takes as a
-# build argument, so the Dockerfile's `integration` stage runs
-# `apt-get upgrade` again and ships the fixed packages.
-#
-# Usage: scripts/apt-index-sum.sh
-#   Runs the pinned BASE_IMAGE from scripts/tool-pins.sh once, as root with
-#   every capability dropped but the ones apt needs (its fetch methods run as
-#   _apt), and `--rm`. In it `apt-get update` fetches the indexes of the
-#   image's own sources. DEVCACHE_APT_PROXY, when set, is the proxy, as for
-#   the image build (Makefile DOCKER_BUILD): the sum then describes the index
-#   the build itself reads through it. CI sets none.
-#
-# Prints a sha256 over the name and sha256 of each /var/lib/apt/lists
-# *_Packages* file, sorted by name. Exits 1 when the image cannot be resolved,
-# run or updated, or has no _Packages file: a missing index is never a pass,
-# since the image build then cannot resolve its packages either.
+# Prints one sha256 over the Debian package index of BASE_IMAGE, for APT_INDEX_SUM; exits 1 if it cannot be read. Usage: scripts/apt-index-sum.sh
 set -euo pipefail
 
 fail() {

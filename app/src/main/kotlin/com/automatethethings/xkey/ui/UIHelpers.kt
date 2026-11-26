@@ -34,6 +34,7 @@ import androidx.core.content.ContextCompat
 import com.automatethethings.xkey.R
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.chip.Chip
+import kotlin.math.roundToInt
 
 /**
  * Common UI helper functions for the xKey application.
@@ -86,7 +87,7 @@ object UIHelpers {
             TypedValue.COMPLEX_UNIT_DIP,
             dp.toFloat(),
             context.resources.displayMetrics
-        ).toInt()
+        ).roundToInt()
     }
 
     /**
@@ -111,7 +112,7 @@ object UIHelpers {
      * @return The equivalent value in density-independent pixels as an Int (rounded).
      */
     fun pxToDpInt(context: Context, px: Int): Int {
-        return (px / context.resources.displayMetrics.density).toInt()
+        return (px / context.resources.displayMetrics.density).roundToInt()
     }
 
     /**

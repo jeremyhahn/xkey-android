@@ -377,8 +377,8 @@ class RemoteOathClientTest {
 
         client().oathGenerate("a")
         client().oathGenerate("b")
-        val first = sender.sent[0].id
-        val second = sender.sent[1].id
+        val first = sender.sent[0].id.longValueOrNull()!!
+        val second = sender.sent[1].id.longValueOrNull()!!
 
         assertTrue(first > RemoteOathClient.BASE_REQUEST_ID)
         assertTrue(first < RemoteOathClient.BASE_REQUEST_ID + 1_000_000L)

@@ -144,7 +144,7 @@ class PasswordEditsTest {
 
     @Test
     fun `a delete writes one PASSWORD_DELETED entry with the id and name`() = runTest {
-        coEvery { passwordDao.deleteByPasswordId(FIRST_ID) } returns 1
+        coEvery { passwordDao.deleteAndRecordDeletion(FIRST_ID, any(), any()) } returns true
 
         assertTrue(edits.delete(record()))
 
@@ -156,7 +156,7 @@ class PasswordEditsTest {
 
     @Test
     fun `a delete that removed nothing writes no entry`() = runTest {
-        coEvery { passwordDao.deleteByPasswordId(FIRST_ID) } returns 0
+        coEvery { passwordDao.deleteAndRecordDeletion(FIRST_ID, any(), any()) } returns false
 
         assertFalse(edits.delete(record()))
 
@@ -165,7 +165,7 @@ class PasswordEditsTest {
 
     @Test
     fun `no entry holds the password, username, URL or notes`() = runTest {
-        coEvery { passwordDao.deleteByPasswordId(FIRST_ID) } returns 1
+        coEvery { passwordDao.deleteAndRecordDeletion(FIRST_ID, any(), any()) } returns true
         val r = record()
 
         edits.add(r)
@@ -222,9 +222,9 @@ class PasswordEditsTest {
     @Test
     fun `a delete cancelled after its commit is still audited`() = runTest {
         lateinit var job: Job
-        coEvery { passwordDao.deleteByPasswordId(FIRST_ID) } coAnswers {
+        coEvery { passwordDao.deleteAndRecordDeletion(FIRST_ID, any(), any()) } coAnswers {
             cancelAfterCommit { job }
-            1
+            true
         }
 
         job = launch { edits.delete(record()) }

@@ -73,6 +73,7 @@ import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import java.io.File
 import java.security.KeyPairGenerator
 import java.util.Base64
 
@@ -472,6 +473,40 @@ class CosignRequestHandlerTest {
     }
 
     @Test
+    fun `the fallback key skips a newer ML-DSA signing key for an older EC one`() = runTest {
+        val mlDsaKey = key("cosign-ml-dsa", "signing").copy(algorithm = "ML-DSA-65", keySizeBits = 0)
+        // KeyDao.getAll lists the newest key first.
+        coEvery { keyDao.getAll() } returns listOf(mlDsaKey, signingKey)
+
+        val response = handler().handleRequest(request(keyId = null))
+
+        assertNull(response.error)
+        coVerify(exactly = 1) {
+            keystoreManager.signApproved(KeystoreManager.generalKeyAlias(signingKey.keyId), any(), any(), any())
+        }
+        coVerify(exactly = 0) {
+            keystoreManager.signApproved(KeystoreManager.generalKeyAlias(mlDsaKey.keyId), any(), any(), any())
+        }
+    }
+
+    @Test
+    fun `every co-signing key selection goes through the one JCA signing key helper`() {
+        val main = listOf(File("src/main/kotlin"), File("app/src/main/kotlin")).first { it.isDirectory }
+        val sources = listOf(
+            "com/automatethethings/xkey/protocol/Handler.kt",
+            "com/automatethethings/xkey/ui/CoSignActivity.kt"
+        ).associateWith { File(main, it).readText() }
+        for ((path, text) in sources) {
+            assertTrue("$path selects through jcaSigningKeys", text.contains("KeystoreManager.jcaSigningKeys("))
+            // A selection that reads every key and picks or filters by itself bypasses the helper.
+            assertFalse(
+                "$path picks a key from getAll() by itself",
+                Regex("""getAll\(\)\s*\.\s*(firstOrNull|first|filter|find)\b""").containsMatchIn(text)
+            )
+        }
+    }
+
+    @Test
     fun `the fallback with only a fido2 key finds no signing key`() = runTest {
         coEvery { keyDao.getAll() } returns listOf(fido2Key)
 
@@ -650,9 +685,9 @@ class CosignRequestHandlerTest {
 
         screen.answer(approved = false)
         assertNull(first.await().error)
-        assertEquals(1L, first.await().id)
+        assertEquals(RpcId.of(1L), first.await().id)
         assertError(ErrorCodes.BIOMETRIC_FAILED, second.await())
-        assertEquals(2L, second.await().id)
+        assertEquals(RpcId.of(2L), second.await().id)
         coVerify(exactly = 1) { keystoreManager.signApproved(any(), any(), any(), any()) }
     }
 
@@ -673,7 +708,7 @@ class CosignRequestHandlerTest {
 
         screen.answer(approved = true)
         assertNull(second.await().error)
-        assertEquals(2L, second.await().id)
+        assertEquals(RpcId.of(2L), second.await().id)
         coVerify(exactly = 1) { keystoreManager.signApproved(any(), any(), any(), any()) }
     }
 
@@ -733,7 +768,7 @@ class CosignRequestHandlerTest {
 
         screen.answer(approved = true)
         assertNull(second.await().error)
-        assertEquals(2L, second.await().id)
+        assertEquals(RpcId.of(2L), second.await().id)
         coVerify(exactly = 1) { keystoreManager.signApproved(any(), any(), any(), any()) }
     }
 
@@ -1146,7 +1181,7 @@ class CosignRequestHandlerTest {
         assertEquals("the next co-sign's prompt is its own", secondPrompt, screen.visible)
         screen.answer(approved = true)
         assertNull(second.await().error)
-        assertEquals(2L, second.await().id)
+        assertEquals(RpcId.of(2L), second.await().id)
         coVerify(exactly = 1) { keystoreManager.signApproved(any(), any(), any(), any()) }
     }
 

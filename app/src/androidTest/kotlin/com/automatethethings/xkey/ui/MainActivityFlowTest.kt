@@ -291,7 +291,8 @@ class MainActivityFlowTest {
 
     @Test
     fun authenticationRequest_revealsTheCardWithItsOriginAndSwitchesStatus() {
-        val scenario = ActivityScenario.launch(MainActivity::class.java)
+        // A phone's live BLE service would otherwise hold the hero on Advertising.
+        val scenario = launchMainActivityAtRest()
         // The hero text cross-fades between states; let the initial transition
         // settle so this asserts the authenticating state and not a leftover.
         assertTextEventually(
@@ -425,7 +426,7 @@ class MainActivityFlowTest {
             action = UsbManager.ACTION_USB_ACCESSORY_ATTACHED
         }
 
-        val scenario = ActivityScenario.launch<MainActivity>(intent)
+        val scenario = launchMainActivityAtRest(intent)
 
         assertTrue(
             "The dashboard hero should be built for a USB accessory launch",

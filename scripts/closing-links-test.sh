@@ -1,8 +1,5 @@
 #!/usr/bin/env bash
-# Tests the closing-link parse revert-red-main.yml uses to reopen the issues a
-# reverted PR closed and to copy them into a reland PR: its CLOSING_LINK and
-# closes(), read from the workflow itself, against fixture PR bodies. Needs
-# bash and jq only. `make closing-links-test`.
+# Tests revert-red-main.yml's closing-link parse against fixture PR bodies. `make closing-links-test`.
 set -euo pipefail
 
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)

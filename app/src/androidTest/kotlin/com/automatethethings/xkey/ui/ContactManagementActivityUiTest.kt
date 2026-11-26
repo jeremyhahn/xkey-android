@@ -208,7 +208,7 @@ class ContactManagementActivityUiTest {
         assertShownTextInTree(scenario, ALICE_NAME)
 
         clickTextInTree(scenario, ALICE_NAME)
-        onView(withText(R.string.contact_delete_confirm)).inRoot(isDialog()).perform(click())
+        DialogFlowSupport.clickInDialog(R.string.contact_delete_confirm)
 
         onView(withText(withString(scenario, R.string.contact_delete_message, ALICE_NAME)))
             .inRoot(isDialog())
@@ -228,14 +228,14 @@ class ContactManagementActivityUiTest {
         assertShownTextInTree(scenario, ALICE_NAME)
 
         clickTextInTree(scenario, ALICE_NAME)
-        onView(withText(R.string.contact_delete_confirm)).inRoot(isDialog()).perform(click())
+        DialogFlowSupport.clickInDialog(R.string.contact_delete_confirm)
 
         // Wait for the confirmation dialog before pressing its identically
         // labelled positive button.
         onView(withText(withString(scenario, R.string.contact_delete_message, ALICE_NAME)))
             .inRoot(isDialog())
             .check(matches(isDisplayed()))
-        onView(withText(R.string.contact_delete_confirm)).inRoot(isDialog()).perform(click())
+        DialogFlowSupport.clickInDialog(R.string.contact_delete_confirm)
 
         assertTrue(
             "Confirming the dialog must delete the contact",
@@ -274,11 +274,10 @@ class ContactManagementActivityUiTest {
         val before = runBlocking { dao.getAll().size }
 
         clickClickableWithExactText(scenario, withString(scenario, R.string.contact_import_file))
-        onView(withText(R.string.contact_import_paste)).inRoot(isDialog()).perform(click())
-
-        onView(withHint(R.string.contact_paste_hint))
-            .inRoot(isDialog())
-            .check(matches(isDisplayed()))
+        DialogFlowSupport.chooseFromSheet(
+            R.string.contact_import_paste,
+            next = withHint(R.string.contact_paste_hint)
+        )
         onView(withText(R.string.button_cancel)).inRoot(isDialog()).perform(click())
 
         assertEquals(before, runBlocking { dao.getAll().size })

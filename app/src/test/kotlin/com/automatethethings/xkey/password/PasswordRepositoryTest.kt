@@ -310,6 +310,6 @@ class PasswordRepositoryTest {
     fun `delete removes by the stable password id`() = runTest {
         repository.delete("pw-1")
 
-        coVerify(exactly = 1) { dao.deleteByPasswordId("pw-1") }
+        coVerify(exactly = 1) { dao.deleteAndRecordDeletion("pw-1", null, any()) }
     }
 }

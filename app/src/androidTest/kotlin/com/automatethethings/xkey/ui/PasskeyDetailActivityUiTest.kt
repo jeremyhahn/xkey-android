@@ -227,7 +227,7 @@ class PasskeyDetailActivityUiTest {
         awaitText(scenario, context().getString(R.string.key_action_delete))
 
         onView(withText(R.string.key_action_delete)).perform(scrollToView(), click())
-        onView(withText(R.string.key_delete_confirm)).inRoot(isDialog()).perform(click())
+        DialogFlowSupport.clickInDialog(R.string.key_delete_confirm)
 
         awaitCondition("Confirmed delete should remove the passkey from Room") {
             runBlocking { keyDao.getByKeyId(deletableKeyId) } == null

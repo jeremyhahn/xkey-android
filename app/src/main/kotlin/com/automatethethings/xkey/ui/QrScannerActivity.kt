@@ -19,6 +19,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
 import androidx.activity.result.ActivityResult
+import androidx.annotation.VisibleForTesting
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.camera.view.PreviewView
@@ -82,7 +83,8 @@ class QrScannerActivity : AppCompatActivity() {
             context = this,
             lifecycleOwner = this,
             previewView = previewView,
-            onResult = { value -> onQrScanned(value) }
+            onResult = { value -> onQrScanned(value) },
+            frameSource = frameSourceForTest
         )
 
         scannerHelper.start()
@@ -132,6 +134,10 @@ class QrScannerActivity : AppCompatActivity() {
         const val RESULT_CAMERA_DENIED = RESULT_FIRST_USER
 
         private const val STATE_PERMISSION_REQUEST_IN_FLIGHT = "permission_request_in_flight"
+
+        /** Frames for the scanner in place of the camera; tests only. */
+        @VisibleForTesting
+        internal var frameSourceForTest: QrCodeScannerHelper.FrameSource? = null
     }
 }
 

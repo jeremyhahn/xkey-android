@@ -97,7 +97,7 @@
     <string name="settings_auth_mode_time_window">Time window</string>
     <string name="settings_auth_mode_time_window_description">Require biometric once per time window</string>
     <string name="settings_auth_mode_per_session">Per session</string>
-    <string name="settings_auth_mode_per_session_description">Require biometric once until app goes to background</string>
+    <string name="settings_auth_mode_per_session_description">Ask for biometric once per desktop connection</string>
     <string name="settings_time_window_title">Time Window Duration</string>
     <string name="settings_time_window_description">Authentication remains valid for this duration</string>
     <string name="settings_security_info">For maximum security, use per-operation mode. Time window and per-session modes provide convenience but reduce security by allowing multiple operations with a single authentication.</string>
@@ -159,6 +159,8 @@
     <string name="key_badge_system">System</string>
     <string name="key_badge_shared">Shared</string>
     <string name="key_deleted">Key deleted</string>
+    <string name="key_delete_failed">The key could not be deleted. It is still on this device.</string>
+    <string name="ca_reset_failed">The CA could not be reset. Its keys may still be on this device.</string>
 
     <!-- Key Context Menu -->
     <string name="key_menu_share_settings">Share Settings</string>
@@ -239,6 +241,10 @@
     <string name="key_create_purpose">Purpose</string>
     <string name="key_create_algorithm">Algorithm</string>
     <string name="key_create_biometric">Require biometric</string>
+    <string name="key_create_storage">Storage</string>
+    <string name="key_storage_hardware">Hardware</string>
+    <string name="key_storage_software">Software (encrypted with a Keystore key)</string>
+    <string name="piv_storage_title">Storage for %s</string>
     <string name="key_create_strongbox">Use StrongBox</string>
     <string name="key_create_success">Key created</string>
     <string name="key_create_error">Failed to create key</string>
@@ -512,6 +518,7 @@
     <string name="biometric_channel_description">High-priority notifications for authentication requests requiring biometric verification</string>
     <string name="biometric_notification_title">Authentication Required</string>
     <string name="biometric_notification_text">Tap to approve request from %1$s</string>
+    <string name="biometric_notification_public_text">Unlock to review an authentication request</string>
     <string name="biometric_notification_timeout">Request expired</string>
 
     <!-- Key Sharing Settings -->
@@ -555,6 +562,9 @@
     <string name="bootstrap_dns_server_hint">DNS Server (e.g., 8.8.8.8:53)</string>
     <string name="bootstrap_static_key_hint">64 hex characters</string>
     <string name="bootstrap_spki_pin_hint">64 hex characters</string>
+    <string name="bootstrap_spki_pin_refused">SPKI settings not saved: the pin must be 64 hex characters (0-9, a-f). The stored server URL and pin are unchanged.</string>
+    <string name="bootstrap_ca_url_refused">Not fetched: enter an http or https server URL. The stored bootstrap servers are unchanged.</string>
+    <string name="bootstrap_noise_key_refused">Noise settings not saved: the key must be 64 hex characters (0-9, a-f). The stored server address and key are unchanged.</string>
     <string name="bootstrap_timeout_label">Per-Method Timeout</string>
 
     <!-- Audit Log -->
@@ -623,6 +633,8 @@
     <string name="audit_delete_older_confirm">Delete all audit log entries older than 30 days? This cannot be undone.</string>
     <string name="audit_logs_cleared">All audit logs cleared</string>
     <string name="audit_old_logs_deleted">Old audit logs deleted (%1$d removed)</string>
+    <string name="audit_delete_auth_subtitle">Confirm it is you before deleting audit history</string>
+    <string name="audit_delete_not_authenticated">Not confirmed; nothing was deleted</string>
     <string name="audit_log_card_description">View security event history</string>
 
     <!-- Passkeys -->
@@ -952,9 +964,12 @@
     <string name="oath_field_digits">Digits</string>
     <string name="oath_field_period">Period (seconds)</string>
     <string name="oath_code_copied">Code copied to clipboard</string>
+    <string name="oath_code_copy_failed">Could not generate a code to copy</string>
+    <string name="oath_code_unavailable">No code is available for this account</string>
     <string name="oath_delete_confirm">Delete this credential?</string>
     <string name="oath_delete_message">This will permanently remove the %s credential for %s.</string>
-    <string name="oath_context_view_details">View Details</string>
+    <string name="oath_context_copy">Copy</string>
+    <string name="oath_context_details">Details</string>
     <string name="oath_context_delete">Delete</string>
     <string name="oath_detail_title">Credential Details</string>
     <string name="oath_detail_issuer">Issuer</string>
@@ -973,6 +988,11 @@
     <string name="oath_detail_never_used">Never</string>
     <string name="oath_detail_period_value">%1$d seconds</string>
     <string name="oath_detail_times_used">%1$d times</string>
+    <string name="oath_detail_remote_device">Remote device</string>
+    <string name="oath_detail_code">Current code</string>
+    <string name="oath_detail_time_left">Expires in %1$d s</string>
+    <string name="oath_detail_hotp_hint">Copying uses this code and advances the counter</string>
+    <string name="oath_detail_copy">Copy code</string>
 
     <!-- Contact Management -->
     <string name="contact_management_title">Contacts</string>
@@ -1101,6 +1121,7 @@
     <string name="audit_log_op_oath_code">OATH Code Generated</string>
     <string name="audit_log_op_oath_sync">OATH Sync Performed</string>
     <string name="audit_log_op_password_sync">Password Sync Performed</string>
+    <string name="audit_log_op_trust_store_sync">Trust Store Sync Performed</string>
     <string name="audit_log_op_cosign_initiated">Co-Sign Initiated</string>
     <string name="audit_log_op_cosign_received">Co-Sign Received</string>
 
@@ -1123,6 +1144,8 @@
     <string name="audit_log_op_password_deleted">Password Deleted</string>
     <string name="audit_log_op_backup_created">Backup Stored</string>
     <string name="audit_log_op_backup_restored">Backup Restored</string>
+    <string name="audit_log_op_audit_log_cleared">Audit Log Cleared</string>
+    <string name="audit_log_op_audit_log_pruned">Old Audit Entries Deleted</string>
 
     <!-- PIV Smart Card -->
     <string name="piv_title">PIV Smart Card</string>
@@ -1141,6 +1164,7 @@
     <string name="piv_generate_key">Generate Key</string>
     <string name="piv_view_details">View Details</string>
     <string name="piv_generate_title">Generate Key in Slot %s</string>
+    <string name="piv_generate_curve25519_needs_android13">Ed25519 and X25519 keys need Android 13 or later.</string>
     <string name="piv_generate_message">Select an algorithm for the %s key slot:</string>
     <string name="piv_generate_success">Key generated in slot %s</string>
     <string name="piv_generate_error">Key generation failed: %s</string>
@@ -1156,6 +1180,8 @@
     <!-- PIV Slot Detail -->
     <string name="piv_detail_title">PIV Slot Details</string>
     <string name="piv_detail_algorithm">Algorithm</string>
+    <string name="piv_detail_algorithm_id">PIV Algorithm ID</string>
+    <string name="piv_detail_algorithm_id_value">0x%1$02X</string>
     <string name="piv_detail_created">Created</string>
     <string name="piv_detail_last_used">Last Used</string>
     <string name="piv_detail_use_count">Use Count</string>
@@ -1309,8 +1335,10 @@
     <string name="password_field_password">Password</string>
     <string name="password_field_url">URL</string>
     <string name="password_field_notes">Notes</string>
-    <string name="password_required">Name and password are required</string>
+    <string name="password_name_required">Enter a name</string>
+    <string name="password_password_required">Enter a password</string>
     <string name="password_too_large">This entry is too large to save. Shorten its notes or other fields.</string>
+    <string name="password_unreadable">This entry cannot be decrypted on this device. You can delete it.</string>
     <string name="password_detail_name">Name: %1$s</string>
     <string name="password_detail_username">Username: %1$s</string>
     <string name="password_detail_password">Password: %1$s</string>

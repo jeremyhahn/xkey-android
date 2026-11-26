@@ -306,7 +306,7 @@ class CertificateDetailActivityUiTest {
         assertShownTextInTree(scenario, VALID_CN)
 
         clickTextInTree(scenario, withString(scenario, R.string.cert_detail_delete))
-        onView(withText(R.string.cert_delete_confirm)).inRoot(isDialog()).perform(click())
+        DialogFlowSupport.clickInDialog(R.string.cert_delete_confirm)
 
         assertTrue(
             "Confirming delete must remove the certificate row",

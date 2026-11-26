@@ -301,6 +301,7 @@ class BleClientHarness(
     private val monitor = Object()
 
     init {
+        NoiseTestKeyStore.install()
         runBlocking { responder.loadStaticKey(context) }
 
         every { context.getSystemService(Context.BLUETOOTH_SERVICE) } returns bluetoothManager

@@ -1,73 +1,25 @@
-# Multi-Party Co-Signing Protocol
+# Co-signing payloads
 
-> **Status: REFERENCE** · Last verified: 2026-10-09
-> As-built description of xKey's multi-party attestation of media.
+> **Status: REFERENCE** · Last verified: 2026-11-23
+> Engineering reference for co-signing: roles, the QR payloads and their checks, how signatures are stored, and how they are verified.
 
-This document describes the multi-party attestation system in xKey, which allows
-multiple people to cryptographically attest to a photo or video. This serves as
-an anti-deepfake and anti-forgery mechanism: if a photo has signatures from
-several independent devices, it is far more difficult to fabricate.
-
-## Use Cases
-
-- **Anti-deepfake**: Multiple people present at an event each sign the same photo,
-  making it provably non-synthetic.
-- **Anti-forgery**: Witnesses attest that a document photo was taken at a specific
-  time and place.
-- **Chain of custody**: Sequential attestors sign media as it passes through a
-  verification pipeline.
-- **Group photos**: Everyone in a photo co-signs to prove they were present.
+The flows and the `cosign.request` handler are in
+[architecture.md](architecture.md).
 
 ## Roles
 
-| Role | Description | When |
-|------|-------------|------|
-| `CREATOR` | Original signer who captured or first signed the media | At capture time (auto-sign or manual) |
-| `WITNESS` | Person present at the time of capture | During or shortly after capture |
-| `ATTESTOR` | Person who co-signs after the fact | Any time after original signing |
+| Role | Written by |
+|------|------------|
+| `CREATOR` | Sign in `FileOperationActivity` and the media signing service |
+| `ATTESTOR` | The owner's phone when it appends a witness's QR response (`CoSignResponse.toAttestorEntry`) |
+| `WITNESS` | Defined in `SignerRole`; no code on main writes it |
 
-Roles are stored in the `SignatureEntry.role` field and are informational. All
-signatures are cryptographically equivalent regardless of role.
+The role is a label. Verification treats every entry the same way.
 
-## QR Code Exchange Protocol
+## QR request
 
-The QR protocol enables co-signing without requiring a BLE connection. The
-initiator (photo owner) and witness exchange data by displaying and scanning
-QR codes on their respective devices.
-
-### Sequence
-
-```mermaid
-sequenceDiagram
-    participant Owner as Owner (Initiator)
-    participant WPhone as Witness Phone
-
-    Owner->>Owner: Select signed media file
-    Owner->>Owner: Read ContentAuthenticityData from EXIF/XMP
-    Owner->>Owner: Generate QR with content hash
-
-    Owner-->>WPhone: Display QR code on screen
-    Note over Owner,WPhone: Witness scans Owner's QR
-
-    WPhone->>WPhone: Decode QR payload
-    WPhone->>WPhone: Show approval dialog<br/>"Sign content hash abcd...?"
-    WPhone->>WPhone: Sign hash with local key
-    WPhone->>WPhone: Generate response QR
-
-    WPhone-->>Owner: Display response QR on screen
-    Note over Owner,WPhone: Owner scans Witness's QR
-
-    Owner->>Owner: Decode response QR
-    Owner->>Owner: Build SignatureEntry (role=ATTESTOR)
-    Owner->>Owner: Append signature to ContentAuthenticityData
-    Owner->>Owner: Write updated data to EXIF/XMP
-
-    Note over Owner: Repeat for additional witnesses
-```
-
-### QR Request Payload
-
-Displayed by the initiator for witnesses to scan:
+The owner's phone shows this. `CoSignRequest` (`media/CoSignPayload.kt`)
+builds and parses it.
 
 ```json
 {
@@ -78,179 +30,85 @@ Displayed by the initiator for witnesses to scan:
 }
 ```
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `v` | int | Protocol version (currently `1`) |
-| `hash` | string | Hex-encoded SHA-256 of the media content |
-| `alg` | string | Hash algorithm used |
-| `from` | string | Key fingerprint (SHA-256 hex) of the initiator |
+| Field | Rule on parse |
+|-------|---------------|
+| `v` | Must be `1` |
+| `hash` | Lowercase hex, exactly the digest length of `alg`: 64 characters for SHA-256, 96 for SHA-384, 128 for SHA-512 |
+| `alg` | `SHA-256`, `SHA-384` or `SHA-512` |
+| `from` | Non-blank. The owner's key fingerprint, shown to the witness in the approval dialog |
 
-### QR Response Payload
+## QR response
 
-Displayed by the witness for the initiator to scan:
+The witness's phone shows this. `CoSignResponse` builds and parses it.
 
 ```json
 {
     "v": 1,
     "sig": "MEUCIQDxE9vVU3r7KnYm+B8r8r5w...",
     "fp": "f5e6d7c8b9a01234567890abcdef1234567890abcdef1234567890abcdef1234",
-    "name": "Bob's xKey",
+    "name": "Witness key",
     "alg": "ES256"
 }
 ```
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `v` | int | Protocol version (currently `1`) |
-| `sig` | string | Base64-encoded signature over the content hash |
-| `fp` | string | Key fingerprint (SHA-256 hex) of the witness's public key |
-| `name` | string | Human-readable signer name |
-| `alg` | string | Signing algorithm used |
+| Field | Rule on parse |
+|-------|---------------|
+| `v` | Must be `1` |
+| `sig` | Non-blank base64 |
+| `fp` | Non-blank. Hex SHA-256 of the witness's public key DER |
+| `name` | Non-blank. The witness key's label |
+| `alg` | Non-blank. The signature algorithm, such as `ES256` |
 
-## BLE Exchange Protocol
+A payload that fails to parse is reported by type: `NotJson`,
+`UnsupportedVersion`, `MissingField`, `UnsupportedHashAlgorithm`,
+`InvalidHash` or `InvalidSignature`.
 
-The BLE protocol enables co-signing over an existing Noise-encrypted channel
-between paired devices. This is faster than QR exchange but requires the
-devices to be within BLE range and already paired.
+The witness signs the hash bytes with the JCA algorithm for its key
+(`KeystoreManager.jcaSignatureAlgorithm`), which hashes them again with the
+key algorithm's own digest: SHA-256 for ES256 and RS256, SHA-384 for ES384 and
+RS384, SHA-512 for ES512 and RS512. That digest follows the key, not the
+request's `alg`. This matches how Sign in file operations signs and how
+`SignatureVerifier` checks.
 
-### Protocol Messages
+## Storing co-signatures
 
-Two new message types extend the JSON-RPC protocol:
+All signatures live in the `signatures` array of the one
+`ContentAuthenticityData` block in the JPEG's EXIF `UserComment`
+(`XKEY_SIG:` followed by JSON). `appendAttestor` adds the new entry with
+role `ATTESTOR` and the current time, and refuses it when an entry with the
+same fingerprint (compared without case) is already there.
+`XmpMetadataHelper.appendSignature` then writes the block back.
 
-| Method | Direction | Description |
-|--------|-----------|-------------|
-| `cosign.request` | Initiator -> Witness | Request co-signature for content hash |
-| `cosign.response` | Witness -> Initiator | Return co-signature |
+Every signer signs the same content hash. It is the canonical JPEG hash,
+which skips the `APPn` and `COM` segments, so rewriting the EXIF block to add
+a signature does not change the hash the earlier signatures cover.
 
-### Sequence
+## Verifying co-signed media
 
-```mermaid
-sequenceDiagram
-    participant Owner as Owner (Initiator)
-    participant BLE as Noise Channel
-    participant Witness as Witness Device
+Co-signed files are checked like any signed file, by
+`SignerVerification.verify` (`media/`), from both the
+[verified-media viewer](../verified-media-viewer/architecture.md) and Verify
+in [file operations](../file-operations/architecture.md):
 
-    Owner->>Owner: Select signed media file
-    Owner->>Owner: Read ContentAuthenticityData
+1. The stored content hash must match the file. If it does not, every signer
+   fails.
+2. For each entry, a contact whose fingerprint equals `keyFingerprint` gives
+   the public key. With no contact, a local key whose public key DER hashes
+   to the fingerprint does.
+3. With a public key, the signature is checked: verified or failed. With
+   none, the signer is unknown.
 
-    Owner->>BLE: cosign.request
-    Note over BLE: {"id":1, "method":"cosign.request",<br/>"params":{"hash":"e3b0c4...",<br/>"hashAlgorithm":"SHA-256",<br/>"initiatorFingerprint":"a1b2c3..."}}
+## Audit events
 
-    BLE->>Witness: Receive cosign.request
-    Witness->>Witness: Show approval dialog
-    Note over Witness: "Owner requests co-signature<br/>Content hash: e3b0c4..."
+| Call | When |
+|------|------|
+| `AuditLogger.logCoSignInitiated(contentHash)` | The owner's phone shows a request QR |
+| `AuditLogger.logCoSignReceived(contentHash, signerFingerprint)` | The witness's phone shows its response QR, the owner's phone appends a co-signature, or the handler answers `cosign.request` |
 
-    alt Approved
-        Witness->>Witness: Sign hash with local key
-        Witness->>BLE: cosign.response
-        Note over BLE: {"id":1, "result":{<br/>"signature":"MEUCIQDx...",<br/>"keyFingerprint":"f5e6d7...",<br/>"signerName":"Witness Key",<br/>"algorithm":"ES256"}}
+## Limits
 
-        BLE->>Owner: Receive cosign.response
-        Owner->>Owner: Build SignatureEntry (role=ATTESTOR)
-        Owner->>Owner: Append to ContentAuthenticityData
-        Owner->>Owner: Write to EXIF/XMP
-    else Denied
-        Witness->>BLE: Error response
-        BLE->>Owner: Receive error
-        Owner->>Owner: Show "Witness declined" message
-    end
-```
-
-### cosign.request Parameters
-
-```json
-{
-    "hash": "e3b0c44298fc1c149afbf4c8996fb924...",
-    "hashAlgorithm": "SHA-256",
-    "initiatorFingerprint": "a1b2c3d4e5f67890..."
-}
-```
-
-### cosign.response Result
-
-```json
-{
-    "signature": "MEUCIQDxE9vVU3r7...",
-    "keyFingerprint": "f5e6d7c8b9a01234...",
-    "signerName": "Witness Key",
-    "algorithm": "ES256"
-}
-```
-
-## Signature Aggregation
-
-Multiple signatures are stored in the `signatures` array of
-`ContentAuthenticityData`. Each co-signer's signature is appended via
-`XmpMetadataHelper.appendSignature()`, which reads the existing data,
-adds the new `SignatureEntry`, and writes the updated structure back.
-
-```mermaid
-graph LR
-    subgraph Before["Before Co-Sign"]
-        S1["Signature 1 (CREATOR)"]
-    end
-
-    subgraph After["After 2 Co-Signs"]
-        S1a["Signature 1 (CREATOR)"]
-        S2["Signature 2 (WITNESS)"]
-        S3["Signature 3 (ATTESTOR)"]
-    end
-
-    Before --> After
-```
-
-All signatures sign the same content hash. The content hash is computed once
-from the original media bytes (before any metadata modification). Since
-signatures are stored in metadata (EXIF/XMP), the content itself is not
-modified, and the hash remains valid for all signers.
-
-## Trust Model
-
-When verifying co-signed media, the `VerifiedMediaViewerActivity` resolves
-each signer's identity through the following chain:
-
-```mermaid
-graph TB
-    FP[Key Fingerprint from SignatureEntry] --> KD{KeyDao lookup}
-    KD -->|Found| LOCAL[Local Key<br/>Green badge, key label]
-    KD -->|Not found| CD{ContactDao lookup}
-    CD -->|Found| CONTACT[Known Contact<br/>Green badge, contact name]
-    CD -->|Not found| UNKNOWN[Unknown Signer<br/>Yellow badge, fingerprint prefix]
-
-    LOCAL --> VERIFY{Verify signature<br/>against content hash}
-    CONTACT --> VERIFY
-    UNKNOWN --> VERIFY
-
-    VERIFY -->|Valid| GREEN[Verified]
-    VERIFY -->|Invalid| RED[Failed Verification<br/>Red badge]
-```
-
-### Trust Levels
-
-| Badge | Meaning |
-|-------|---------|
-| Green checkmark | Signature valid, signer identity known (local key or contact) |
-| Yellow question mark | Signature valid, but signer identity unknown |
-| Red X | Signature verification failed (tampered content or invalid signature) |
-| Grey dash | No signatures found |
-
-## CoSignActivity UI
-
-`CoSignActivity` provides a tabbed interface for choosing the exchange method:
-
-1. **QR Tab**: Camera viewfinder for scanning + QR display area
-2. **BLE Tab**: List of connected/paired devices with co-sign request buttons
-
-The activity receives a media file URI via intent and reads the existing
-`ContentAuthenticityData` to display current signers and allow adding more.
-
-## Security Considerations
-
-- Each co-signer independently computes or verifies the content hash. The
-  witness does not blindly sign the hash provided by the initiator in
-  production workflows (though QR exchange trusts the displayed hash).
-- BLE co-signing occurs over the Noise_XX encrypted channel, preventing
-  man-in-the-middle attacks on the signature exchange.
-- Ephemeral QR codes are displayed only on-screen and are not persisted.
-- The content hash covers the raw media bytes, not the metadata. Adding
-  signatures to EXIF/XMP does not invalidate existing signatures.
+- The witness signs the hash it is shown and never sees the photo. A witness
+  who wants to check the content has to compare it some other way.
+- QR payloads are shown on screen and not stored.
+- `cosign.response` received over the protocol is acknowledged and dropped.
+  Only the QR path adds signatures to a file.

@@ -289,7 +289,18 @@ class BootstrapSettingsDataTest {
     @Test
     fun `an empty noise key is treated as valid because it is simply unset`() {
         assertTrue(BootstrapSettingsData(noiseServerStaticKey = "").isNoiseKeyValid())
-        assertTrue(BootstrapSettingsData(noiseServerStaticKey = "   ").isNoiseKeyValid())
+        assertFalse(BootstrapSettingsData(noiseServerStaticKey = "   ").isNoiseKeyValid())
+    }
+
+    @Test
+    fun `both validators refuse whitespace, non-ASCII digits and an inner space`() {
+        val arabicIndic = (0 until 64).map { '٠' + it % 10 }.joinToString("")
+        val fullwidth = (0 until 64).map { '０' + it % 10 }.joinToString("")
+        val innerSpace = "ab".repeat(16) + " " + "c".repeat(31)
+        for (bad in listOf("   ", arabicIndic, fullwidth, innerSpace)) {
+            assertFalse("key '$bad' accepted", BootstrapSettingsData(noiseServerStaticKey = bad).isNoiseKeyValid())
+            assertFalse("pin '$bad' accepted", BootstrapSettingsData(spkiPinSha256 = bad).isSpkiPinValid())
+        }
     }
 
     @Test

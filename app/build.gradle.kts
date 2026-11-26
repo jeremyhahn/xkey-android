@@ -53,7 +53,8 @@ android {
         versionCode = 1
         versionName = "1.0.0"
 
-        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        // Keeps a real phone awake and animation-free for the run and restores it after.
+        testInstrumentationRunner = "com.automatethethings.xkey.XKeyTestRunner"
     }
 
     signingConfigs {
@@ -118,6 +119,9 @@ android {
     // Robolectric tests start the real activities, which read the app's
     // layouts and strings.
     testOptions {
+        // A second layer under XKeyTestRunner: AGP passes --no-window-animation to
+        // am instrument.
+        animationsDisabled = true
         unitTests {
             isIncludeAndroidResources = true
         }
@@ -217,16 +221,7 @@ dependencies {
     androidTestImplementation(libs.bundles.androidTesting)
     androidTestImplementation(libs.androidx.test.uiautomator)
 
-    // Lint's classpath (androidLintTool, lint-gradle 32.5.1): bcprov-jdk18on
-    // 1.80.2 (CVE-2026-8763, CVE-2026-13506), from sdk-common, raised with
-    // bcpkix and bcutil 1.80.2, which Bouncy Castle releases with it. AGP adds
-    // lint-gradle only when the configuration has no dependencies; constraints
-    // are not dependencies. Its guava 33.4.0-jre (CVE-2026-102554), from lint
-    // 32.5.1, is raised the same way.
-    //
-    // guava (CVE-2026-102554): 33.3.1-android reaches the APK from media3
-    // 1.11.1 and CameraX 1.6.2, and kapt's 33.2.1-jre comes from Room's
-    // compiler (auto-common 1.2.1).
+    // Raise lint's bcprov/bcpkix/bcutil and guava, and the APK's guava, to the fixed releases.
     constraints {
         add("androidLintTool", libs.bouncycastle.bcprov)
         add("androidLintTool", libs.bouncycastle.bcpkix)
@@ -237,10 +232,7 @@ dependencies {
     }
 }
 
-// KGP 2.4.21 adds kotlin-build-tools-impl to its ABI-validation classpath as
-// strictly 2.4.0, which neither compilerVersion nor any property reaches
-// (KotlinPluginWrapper.addKotlinCompilerConfiguration), so take the catalog's
-// Kotlin there with a resolution override; useVersion replaces the strict pin.
+// Override KGP's strict kotlin-build-tools-impl pin with the catalog's Kotlin.
 configurations.named("kotlinAbiValidationCompatClasspath") {
     resolutionStrategy.eachDependency {
         if (requested.group == "org.jetbrains.kotlin" && requested.name == "kotlin-build-tools-impl") {
@@ -250,11 +242,7 @@ configurations.named("kotlinAbiValidationCompatClasspath") {
     }
 }
 
-// Robolectric fetches its android-all framework jar from Maven Central when a
-// test first needs it, which the offline CI container cannot reach. Resolve it
-// here instead, so it sits in the Gradle cache the image's warm stage fills,
-// copy it under the name Robolectric looks for, and run the unit tests offline
-// against that directory: a test then never reaches the network.
+// Resolve Robolectric's android-all jar here so unit tests run offline.
 val robolectricAndroidAll = configurations.create("robolectricAndroidAll") {
     isCanBeConsumed = false
     isTransitive = false
@@ -277,22 +265,9 @@ tasks.withType<Test>().configureEach {
     systemProperty("robolectric.dependency.dir", robolectricDependencyDir.get().asFile.absolutePath)
 }
 
-// -----------------------------------------------------------------------------
-// Coverage
-//
-// `coverageReport` merges JVM unit-test coverage with on-device instrumented
-// coverage into one HTML/XML report, so the number reflects everything the
-// suite actually exercises rather than one half of it.
-//
-// Usage:
-//   ./gradlew coverageReport              (unit only, no device needed)
-//   ./gradlew coverageReportWithDevice    (unit + instrumented; needs a device)
-// -----------------------------------------------------------------------------
+// Coverage: coverageReport (unit) and coverageReportWithDevice (unit plus instrumented).
 
-// AGP 9.5.1 resets jacoco.toolVersion to its own default (0.8.14) in its
-// afterEvaluate (DependencyConfigurator.configureJacocoTransforms), so set it
-// in an afterEvaluate registered after AGP's; jacocoAgent and jacocoAnt read
-// it when they resolve.
+// AGP resets jacoco.toolVersion in afterEvaluate, so set it in a later afterEvaluate.
 afterEvaluate {
     jacoco {
         toolVersion = libs.versions.jacoco.get()
@@ -308,10 +283,7 @@ val coverageExclusions = listOf(
     "**/*Kt\$*.*", "**/*\$WhenMappings*.*"
 )
 
-// Every coverage input names the exact file or directory its producer writes.
-// A tree rooted at the whole build directory would make every task that writes
-// under it an undeclared producer, which Gradle 9 rejects when the report runs
-// in the same invocation as assembleDebug or lintDebug.
+// Each coverage input names its producer's exact output, as Gradle 9 requires.
 
 /** Where AGP writes the JVM unit-test execution data (UNIT_TEST_CODE_COVERAGE). */
 val unitTestExecutionData = layout.buildDirectory.file(

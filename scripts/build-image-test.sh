@@ -1,16 +1,5 @@
 #!/usr/bin/env bash
-# Tests concurrent cold builds of one image tag:
-# the real `make docker-build-toolchain` and `make docker-build-it`, two at
-# once, against a stub docker whose build names its image the way BuildKit's
-# exporter does, an update and, when the name is missing, a create, with both
-# builds held between the two (so the race is certain, not timing). Asserted:
-# the stub reproduces the failure for two builds tagged alike; both makes
-# succeed; with IMAGE_FRESH=true each job's `make -s <kind>-image-id` is the
-# sha256: ID its own build wrote, still on the daemon, and the tag names one of
-# them; without it no build's own name stays behind; a failed build leaves the
-# tag alone; a final re-tag that collides with another job's
-# is retried, a bounded number of times, and no other error is. Needs bash and
-# make only. `make build-image-test`.
+# Tests concurrent cold builds of one tag against a stub docker. `make build-image-test`.
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -219,12 +208,7 @@ check "apk: the toolchain build ran" grep -q '^toolchain:' "${S}/buildargs"
 check "apt: the integration build takes APT_INDEX_SUM" grep -q '^integration:.* APT_INDEX_SUM=aptsum1' "${S}/buildargs"
 check "apt: the toolchain build does not" eq "$(grep -c '^toolchain:.*APT_INDEX_SUM' "${S}/buildargs" || true)" 0
 
-# The final re-tag against a concurrent re-tag of the same name:
-# `already exists` is retried up to 5 tries, each pointing
-# the tag at the job's own build; any other error fails at once. With and
-# without --keep-name, which alone decides whether the build's own name stays.
-# retag <fails> <exists|other> [--keep-name]: build-image.sh with the stub's
-# first <fails> tags failing; sets RC, ID (the build's) and TRIES.
+# retag <fails> <exists|other> [--keep-name]: only `already exists` is retried, up to 5 tries; sets RC, ID and TRIES.
 retag() {
 	reset
 	rc=0

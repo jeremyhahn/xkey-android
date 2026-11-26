@@ -54,13 +54,13 @@ class MessageContractDefaultsTest {
      */
     @Test
     fun `Response defaults both payload slots to absent`() {
-        val success = Response(id = 1, result = org.json.JSONObject().put("pong", true))
-        assertEquals(1L, success.id)
+        val success = Response(id = RpcId.of(1), result = org.json.JSONObject().put("pong", true))
+        assertEquals(RpcId.of(1), success.id)
         assertNull("a success response carries no error", success.error)
         assertTrue(success.isSuccess())
 
-        val failure = Response(id = 2, error = ErrorObject(ErrorCodes.INVALID_PARAMS, "bad"))
-        assertEquals(2L, failure.id)
+        val failure = Response(id = RpcId.of(2), error = ErrorObject(ErrorCodes.INVALID_PARAMS, "bad"))
+        assertEquals(RpcId.of(2), failure.id)
         assertNull("an error response carries no result", failure.result)
         assertTrue(failure.isError())
     }

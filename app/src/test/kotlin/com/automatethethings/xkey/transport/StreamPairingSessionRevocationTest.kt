@@ -15,6 +15,7 @@
 
 package com.automatethethings.xkey.transport
 
+import com.automatethethings.xkey.ble.NoiseTestKeyStore
 import android.app.KeyguardManager
 import android.app.NotificationManager
 import android.content.Context
@@ -23,6 +24,7 @@ import android.util.Log
 import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.ble.NoiseSession
 import com.automatethethings.xkey.ble.PairingConfirmationCallback
+import com.automatethethings.xkey.crypto.KeySecurityLevel
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.crypto.SoftwareKeyStore
 import com.automatethethings.xkey.piv.PivAlgorithm
@@ -30,6 +32,7 @@ import com.automatethethings.xkey.piv.PivKeyManager
 import com.automatethethings.xkey.piv.PivSlot
 import com.automatethethings.xkey.piv.PivSlotDao
 import com.automatethethings.xkey.piv.PivSlotInfo
+import com.automatethethings.xkey.piv.testPivKeyManager
 import com.automatethethings.xkey.protocol.ErrorCodes
 import com.automatethethings.xkey.protocol.MethodNames
 import com.automatethethings.xkey.protocol.RequestHandler
@@ -127,6 +130,7 @@ class StreamPairingSessionRevocationTest {
 
     @Before
     fun setUp() {
+        NoiseTestKeyStore.install()
         mockkStatic(Log::class)
         every { Log.v(any(), any<String>()) } returns 0
         every { Log.d(any(), any<String>()) } returns 0
@@ -985,7 +989,7 @@ class StreamPairingSessionRevocationTest {
             finish.await(TIMEOUT_MS, TimeUnit.MILLISECONDS)
             Unit
         }
-        val manager = PivKeyManager(mockk<PivSlotDao>(relaxed = true))
+        val manager = testPivKeyManager(mockk<PivSlotDao>(relaxed = true), pqcStore = mockk(relaxed = true))
         assertRevokedAtAdmissionDuring(slot.keystoreAlias) { _, resumeShare ->
             val deleting = scope.async(Dispatchers.IO) { manager.deleteKey(slot) }
             try {
@@ -1012,11 +1016,16 @@ class StreamPairingSessionRevocationTest {
         val replacing = CompletableDeferred<Unit>()
         val finish = CountDownLatch(1)
         val newKey = keyPair(ByteArray(91) { 5 })
-        val manager = PivKeyManager(mockk<PivSlotDao>(relaxed = true)) { _, _ ->
-            replacing.complete(Unit)
-            finish.await(TIMEOUT_MS, TimeUnit.MILLISECONDS)
-            newKey
-        }
+        val manager = testPivKeyManager(
+            mockk<PivSlotDao>(relaxed = true),
+            pqcStore = mockk(relaxed = true),
+            generateKeyPair = { _, _ ->
+                replacing.complete(Unit)
+                finish.await(TIMEOUT_MS, TimeUnit.MILLISECONDS)
+                newKey
+            },
+            securityLevelOf = { KeySecurityLevel.TEE }
+        )
         var generated: PivSlotInfo? = null
         assertRevokedAtAdmissionDuring(slot.keystoreAlias) { _, resumeShare ->
             val generating = scope.async(Dispatchers.IO) { manager.generateKey(slot, PivAlgorithm.ES256) }
@@ -1040,7 +1049,12 @@ class StreamPairingSessionRevocationTest {
         val slot = PivSlot.CARD_AUTHENTICATION
         pivEdges()
         val newKey = keyPair(ByteArray(91) { 7 })
-        val manager = PivKeyManager(mockk<PivSlotDao>(relaxed = true)) { _, _ -> newKey }
+        val manager = testPivKeyManager(
+            mockk<PivSlotDao>(relaxed = true),
+            pqcStore = mockk(relaxed = true),
+            generateKeyPair = { _, _ -> newKey },
+            securityLevelOf = { KeySecurityLevel.TEE }
+        )
         val phone = connectPaired()
         val router = BidirectionalMessageRouter(requestHandler)
         val session = ShareSession.of(listOf(ShareSession.Transport(pairing.boundSender()!!.second, router))) { true }!!

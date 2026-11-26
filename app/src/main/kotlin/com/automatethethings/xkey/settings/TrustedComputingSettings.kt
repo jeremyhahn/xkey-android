@@ -16,11 +16,13 @@ package com.automatethethings.xkey.settings
 
 import android.content.Context
 import androidx.datastore.core.DataStore
+import androidx.datastore.preferences.core.MutablePreferences
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.automatethethings.xkey.audit.AuditLogger
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -193,12 +195,15 @@ private val Context.trustedComputingDataStore: DataStore<Preferences> by prefere
  * )
  * ```
  *
- * @param context The Android context used to access DataStore.
+ * @param dataStore The DataStore holding the settings.
  */
-class TrustedComputingSettingsRepository(
-    private val context: Context
+class TrustedComputingSettingsRepository internal constructor(
+    private val dataStore: DataStore<Preferences>
 ) {
-    private val dataStore: DataStore<Preferences> = context.trustedComputingDataStore
+    /**
+     * @param context The Android context used to access DataStore.
+     */
+    constructor(context: Context) : this(context.trustedComputingDataStore)
 
     /**
      * Flow of Trusted Computing settings that emits whenever settings change.
@@ -233,6 +238,10 @@ class TrustedComputingSettingsRepository(
             } else {
                 preferences.remove(KEY_XKMS_ENDPOINT)
             }
+            // A full write supersedes the legacy keys: left in place, a
+            // legacy server URL would come back as the endpoint just cleared.
+            preferences.remove(KEY_ACT_AS_CA_SERVER)
+            preferences.remove(KEY_CA_SERVER_URL)
             preferences[KEY_REQUIRE_TRUSTED_IDEVID] = settings.requireTrustedIDevID
             preferences[KEY_REQUIRE_FULL_ATTESTATION] = settings.requireFullAttestation
             preferences[KEY_TRUST_NEW_DEVICES] = settings.trustNewDevices
@@ -253,8 +262,8 @@ class TrustedComputingSettingsRepository(
      * @param enabled True to enable, false to disable.
      */
     suspend fun updateEnabled(enabled: Boolean) {
-        dataStore.edit { preferences ->
-            preferences[KEY_ENABLED] = enabled
+        setAudited("trustedComputingEnabled", { it.enabled.toString() }, enabled.toString()) {
+            it[KEY_ENABLED] = enabled
         }
     }
 
@@ -264,8 +273,8 @@ class TrustedComputingSettingsRepository(
      * @param source The certificate authority to use.
      */
     suspend fun updateCASource(source: CertificateAuthoritySource) {
-        dataStore.edit { preferences ->
-            preferences[KEY_CA_SOURCE] = source.name
+        setAudited("caSource", { it.caSource.name }, source.name) {
+            it[KEY_CA_SOURCE] = source.name
         }
     }
 
@@ -273,16 +282,19 @@ class TrustedComputingSettingsRepository(
      * Update the xkms server endpoint.
      *
      * Only consulted when [CertificateAuthoritySource.XKMS] is selected; a
-     * selected-but-unconfigured xkms source is not usable.
+     * selected-but-unconfigured xkms source is not usable. Clearing it also
+     * removes the legacy server URL, which would otherwise be read back as
+     * the endpoint.
      *
      * @param url The xkms endpoint, or null to clear.
      */
     suspend fun updateXkmsEndpoint(url: String?) {
-        dataStore.edit { preferences ->
+        setAudited("xkmsEndpoint", { it.xkmsEndpoint.orEmpty() }, url.orEmpty()) { preferences ->
             if (url != null) {
                 preferences[KEY_XKMS_ENDPOINT] = url
             } else {
                 preferences.remove(KEY_XKMS_ENDPOINT)
+                preferences.remove(KEY_CA_SERVER_URL)
             }
         }
     }
@@ -293,8 +305,8 @@ class TrustedComputingSettingsRepository(
      * @param required True to require trusted IDevID, false otherwise.
      */
     suspend fun updateRequireTrustedIDevID(required: Boolean) {
-        dataStore.edit { preferences ->
-            preferences[KEY_REQUIRE_TRUSTED_IDEVID] = required
+        setAudited("requireTrustedIDevID", { it.requireTrustedIDevID.toString() }, required.toString()) {
+            it[KEY_REQUIRE_TRUSTED_IDEVID] = required
         }
     }
 
@@ -304,8 +316,8 @@ class TrustedComputingSettingsRepository(
      * @param required True to require full attestation, false otherwise.
      */
     suspend fun updateRequireFullAttestation(required: Boolean) {
-        dataStore.edit { preferences ->
-            preferences[KEY_REQUIRE_FULL_ATTESTATION] = required
+        setAudited("requireFullAttestation", { it.requireFullAttestation.toString() }, required.toString()) {
+            it[KEY_REQUIRE_FULL_ATTESTATION] = required
         }
     }
 
@@ -315,8 +327,8 @@ class TrustedComputingSettingsRepository(
      * @param trust True to trust new devices, false to require pre-provisioning.
      */
     suspend fun updateTrustNewDevices(trust: Boolean) {
-        dataStore.edit { preferences ->
-            preferences[KEY_TRUST_NEW_DEVICES] = trust
+        setAudited("trustNewDevices", { it.trustNewDevices.toString() }, trust.toString()) {
+            it[KEY_TRUST_NEW_DEVICES] = trust
         }
     }
 
@@ -326,8 +338,27 @@ class TrustedComputingSettingsRepository(
      * @param importToStore True to import to system store, false otherwise.
      */
     suspend fun updateImportToSystemStore(importToStore: Boolean) {
-        dataStore.edit { preferences ->
-            preferences[KEY_IMPORT_TO_SYSTEM_STORE] = importToStore
+        setAudited("importToSystemStore", { it.importToSystemStore.toString() }, importToStore.toString()) {
+            it[KEY_IMPORT_TO_SYSTEM_STORE] = importToStore
+        }
+    }
+
+    /**
+     * Applies [write] and, when the value [current] reads before it differs
+     * from [newValue], records the change as [settingName]. The write and its
+     * entry go through [AuditLogger.editAuditedSetting], so a caller cancelled
+     * after the commit still leaves the entry.
+     */
+    private suspend fun setAudited(
+        settingName: String,
+        current: (TrustedComputingSettingsData) -> String,
+        newValue: String,
+        write: (MutablePreferences) -> Unit
+    ) {
+        AuditLogger.editAuditedSetting(dataStore, settingName) { preferences ->
+            val oldValue = current(mapPreferencesToSettings(preferences))
+            write(preferences)
+            if (oldValue == newValue) null else AuditLogger.SettingChange(oldValue, newValue)
         }
     }
 
@@ -389,8 +420,10 @@ class TrustedComputingSettingsRepository(
      * The old model was a single `act_as_ca_server` boolean, which could not
      * say "xkms signs". A stored `true` meant this phone signs; a stored
      * `false` meant an external CA whose only expressible form was a URL, so a
-     * URL present without a source is read as xkms. The legacy keys are left in
-     * place rather than deleted, so a downgrade still finds what it wrote.
+     * URL present without a source is read as xkms. A single-field write leaves
+     * the legacy keys in place, so a downgrade still finds what it wrote; a
+     * full write and a cleared endpoint remove them, since they would bring
+     * back a value the user replaced or cleared.
      */
     private fun readCASource(preferences: Preferences): CertificateAuthoritySource {
         preferences[KEY_CA_SOURCE]?.let { stored ->

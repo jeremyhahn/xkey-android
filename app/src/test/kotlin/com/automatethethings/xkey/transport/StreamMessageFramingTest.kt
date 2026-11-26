@@ -118,4 +118,75 @@ class StreamMessageFramingTest {
             StreamMessageFraming.readMessage(ByteArrayInputStream(truncated))
         }
     }
+
+    // ---- Edges of the length prefix ----
+
+    @Test
+    fun `a zero length prefix returns an empty array and reads no further`() {
+        val input = ByteArrayInputStream(byteArrayOf(0x00, 0x00, 0x05, 0x06))
+
+        val read = StreamMessageFraming.readMessage(input)
+
+        assertEquals(0, read.size)
+        assertEquals("the next frame's bytes are left unread", 2, input.available())
+    }
+
+    @Test
+    fun `a 0xFFFF prefix reads 65535 bytes`() {
+        val body = ByteArray(65535) { (it * 31 and 0xFF).toByte() }
+        val input = ByteArrayInputStream(byteArrayOf(0xFF.toByte(), 0xFF.toByte()) + body + byteArrayOf(0x7E))
+
+        val read = StreamMessageFraming.readMessage(input)
+
+        assertArrayEquals(body, read)
+        assertEquals("only the frame is consumed", 1, input.available())
+    }
+
+    @Test
+    fun `a header split across two reads is reassembled`() {
+        val input = ChunkedInputStream(listOf(byteArrayOf(0x00), byteArrayOf(0x03, 0x0A, 0x0B, 0x0C)))
+
+        val read = StreamMessageFraming.readMessage(input)
+
+        assertArrayEquals(byteArrayOf(0x0A, 0x0B, 0x0C), read)
+    }
+
+    @Test
+    fun `a stream that ends after one header byte throws IOException`() {
+        assertThrows(IOException::class.java) {
+            StreamMessageFraming.readMessage(ByteArrayInputStream(byteArrayOf(0x00)))
+        }
+    }
+
+    @Test
+    fun `writing 65536 bytes writes nothing before it throws`() {
+        val out = ByteArrayOutputStream()
+
+        assertThrows(MessageTooLargeException::class.java) {
+            StreamMessageFraming.writeMessage(out, ByteArray(StreamMessageFraming.MAX_MESSAGE_SIZE + 1))
+        }
+
+        assertEquals("no header and no partial frame", 0, out.size())
+    }
+
+    /** Returns one of [chunks] per read call, however much the caller asks for. */
+    private class ChunkedInputStream(chunks: List<ByteArray>) : InputStream() {
+        private val pending = ArrayDeque(chunks.map { it.toMutableList() })
+
+        override fun read(): Int {
+            val chunk = pending.firstOrNull() ?: return -1
+            val b = chunk.removeAt(0).toInt() and 0xFF
+            if (chunk.isEmpty()) pending.removeFirst()
+            return b
+        }
+
+        override fun read(b: ByteArray, off: Int, len: Int): Int {
+            if (len == 0) return 0
+            val chunk = pending.firstOrNull() ?: return -1
+            var n = 0
+            while (n < len && chunk.isNotEmpty()) b[off + n++] = chunk.removeAt(0)
+            if (chunk.isEmpty()) pending.removeFirst()
+            return n
+        }
+    }
 }

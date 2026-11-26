@@ -99,9 +99,7 @@ object PremiumCardFactory {
     /** Alpha value for glass card effect (95%). */
     private const val GLASS_ALPHA = 0.95f
 
-    // -------------------------------------------------------------------------
-    // Factory Methods
-    // -------------------------------------------------------------------------
+    // Factory methods
 
     /**
      * Creates an elevated card for primary content display.
@@ -519,10 +517,7 @@ object PremiumCardFactory {
      * @param card The MaterialCardView to configure.
      */
     fun setNonInteractive(card: MaterialCardView) {
-        // Detach the listener first: View.setOnClickListener sets isClickable
-        // back to true whenever the view is not already clickable, so clearing
-        // the flags before this call left the card clickable and still
-        // ripple-highlighting on touch.
+        // Detach the listener first: setOnClickListener makes the view clickable again.
         card.setOnClickListener(null)
         card.isClickable = false
         card.isFocusable = false
@@ -695,10 +690,8 @@ object PremiumCardFactory {
      * Creates a success card for success messages.
      *
      * Uses the `security_verified` green — the same semantic the rest of the app
-     * paints a valid signature, a trusted certificate and a connected device with.
-     * This card used to be byte-identical to [createInfoCard] (both the tertiary
-     * container over a tertiary stroke), so "information" and "success" were
-     * indistinguishable on screen.
+     * paints a valid signature, a trusted certificate and a connected device with,
+     * so it stays distinct from [createInfoCard].
      *
      * @param context The context for creating the view.
      * @return A configured MaterialCardView for success content.

@@ -50,14 +50,11 @@ import org.junit.Test
 
 /**
  * The attestation biometric policy answers to the peer of the session a
- * request arrived on (PR #42).
+ * request arrived on.
  *
  * A phone-initiated session passes its own peer through
  * [RequestHandler.handleRawRequest]; the transport-installed peer belongs to
- * whichever desktop the phone is *serving*. Under `PAIRED_DEVICES_SKIP` the
- * prompt used to be decided by that installed peer, so re-attesting a paired
- * desktop prompted whenever no incoming session existed, and an unrelated
- * incoming session's trust decided it when one did.
+ * whichever desktop the phone is *serving*, and must not decide the prompt.
  *
  * This drives the real handler, not a stand-in. Only its Android edges are
  * mocked: the database, the keyguard and notification services, the main
