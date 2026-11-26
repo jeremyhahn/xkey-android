@@ -1721,7 +1721,9 @@ class KeyShareAuditTest {
             keySize = MATERIAL.size * 8,
             exportable = exportable,
             shareable = shareable,
-            material = MATERIAL
+            // A copy: a refused export zeroes the material it read, which
+            // must never zero the bytes every other assertion compares with.
+            material = MATERIAL.copyOf()
         )
         coEvery { keyDao.getByKeyId(KEY_ID) } returns
             keyEntity(policy, exportable = exportable, shareable = shareable)

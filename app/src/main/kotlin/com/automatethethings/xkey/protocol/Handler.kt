@@ -5203,11 +5203,16 @@ class RequestHandler(
         }
         val peerPublicKeyHex = requireConfirmedPeer("importSharedKey")
         return try {
+            // The share permission is decided before the key is read: for a
+            // refused peer the read only tells which kind of key is refused,
+            // and the software material it decrypted is zeroed at once.
+            val permitted = authorizeShare(keyId, peerPublicKeyHex) != null
             // The one read of what a share sends (#255 review r4): its
             // key resolved once from its row (#270 review r5), then gated
             // and read with that kind.
             val shareable = keyPolicyStore.readShareable(context, keyId, keystoreManager, keyDao.getByKeyId(keyId)) {
                 com.automatethethings.xkey.crypto.SoftwareKeyStore(context).get(it)
+                    ?.also { key -> if (!permitted) key.material.fill(0) }
             }
             val software = shareable.software
             val publicKeyPem = shareable.publicKeyPem
@@ -5220,8 +5225,11 @@ class RequestHandler(
             // so a refused export is filed under the same key type as a
             // granted one (the audit screen filters by it).
             val keyType = auditKeyType(keyId, software)
-            val entity = authorizeShare(keyId, peerPublicKeyHex)
+            // Decided again after the read, so a revoke that committed while
+            // it ran is still honoured; a refusal keeps none of the material.
+            val entity = if (permitted) authorizeShare(keyId, peerPublicKeyHex) else null
             if (entity == null) {
+                software?.material?.fill(0)
                 val message = "Key is not shareable with this peer: $keyId"
                 AuditLogger.logKeyExported(
                     keyId = keyId,
