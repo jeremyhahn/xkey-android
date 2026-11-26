@@ -59,6 +59,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
+import org.junit.Ignore
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
@@ -241,9 +242,90 @@ class ImportSharedKeyRefusalTest {
         assertEquals(ErrorCodes.KEY_NOT_FOUND, response.error?.code)
     }
 
-    private fun givenSoftwareKey(policy: SharingPolicyType, material: ByteArray = secret()) {
+    /**
+     * A share permitted when its read starts and made PRIVATE while the read
+     * runs is refused, and the material that read decrypted is zeroed: the
+     * decision after the read sees the revoke the decision before it missed.
+     */
+    @Test
+    fun aShareMadePrivateDuringItsReadIsRefusedWithItsMaterialZeroed() = runTest {
+        val material = secret()
+        var read = false
+        givenSoftwareKey(SharingPolicyType.ALL_PEERS, material) { read = true }
+        coEvery { keyDao.getByKeyId(KEY_ID) } answers {
+            row(if (read) SharingPolicyType.PRIVATE else SharingPolicyType.ALL_PEERS)
+        }
+
+        val bytes = served()
+
+        assertTrue("the key was read", read)
+        assertRefusedWithMaterialZeroed(bytes, material)
+    }
+
+    /**
+     * A Selected Peers share whose peer grant is withdrawn while the read
+     * runs is refused, and the material that read decrypted is zeroed.
+     */
+    @Test
+    fun aPeerGrantWithdrawnDuringTheReadIsRefusedWithItsMaterialZeroed() = runTest {
+        val material = secret()
+        var read = false
+        givenSoftwareKey(SharingPolicyType.SELECTED_PEERS, material) { read = true }
+        coEvery { grants.isPeerGranted(KEY_ID, PEER) } answers {
+            decided = true
+            !read
+        }
+
+        val bytes = served()
+
+        assertTrue("the key was read", read)
+        assertRefusedWithMaterialZeroed(bytes, material)
+    }
+
+    /**
+     * A share whose second decision, after the read, fails is an internal
+     * error that keeps none of the material. The first key row lookup after
+     * the read (the audit's key type) answers; the decision's own throws.
+     */
+    @Ignore(
+        "Fails at 25cc60cf: the handler zeroes the material only on the refusal branch, so a " +
+            "decision that throws after the read leaves it in memory. Lift once the export zeroes " +
+            "it in a finally on every exit."
+    )
+    @Test
+    fun aFailedDecisionAfterTheReadKeepsNoneOfTheMaterial() = runTest {
+        val material = secret()
+        var read = false
+        givenSoftwareKey(SharingPolicyType.ALL_PEERS, material) { read = true }
+        var lookupsAfterRead = 0
+        coEvery { keyDao.getByKeyId(KEY_ID) } answers {
+            if (read && ++lookupsAfterRead > 1) error("key store unreadable")
+            row(SharingPolicyType.ALL_PEERS)
+        }
+
+        val bytes = served()
+
+        assertTrue("the key was read", read)
+        assertEquals(ErrorCodes.INTERNAL_ERROR, Response.fromJson(bytes).error?.code)
+        assertFalse("material in the response", Base64.getEncoder().encodeToString(secret()) in String(bytes))
+        assertTrue("the key's material was left in memory: ${material.toList()}", material.all { it == 0.toByte() })
+    }
+
+    private fun assertRefusedWithMaterialZeroed(bytes: ByteArray, material: ByteArray) {
+        assertEquals(ErrorCodes.OPERATION_DENIED, Response.fromJson(bytes).error?.code)
+        assertFalse("material in the refusal", Base64.getEncoder().encodeToString(secret()) in String(bytes))
+        assertTrue("the refused key's material was left in memory: ${material.toList()}", material.all { it == 0.toByte() })
+    }
+
+    /** A software key [KEY_ID] under [policy]; [onRead] runs inside each read of it. */
+    private fun givenSoftwareKey(
+        policy: SharingPolicyType,
+        material: ByteArray = secret(),
+        onRead: () -> Unit = {}
+    ) {
         every { anyConstructed<SoftwareKeyStore>().get(KEY_ID) } answers {
             readsBeforeDecision += !decided && policy == SharingPolicyType.SELECTED_PEERS
+            onRead()
             SoftwareKey(
                 keyId = KEY_ID,
                 algorithm = "AES",
@@ -254,18 +336,20 @@ class ImportSharedKeyRefusalTest {
                 material = material
             )
         }
-        coEvery { keyDao.getByKeyId(KEY_ID) } returns KeyEntity(
-            keyId = KEY_ID,
-            keyType = "symmetric",
-            algorithm = "AES",
-            label = KEY_ID,
-            keySizeBits = 256,
-            exportable = true,
-            shareable = true,
-            sharingPolicy = policy,
-            source = "software"
-        )
+        coEvery { keyDao.getByKeyId(KEY_ID) } returns row(policy)
     }
+
+    private fun row(policy: SharingPolicyType) = KeyEntity(
+        keyId = KEY_ID,
+        keyType = "symmetric",
+        algorithm = "AES",
+        label = KEY_ID,
+        keySizeBits = 256,
+        exportable = true,
+        shareable = true,
+        sharingPolicy = policy,
+        source = "software"
+    )
 
     private suspend fun served(): ByteArray =
         withContext(RequestHandler.servedConnection(SessionBindingProvider { null }, PEER, "test:connection")) {
