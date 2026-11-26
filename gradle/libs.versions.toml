@@ -1,6 +1,6 @@
 [versions]
 # Android Gradle Plugin
-agp = "9.5.1"
+agp = "9.5.3"
 
 # Kotlin
 kotlin = "2.4.21"
@@ -10,9 +10,9 @@ coreKtx = "1.19.1"
 appcompat = "1.8.0"
 activity = "1.13.0"
 fragment = "1.9.1"
-lifecycle = "2.11.0"
+lifecycle = "2.11.1"
 securityCrypto = "1.1.0"
-biometric = "1.4.0-beta01"
+biometric = "1.4.0-rc01"
 datastore = "1.3.0"
 room = "2.8.5"
 credentials = "1.6.0"
@@ -37,7 +37,7 @@ zxingCore = "3.5.4"
 
 # ML Kit & CameraX
 mlkitBarcode = "17.3.0"
-camerax = "1.6.2"
+camerax = "1.7.0"
 
 # Media3
 media3 = "1.11.1"
