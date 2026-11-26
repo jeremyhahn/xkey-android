@@ -37,7 +37,7 @@ zxingCore = "3.5.4"
 
 # ML Kit & CameraX
 mlkitBarcode = "17.3.0"
-camerax = "1.6.2"
+camerax = "1.7.0"
 
 # Media3
 media3 = "1.11.1"
