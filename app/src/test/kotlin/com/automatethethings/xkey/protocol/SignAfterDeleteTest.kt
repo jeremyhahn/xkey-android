@@ -29,6 +29,7 @@ import com.automatethethings.xkey.settings.UserVerificationPolicy
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.dao.KeyPolicyDao
 import com.automatethethings.xkey.storage.entity.KeyDeletionEntity
+import com.automatethethings.xkey.testing.GateScopeScanner
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
@@ -162,6 +163,11 @@ class SignAfterDeleteTest {
         coVerify(exactly = 1) { keystore.signApproved(any(), any(), any(), any()) }
     }
 
+    /**
+     * A crypto call counts as gated only inside the block of a gate on the
+     * key it names ([GateScopeScanner]), or under one of the named rules
+     * below, each naming the call it covers.
+     */
     @Test
     fun `every crypto call of a user key in the protocol handlers runs inside withUsableKey`() {
         val root = listOf(File("src/main/kotlin"), File("app/src/main/kotlin")).first { it.isDirectory }
@@ -169,44 +175,34 @@ class SignAfterDeleteTest {
             """keystoreManager\.(sign|signWithoutBiometric|signWithAlgorithm|rsaDecrypt\w*|decrypt\w*|encrypt\w*|symmetric\w*|computeHMAC\w*|performECDH|ecdh\w*)\(""" +
                 """|requestCryptoSignature(OnTurn)?\(|approvals\.sign\(|SoftwareKeyOps\.(aesGcm\w*|hmac|sign\w*|ecdh\w*)\("""
         )
-        // The gates: the use gate, and its prompt-ordered forms (#255 review r4).
-        val gates = listOf("withUsableKey(", "withUsableGeneralKey(", "withKeyUseOnTurn(", "withGeneralKeyUseOnTurn(", "withKeyUseInOneTurn(", "withSignerKeyUse(")
         // CosignApprovalPrompts is the co-sign prompt itself: its caller's
         // `approvals.sign(` is swept here instead.
-        val bypasses = File(root, "com/automatethethings/xkey/protocol").listFiles { f -> f.extension == "kt" && f.name != "CosignApprovalPrompts.kt" }!!
-            .flatMap { file ->
-                val lines = file.readLines()
-                lines.mapIndexedNotNull { i, line ->
-                    val code = line.substringBefore("//")
-                    // withUsableGeneralKey is the key uses' gate: it runs withUsableKey (asserted below).
-                    if (!crypto.containsMatchIn(code) || gates.any { it in code }) return@mapIndexedNotNull null
-                    // A prompt's call on the line after its withKeyUseOnTurn
-                    // (or the general-key form) opens.
-                    if (lines.getOrNull(i - 1)?.contains("UseOnTurn(") == true) return@mapIndexedNotNull null
-                    // A software key's crypto runs in the use block of
-                    // withUsableSoftwareKey, the gate's software-key choke point.
-                    if (lines.getOrNull(i - 1)?.trimEnd()?.endsWith("{ sw ->") == true &&
-                        "withUsableSoftwareKey(" in lines[i - 1]
-                    ) return@mapIndexedNotNull null
-                    // The user-verification key is the app's own, never a peer's key to delete.
-                    if (lines.getOrNull(i + 1)?.contains("\"user-verification\"") == true) return@mapIndexedNotNull null
-                    // A per-operation prompt in a CryptoObjectSigner runs only where the signer is passed in, checked below.
-                    if ((maxOf(0, i - 3) until i).any { "CryptoObjectSigner {" in lines[it] }) return@mapIndexedNotNull null
-                    "${file.name}:${i + 1}"
-                }
-            }
+        val swept = File(root, "com/automatethethings/xkey/protocol").listFiles { f -> f.extension == "kt" && f.name != "CosignApprovalPrompts.kt" }!!
+            .map { file -> file.readText().let { text -> Triple(file, text, GateScopeScanner(text, GATES)) } }
+        val calls = swept.flatMap { (file, text, scanner) -> scanner.calls(crypto).map { Triple(file, text, scanner) to it } }
+        assertTrue("the sweep finds the handlers' key uses", calls.count { it.first.first.name == "Handler.kt" } >= 10)
+        val bypasses = calls.filterNot { (scan, call) ->
+            val (_, text, scanner) = scan
+            scanner.isGated(call, ::sameKeyOrCosignOperation) ||
+                isSoftwareKeyUse(text, scanner, call) ||
+                isUserVerificationKeyUse(call) ||
+                isInCryptoObjectSigner(scanner, call)
+        }.map { (scan, call) -> "${scan.first.name}:${call.line + 1}" }
         assertEquals(emptyList<String>(), bypasses)
-        // Every call handed the CryptoObjectSigner runs in a gate opened at most 10 lines above, or forwards a helper's own parameter.
-        val handlerLines = File(root, "com/automatethethings/xkey/protocol/Handler.kt").readLines()
-        val ungatedSigner = handlerLines.indices.filter { i ->
-            val code = handlerLines[i].substringBefore("//")
-            Regex("""\(\s*[^)]*\bcryptoObjectSigner\)|,\s*cryptoObjectSigner\s*$""").containsMatchIn(code) &&
-                "fun " !in code &&
-                (maxOf(0, i - 10) until i).none { j -> gates.any { it in handlerLines[j] } } &&
-                (maxOf(0, i - 15) until i).none { j -> "fun " in handlerLines[j] && "cryptoObjectSigner: " in handlerLines.subList(j, i).joinToString("") }
-        }.map { "Handler.kt:${it + 1}" }
+
+        // Every use of the CryptoObjectSigner a gate hands its block is inside
+        // that block, or forwards the enclosing helper's own parameter.
+        val handlerText = File(root, "com/automatethethings/xkey/protocol/Handler.kt").readText()
+        val handlerScan = GateScopeScanner(handlerText, GATES)
+        val signerUses = handlerScan.calls(Regex("""\bcryptoObjectSigner\b(?!\s*(:|->))"""))
+        assertTrue("the sweep finds the signer's uses", signerUses.isNotEmpty())
+        val ungatedSigner = signerUses.filterNot { use ->
+            handlerScan.gatesAround(use.offset).any { handlerText.startsWith("{ cryptoObjectSigner ->", it.body.first) } ||
+                handlerScan.enclosingFunction(use.offset)?.let { "cryptoObjectSigner:" in handlerText.substring(it.offset, it.body.first) } == true
+        }.map { "Handler.kt:${it.line + 1}" }
         assertEquals("a CryptoObjectSigner used outside a gate", emptyList<String>(), ungatedSigner)
-        val handler = File(root, "com/automatethethings/xkey/protocol/Handler.kt").readText()
+
+        val handler = handlerText
         val gate = handler.substringAfter("fun <T> withUsableGeneralKey(").substringBefore("\n    }\n")
         assertTrue("withUsableGeneralKey resolves the id's key", "ownedKeyKind(" in gate)
         assertTrue("withUsableGeneralKey runs inside withUsableKey", "keyPolicyStore.withUsableKey(" in gate)
@@ -278,5 +274,50 @@ class SignAfterDeleteTest {
             handler.handleRawRequest(Request(id = 1, method = MethodNames.SIGN, params = params).toJson())
         }
         return Response.fromJson(raw)
+    }
+
+    private companion object {
+        /**
+         * The gates: the use gate, its prompt-ordered forms (#255 review r4),
+         * the software-key choke point and the per-operation prompt's signer.
+         */
+        val GATES = listOf(
+            "withUsableKey", "withUsableGeneralKey", "withKeyUseOnTurn", "withGeneralKeyUseOnTurn",
+            "withKeyUseInOneTurn", "withSignerKeyUse", "withUsableSoftwareKey", "CryptoObjectSigner"
+        )
+
+        private fun compact(s: String) = s.filterNot(Char::isWhitespace)
+
+        /**
+         * The call names the gate's key, or is a co-sign whose operation does:
+         * Handler.kt:5405 runs `approvals.sign(CosignOperation(keyId = signingKey.keyId, ...))`
+         * inside `withGeneralKeyUseOnTurn(signingKey.keyId)`.
+         */
+        fun sameKeyOrCosignOperation(gate: String, call: String): Boolean =
+            gate.isNotEmpty() &&
+                (GateScopeScanner.sameKey(gate, call) || compact(call).startsWith("CosignOperation(keyId=${compact(gate)},"))
+
+        /**
+         * A software key's crypto on the material withUsableSoftwareKey hands
+         * its use block, the gate's software-key choke point: Handler.kt:2371,
+         * Handler.kt:2431 and Handler.kt:2567 run SoftwareKeyOps on `sw.material`
+         * inside `withUsableSoftwareKey(...) { sw ->`.
+         */
+        fun isSoftwareKeyUse(text: String, scanner: GateScopeScanner, call: GateScopeScanner.Call): Boolean =
+            call.keyId == "sw.material" &&
+                scanner.gatesAround(call.offset).any { it.name == "withUsableSoftwareKey" && text.startsWith("{ sw ->", it.body.first) }
+
+        /**
+         * The user-verification key is the app's own, never a peer's key to
+         * delete: Handler.kt:3730 signs with `credentialId = "user-verification"`.
+         */
+        fun isUserVerificationKeyUse(call: GateScopeScanner.Call): Boolean = call.keyId == "\"user-verification\""
+
+        /**
+         * A per-operation prompt in a CryptoObjectSigner runs only where the
+         * signer is handed in, which the signer check pins: Handler.kt:2100.
+         */
+        fun isInCryptoObjectSigner(scanner: GateScopeScanner, call: GateScopeScanner.Call): Boolean =
+            scanner.gatesAround(call.offset).any { it.name == "CryptoObjectSigner" }
     }
 }
