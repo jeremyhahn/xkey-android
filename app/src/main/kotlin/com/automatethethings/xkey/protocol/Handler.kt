@@ -1729,7 +1729,7 @@ class RequestHandler(
         // key with no readable size (EdDSA) falls back to the algorithm's own.
         keySizeBits = generatedKeySize(genParams, publicKeyDer)
             ?: genParams.resolvedKeySizeBits()
-            ?: if (genParams.algorithm == CoseAlgorithms.EDDSA) 256 else CoseAlgorithms.getKeySizeBits(genParams.algorithm)
+            ?: CoseAlgorithms.getKeySizeBits(genParams.algorithm)
         val level = generatedKeyLevel(
             genParams.keyId,
             read = { keystoreManager.generalKeySecurityLevel(genParams.keyId) },
