@@ -5369,6 +5369,15 @@ class RequestHandler(
                     "Key $keyId is not a signing key"
                 )
             }
+            // The auto-select's own check: a co-signature is a media
+            // signature, so only an algorithm SignatureVerifier verifies co-signs.
+            if (!com.automatethethings.xkey.media.SignatureVerifier.offersSigning(named.algorithm)) {
+                return Response.error(
+                    request.id,
+                    ErrorCodes.OPERATION_DENIED,
+                    "Key $keyId cannot co-sign: ${named.algorithm} co-signatures cannot be verified"
+                )
+            }
             named
         } else {
             // The newest signing key that has a JCA signature; an ML-DSA key cannot co-sign.
