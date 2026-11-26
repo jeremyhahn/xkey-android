@@ -243,15 +243,23 @@ Passkeys created through the Android Credential Manager are the exception:
 device has, not where the key landed.\n\nThose are the only backends: StrongBox, the TEE, and encrypted app storage
 for the software keys named above.
 
-## Ed25519 software keys
+## Ed25519 keys
 
-Android Keystore cannot create Ed25519 keys. `generateKeyForAlgorithm` with
-`Ed25519` (API 33+) generates the pair with the JCE `Ed25519` provider and
-stores the private key in the `xkey_ed25519_keys` `EncryptedSharedPreferences`
-file, encrypted under a Keystore AES-256-GCM master key. The key is encrypted
-at rest but is not isolated in hardware. `local.generateKey` cannot create one
-yet: it parses algorithm names through `CoseAlgorithms.fromName`, which has no
-Ed25519.
+From API 33, `generateKeyForAlgorithm` with `EdDSA` (the wire name, COSE -8)
+or `Ed25519` (the UI name) makes the key in the Android Keystore: an EC
+generator with `ECGenParameterSpec("ed25519")`, `PURPOSE_SIGN`,
+`DIGEST_NONE` and the EC path's user-authentication settings. StrongBox
+makes no Ed25519 keys, so the key is a TEE key. `local.generateKey` returns
+its SubjectPublicKeyInfo DER, and the key signs with the JCA `Ed25519`
+signature through the same path as ES256. Below API 33 the request is
+refused with the unsupported-algorithm error, and `local.getCapabilities`
+names `EdDSA` only from API 33.
+
+Earlier builds made software Ed25519 keys and kept the private key in the
+`xkey_ed25519_keys` `EncryptedSharedPreferences` file. Nothing writes that
+file now. Its aliases are still listed as software keys and can be deleted,
+but they cannot sign: `local.sign` refuses one with `INVALID_ALGORITHM`, and
+its private key is never read.
 
 ## HKDF key derivation
 
