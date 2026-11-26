@@ -800,6 +800,8 @@ class KeySharingPendingIntentHandlerTest {
         every { keystore.getPublicKeyDER(id, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) } returns byteArrayOf(9, 9)
         every { keystore.getCOSEPublicKey(id, any()) } returns null
         every { keystore.holdsEd25519Keys() } returns true
+        every { keystore.legacyEd25519PublicKeyDer("xkey_key_$id") } returns pair.public.encoded
+        every { keystore.legacyEd25519PublicKeyDer("xkey_credential_$id") } returns null
         fakeSoftwareKeyStore(java.nio.file.Files.createTempDirectory("software-keys").toFile().apply { deleteOnExit() })
         tables.addKey(id, SharingPolicyType.PRIVATE, keyType = "signing", publicKeyDer = pair.public.encoded)
 

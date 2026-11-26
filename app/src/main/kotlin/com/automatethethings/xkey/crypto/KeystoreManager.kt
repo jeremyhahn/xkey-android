@@ -2107,11 +2107,17 @@ class KeystoreManager(
         val held = ownersOf(keyId, generation)
         if (held.isEmpty()) return userKeyKindOf(keyType)
         val row = publicKey()
-        // The row's key read in each encoding it holds ([matchRowPublicKey]); a legacy software Ed25519 key's is never read.
+        // The row's key read in each encoding it holds ([matchRowPublicKey]). Each key's public half is
+        // read from the backend that stores it: a Keystore certificate, or a legacy software Ed25519
+        // key's preferences entry, which has no certificate (PR #400 review).
         val rowPublicKeyMatch = { kind: UserKeyKind ->
+            val alias = userKeyAlias(keyId, kind)
             matchRowPublicKey(
                 row,
-                { runCatching { getPublicKeyDER(keyId, kind) }.getOrNull() },
+                {
+                    runCatching { getPublicKeyDER(keyId, kind) }.getOrNull()
+                        ?: if ("$ED25519_ENTRY$alias" in generation) legacyEd25519PublicKeyDer(alias) else null
+                },
                 { getCOSEPublicKey(keyId, kind) }
             )
         }
@@ -2131,15 +2137,7 @@ class KeystoreManager(
         val owners = if (row.isEmpty) emptyList() else UserKeyKind.entries.filter {
             rowPublicKeyMatch(it) == true
         }
-        owners.singleOrNull()?.let { return it }
-        // A legacy software Ed25519 key owns the row when every other key's public half differs.
-        val legacy = held.filter { "$ED25519_ENTRY${userKeyAlias(keyId, it)}" in generation }
-        if (!row.isEmpty && owners.isEmpty() && legacy.size == 1 &&
-            held.all { it in legacy || rowPublicKeyMatch(it) == false }
-        ) {
-            return legacy.single()
-        }
-        throw KeyOwnershipUnknownException(keyId)
+        return owners.singleOrNull() ?: throw KeyOwnershipUnknownException(keyId)
     }
 
 
@@ -2520,6 +2518,25 @@ class KeystoreManager(
      */
     internal fun hasSoftwareEd25519Key(alias: String): Boolean =
         alias in uncommittedSoftwareRemovals || ed25519Read(alias) { ed25519Prefs()?.contains(alias) == true }
+
+    /**
+     * The SubjectPublicKeyInfo DER of the legacy software Ed25519 key stored
+     * under [alias], derived from its PKCS#8 preferences entry (it keeps no
+     * public key or certificate), or null if none is stored. The one reader
+     * of a legacy entry's value, and only for [rowKeyKind]'s ownership
+     * compare: a legacy key never signs and is never migrated. A store that
+     * cannot be read throws [KeyPresenceUnreadableException]. Internal for
+     * tests only; KeyOwnershipChokePointTest pins rowKeyKind as its one caller.
+     */
+    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
+    internal fun legacyEd25519PublicKeyDer(alias: String): ByteArray? {
+        val prefs = ed25519Read(alias) { ed25519Prefs() } ?: return null
+        val encoded = ed25519Read(alias) { prefs.getString(alias, null) } ?: return null
+        val params = org.bouncycastle.crypto.util.PrivateKeyFactory.createKey(Base64.decode(encoded, Base64.NO_WRAP))
+            as org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters
+        return org.bouncycastle.crypto.util.SubjectPublicKeyInfoFactory
+            .createSubjectPublicKeyInfo(params.generatePublicKey()).encoded
+    }
 
     /**
      * True only when no key material for [keyId] is stored in any backend
