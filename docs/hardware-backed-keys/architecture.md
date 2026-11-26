@@ -13,10 +13,13 @@ activities, services and storage.
 Asymmetric private keys are generated and used inside Android Keystore, which
 puts them in the TEE (Trusted Execution Environment) or in StrongBox (a
 separate secure element) when the device has one. The private key never
-leaves that boundary. There are three exceptions, all stored encrypted at rest
-in app storage rather than in Keystore: Ed25519 keys, which Keystore cannot
-create; exportable symmetric keys (see `docs/exportable-symmetric-keys/`); and
-the Noise static key. Symmetric keys derived from an ECDH agreement, such as
+leaves that boundary. Ed25519 keys follow this rule from API 33: they are
+Keystore keys, sent as `EdDSA` on the wire. There are two exceptions, both
+stored encrypted at rest in app storage rather than in Keystore: exportable
+symmetric keys (see `docs/exportable-symmetric-keys/`) and the Noise static
+key. Software Ed25519 keys that earlier builds kept in app storage are legacy
+entries, not an exception: they are listed and can be deleted, but they cannot
+sign, and their private keys are never read or migrated. Symmetric keys derived from an ECDH agreement, such as
 the file encryption key, are used in software after the agreement runs in
 Keystore.
 
@@ -31,10 +34,11 @@ graph TB
         AES[Symmetric Keys<br/>PURPOSE_ENCRYPT/DECRYPT<br/>AES-128/256-GCM]
         HMAC[HMAC Keys<br/>PURPOSE_SIGN/VERIFY<br/>HMAC-SHA256/512]
         EPHEM[Ephemeral Keys<br/>PURPOSE_AGREE_KEY<br/>EC P-256, single-use]
+        ED25519[Ed25519 Keys<br/>PURPOSE_SIGN, TEE<br/>API 33+, EdDSA on the wire]
     end
 
-    subgraph Software["EncryptedSharedPreferences"]
-        ED25519[Ed25519 Keys<br/>Software fallback<br/>API 33+]
+    subgraph Legacy["EncryptedSharedPreferences (legacy)"]
+        ED25519SW[Legacy software Ed25519 Keys<br/>earlier builds only<br/>cannot sign, deletable]
     end
 
     subgraph Noise["Noise Protocol Keys"]
@@ -54,7 +58,8 @@ graph TB
 | RS256 | RSA 2048 | SHA256withRSA | `PURPOSE_SIGN` |
 | RS384 | RSA 3072 | SHA384withRSA | `PURPOSE_SIGN` |
 | RS512 | RSA 4096 | SHA512withRSA | `PURPOSE_SIGN` |
-| Ed25519 | Curve25519 | Ed25519 (JCE) | Software only |
+| EdDSA (UI name Ed25519) | Ed25519, COSE -8, API 33+ | Ed25519 | `PURPOSE_SIGN` (Keystore, TEE) |
+| Legacy software Ed25519 | Ed25519, earlier builds only | none | Cannot sign; listed and deletable, never read or migrated |
 | ML-DSA-44 | FIPS 204, COSE -48 | Pure ML-DSA (Bouncy Castle, or the Keystore backend) | Software (Keystore-wrapped) or hardware where reported |
 | ML-DSA-65 | FIPS 204, COSE -49 | Pure ML-DSA (Bouncy Castle, or the Keystore backend) | Software (Keystore-wrapped) or hardware where reported |
 | ML-DSA-87 | FIPS 204, COSE -50 | Pure ML-DSA (Bouncy Castle, or the Keystore backend) | Software (Keystore-wrapped) or hardware where reported |
@@ -89,8 +94,12 @@ holds the decision. On API 28-30 `local.getCapabilities` answers
 Android 12 (API 31)") without calling `KeyAgreement`. An EC key generated
 before the device was upgraded to API 31 has no agree purpose either;
 `local.ecdh` on it answers `ECDH_FAILED` saying the key was not generated
-with `PURPOSE_AGREE_KEY`. Ed25519 is not advertised in `supportedAlgorithms`:
-`local.generateKey` cannot parse the name yet.
+with `PURPOSE_AGREE_KEY`. From API 33 `local.getCapabilities` names `EdDSA`
+in its algorithms (`KeystoreCapabilities.supportedAlgorithms`), and
+`local.generateKey` makes a Keystore Ed25519 key for it. Below API 33 `EdDSA`
+is not named and the request is refused. A FIDO2 key is never EdDSA:
+`local.generateKey` refuses `EdDSA` with key type `fido2` with
+`INVALID_PARAMS`.
 
 ## Key lifecycle
 
@@ -234,8 +243,13 @@ and every AES or HMAC key therefore report `tee` on a StrongBox device.
 Before API 31 `KeyInfo` cannot tell StrongBox from the TEE, so the key
 generators record, per process, each alias whose StrongBox spec succeeded
 (`markStrongBoxSpec`). After a restart such a key reads `tee`: an
-under-claim, never an over-claim. Exportable keys and Ed25519 keys live
-outside Keystore and report `software`.
+under-claim, never an over-claim. A Keystore Ed25519 key (API 33+) reports
+from its `KeyInfo` like any Keystore key; its private key names the algorithm
+`EdDSA`, which has no AndroidKeyStore `KeyFactory`, so the `KeyInfo` is read
+through the EC factory. StrongBox makes no Ed25519 keys, so such a key
+reports `tee` (or `software` where its `KeyInfo` says so), never `strongbox`.
+Exportable keys and legacy software Ed25519 keys live outside Keystore and
+report `software`.
 
 Passkeys created through the Android Credential Manager are the exception:
 `CreateCredentialHandler` stores `strongBoxBacked` from
@@ -251,7 +265,10 @@ generator with `ECGenParameterSpec("ed25519")`, `PURPOSE_SIGN`,
 `DIGEST_NONE` and the EC path's user-authentication settings. StrongBox
 makes no Ed25519 keys, so the key is a TEE key. `local.generateKey` returns
 its SubjectPublicKeyInfo DER, and the key signs with the JCA `Ed25519`
-signature through the same path as ES256. Below API 33 the request is
+signature through the same path as ES256. A per-operation key (validity 0)
+signs through its CryptoObject prompt, and `signApproved` returns that
+signature only if it verifies with Ed25519 under the approved public key.
+Below API 33 the request is
 refused with the unsupported-algorithm error, and `local.getCapabilities`
 names `EdDSA` only from API 33.
 
@@ -259,7 +276,7 @@ Earlier builds made software Ed25519 keys and kept the private key in the
 `xkey_ed25519_keys` `EncryptedSharedPreferences` file. Nothing writes that
 file now. Its aliases are still listed as software keys and can be deleted,
 but they cannot sign: `local.sign` refuses one with `INVALID_ALGORITHM`, and
-its private key is never read.
+its private key is never read or migrated to a Keystore key.
 
 ## HKDF key derivation
 
@@ -492,7 +509,7 @@ Settings kept in Jetpack DataStore:
 ### EncryptedSharedPreferences
 
 - Noise_XX static key pair (X25519), file `xkey_noise_keys`
-- Ed25519 private keys, file `xkey_ed25519_keys`
+- Legacy software Ed25519 private keys from earlier builds, file `xkey_ed25519_keys`: nothing writes or reads them now; their aliases are listed and can be deleted
 - Paired desktops (`PairedDeviceRepository`), file `xkey_paired_devices`
 - Local CA state (`xkey_ca`), device identities (`xkey_device_identity`) and enrolled devices (`xkey_enrolled_devices`)
 
