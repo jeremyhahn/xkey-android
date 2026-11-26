@@ -49,6 +49,8 @@ import com.automatethethings.xkey.ca.AndroidCA
 import com.automatethethings.xkey.ca.CAInitResult
 import com.automatethethings.xkey.ca.CASubject
 import com.automatethethings.xkey.storage.XKeyDatabase
+import com.automatethethings.xkey.storage.entity.KeyEntity
+import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.bootstrap.BootstrapClient
 import com.automatethethings.xkey.bootstrap.BootstrapFailedException
 import com.automatethethings.xkey.bootstrap.NoMethodsConfiguredException
@@ -1313,10 +1315,13 @@ class SettingsActivity : AppCompatActivity() {
 
             lifecycleScope.launch {
                 try {
-                    bootstrapSettingsRepository.deriveSettingsFromUrl(url)
+                    val settings = bootstrapSettingsRepository.deriveSettingsFromUrl(url)
+                    if (settings == null) {
+                        Snackbar.make(card, getString(R.string.bootstrap_ca_url_refused), Snackbar.LENGTH_LONG).show()
+                        return@launch
+                    }
                     trustedComputingSettingsRepository.updateXkmsEndpoint(url)
 
-                    val settings = bootstrapSettingsRepository.getSettings()
                     val client = BootstrapClient(settings)
                     val result = client.fetchCABundle()
 
@@ -1494,7 +1499,7 @@ class SettingsActivity : AppCompatActivity() {
 
             // Populate key spinner with signing-type keys
             val keys = keyDao.getAll()
-            val signingKeys = keys.filter { it.keyType == "signing" || it.keyType == "fido2" }
+            val signingKeys = mediaSigningKeys(keys)
             val keyNames = signingKeys.map { "${it.label.ifEmpty { it.keyId }} (${it.algorithm})" }
             val keyIds = signingKeys.map { it.keyId }
 
@@ -2189,9 +2194,16 @@ class SettingsActivity : AppCompatActivity() {
             .setNegativeButton(getString(R.string.button_cancel), null)
             .setPositiveButton(getString(R.string.ca_reset)) { _, _ ->
                 lifecycleScope.launch {
-                    androidCA.reset()
+                    val reset = try {
+                        androidCA.reset()
+                        true
+                    } catch (e: com.automatethethings.xkey.crypto.KeyDeletionException) {
+                        // A CA private key may still be on the device: never "complete".
+                        false
+                    }
                     updateCAStatus()
-                    Snackbar.make(binding.root, "CA reset complete", Snackbar.LENGTH_SHORT).show()
+                    val message = if (reset) "CA reset complete" else getString(R.string.ca_reset_failed)
+                    Snackbar.make(binding.root, message, Snackbar.LENGTH_LONG).show()
                 }
             }
             .show()
@@ -2278,19 +2290,27 @@ class SettingsActivity : AppCompatActivity() {
 
     private fun saveCurrentNoiseConfig() {
         lifecycleScope.launch {
-            bootstrapSettingsRepository.updateNoiseSettings(
+            val saved = bootstrapSettingsRepository.updateNoiseSettings(
                 serverAddr = editTextNoiseServerAddress?.text?.toString()?.trim(),
                 serverStaticKey = editTextNoiseStaticKey?.text?.toString()?.trim()
             )
+            // A refused key writes nothing; the typed text stays so the user can correct it.
+            if (!saved) {
+                Snackbar.make(binding.root, getString(R.string.bootstrap_noise_key_refused), Snackbar.LENGTH_LONG).show()
+            }
         }
     }
 
     private fun saveCurrentSpkiConfig() {
         lifecycleScope.launch {
-            bootstrapSettingsRepository.updateSpkiSettings(
+            val saved = bootstrapSettingsRepository.updateSpkiSettings(
                 serverUrl = editTextSpkiServerUrl?.text?.toString()?.trim(),
                 pinSha256 = editTextSpkiPinSha256?.text?.toString()?.trim()
             )
+            // A refused pin writes nothing; the typed text stays so the user can correct it.
+            if (!saved) {
+                Snackbar.make(binding.root, getString(R.string.bootstrap_spki_pin_refused), Snackbar.LENGTH_LONG).show()
+            }
         }
     }
 
@@ -2467,7 +2487,7 @@ class SettingsActivity : AppCompatActivity() {
         }
         updateTimeWindowVisibility(settings.authMode)
 
-        val timeWindowIndex = timeWindowValues.indexOfFirst { it.seconds == settings.timeWindowSeconds }
+        val timeWindowIndex = timeWindowValues.indexOfFirst { it.seconds == settings.effectiveTimeWindowSeconds }
         if (timeWindowIndex >= 0) {
             spinnerTimeWindow?.setSelection(timeWindowIndex)
         }
@@ -2509,4 +2529,9 @@ class SettingsActivity : AppCompatActivity() {
             else -> super.onOptionsItemSelected(item)
         }
     }
+}
+
+/** The keys the media-signing picker offers: signing and FIDO2 keys MediaSigningService can sign with. */
+internal fun mediaSigningKeys(keys: List<KeyEntity>): List<KeyEntity> = keys.filter {
+    (it.keyType == "signing" || it.keyType == "fido2") && KeystoreManager.hasJcaSignature(it.algorithm)
 }

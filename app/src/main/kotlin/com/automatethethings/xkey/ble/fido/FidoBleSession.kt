@@ -34,8 +34,8 @@ import java.util.concurrent.atomic.AtomicReference
  * handed to [handler] while KEEPALIVE frames (PROCESSING, or UP_NEEDED once
  * the handler waits for the user) go out every [keepaliveIntervalMillis];
  * CANCEL stops the pending MSG, which then answers
- * CTAP2_ERR_KEEPALIVE_CANCEL. One MSG runs at a time, until it has sent its
- * response and cleaned up; another answers ERR_BUSY. Replies are fragmented
+ * CTAP2_ERR_KEEPALIVE_CANCEL. One MSG runs at a time, until it has cleaned up
+ * and its response goes out; another answers ERR_BUSY. Replies are fragmented
  * to [maxFrameSize], and every message's frames reach [send] together. A
  * request not received whole within [reassemblyTimeoutMillis] of its first
  * frame answers ERROR ERR_REQ_TIMEOUT and is dropped.
@@ -67,7 +67,7 @@ class FidoBleSession(
         var job: Job? = null
     }
 
-    /** The request in flight; cleared only by that request, once it is done. */
+    /** The request in flight; cleared only by that request, as its response goes out or it ends. */
     private val current = AtomicReference<Request?>(null)
 
     /** Held while one whole message's frames are handed to [send]. */
@@ -145,8 +145,7 @@ class FidoBleSession(
                     sendMessage(listOf(FidoBle.errorFrame(FidoBle.ERR_BUSY)))
                     return
                 }
-                // ATOMIC: the body runs even when CANCEL lands before the
-                // coroutine starts, so that request still gets its answer.
+                // ATOMIC: the body runs even if CANCEL lands first, so the request is answered.
                 request.job = scope.launch(start = CoroutineStart.ATOMIC) { run(request, data) }
             }
             else -> sendMessage(listOf(FidoBle.errorFrame(FidoBle.ERR_INVALID_CMD)))
@@ -168,10 +167,7 @@ class FidoBleSession(
                     )
                 }
             }
-            // The one way a request ends: exactly one MSG response, whether
-            // the authenticator answered, the client cancelled (even before
-            // the request started) or the authenticator failed. Only a closed
-            // session answers nothing.
+            // Exactly one MSG response per request, unless the session is closed.
             val response = try {
                 handler.handle(data) { waitingForUser.set(true) }
             } catch (e: CancellationException) {
@@ -183,7 +179,12 @@ class FidoBleSession(
                 // Joined, so no keepalive is sent after the response.
                 withContext(NonCancellable) { keepalive.cancelAndJoin() }
             }
-            reply(FidoBle.CMD_MSG, response)
+            val frames = FidoBle.fragment(FidoBle.CMD_MSG, response, maxFrameSize())
+            synchronized(sendLock) {
+                // Free before the frames leave: the client may write its next MSG as soon as it has them.
+                current.compareAndSet(request, null)
+                if (!closed) frames.forEach(send)
+            }
         } finally {
             current.compareAndSet(request, null)
         }

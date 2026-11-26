@@ -382,8 +382,7 @@ class RemoteBackupClient(
  * `xkey/pkg/pairing/bridge.go` `mapErrorToRPC`).
  *
  * These are the laptop's codes, not the phone's own
- * [com.automatethethings.xkey.protocol.ErrorCodes], which uses -32020, -32021
- * and -32038 for other conditions. Never merge the two.
+ * [com.automatethethings.xkey.protocol.ErrorCodes]. Never merge the two.
  */
 object RemoteBackupErrorCodes {
     /** go-xkms `pkg/pairingproto/protocol.go`: bad params, including an empty or missing password. */

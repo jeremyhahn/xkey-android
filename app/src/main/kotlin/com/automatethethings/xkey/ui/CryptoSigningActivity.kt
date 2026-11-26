@@ -174,10 +174,7 @@ class CryptoSigningActivity : FragmentActivity() {
         title: String,
         subtitle: String
     ) {
-        // Get private key from keystore; a full alias names the key exactly
-        // (the user verification key, or a passkey's resolved alias). Without
-        // one, the credential namespace, then the general one local.generateKey
-        // uses.
+        // A full alias names the key exactly; otherwise try the credential namespace, then the general one.
         val keyStore = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
         val alias = intent.getStringExtra(EXTRA_KEY_ALIAS)
             ?: listOf(KeystoreManager.credentialAlias(credentialId), KeystoreManager.generalKeyAlias(credentialId))

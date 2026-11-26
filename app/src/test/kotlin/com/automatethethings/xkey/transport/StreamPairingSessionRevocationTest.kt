@@ -15,6 +15,7 @@
 
 package com.automatethethings.xkey.transport
 
+import com.automatethethings.xkey.ble.NoiseTestKeyStore
 import android.app.KeyguardManager
 import android.app.NotificationManager
 import android.content.Context
@@ -23,6 +24,7 @@ import android.util.Log
 import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.ble.NoiseSession
 import com.automatethethings.xkey.ble.PairingConfirmationCallback
+import com.automatethethings.xkey.crypto.KeySecurityLevel
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.crypto.SoftwareKeyStore
 import com.automatethethings.xkey.piv.PivAlgorithm
@@ -30,6 +32,7 @@ import com.automatethethings.xkey.piv.PivKeyManager
 import com.automatethethings.xkey.piv.PivSlot
 import com.automatethethings.xkey.piv.PivSlotDao
 import com.automatethethings.xkey.piv.PivSlotInfo
+import com.automatethethings.xkey.piv.testPivKeyManager
 import com.automatethethings.xkey.protocol.ErrorCodes
 import com.automatethethings.xkey.protocol.MethodNames
 import com.automatethethings.xkey.protocol.RequestHandler
@@ -48,6 +51,7 @@ import com.automatethethings.xkey.settings.PairedDeviceRepository
 import com.automatethethings.xkey.settings.PeerNotPairedException
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.dao.KeyDao
+import com.automatethethings.xkey.storage.entity.SharingPolicyType
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
@@ -127,6 +131,7 @@ class StreamPairingSessionRevocationTest {
 
     @Before
     fun setUp() {
+        NoiseTestKeyStore.install()
         mockkStatic(Log::class)
         every { Log.v(any(), any<String>()) } returns 0
         every { Log.d(any(), any<String>()) } returns 0
@@ -703,6 +708,7 @@ class StreamPairingSessionRevocationTest {
         var deletedKeyId: String? = null
         assertRevokedAtAdmission { store ->
             deletedKeyId = store.keyId
+            keyRow(keyDao, store.keyId)
             val request = JSONObject().put("jsonrpc", "2.0").put("id", 1).put("method", "deleteKey")
                 .put("params", JSONObject().put("credentialId", store.keyId))
             val response = JSONObject(String(deleter.handleRawRequest(request.toString().toByteArray())))
@@ -711,7 +717,7 @@ class StreamPairingSessionRevocationTest {
                 response.optJSONObject("result")?.optBoolean("deleted") == true
             )
         }
-        coVerify { keyDao.deleteByKeyId(deletedKeyId!!) }
+        assertNull("the key's metadata row must be gone", tables.key(deletedKeyId!!))
     }
 
     /**
@@ -751,7 +757,7 @@ class StreamPairingSessionRevocationTest {
         mockkConstructor(SoftwareKeyStore::class)
         val stores = listOf<(KeystoreManager, KeyDao, String) -> Unit>(
             { keystore, _, id -> every { keystore.generalKeyExists(id) } returns true },
-            { keystore, _, id -> every { keystore.keyExists(id) } returns true },
+            { keystore, _, id -> every { keystore.keyExists(id, any()) } returns true },
             { _, _, id -> every { anyConstructed<SoftwareKeyStore>().contains(id) } returns true },
             { _, dao, id -> coEvery { dao.exists(id) } returns true },
         )
@@ -773,7 +779,7 @@ class StreamPairingSessionRevocationTest {
 
     /**
      * `local.deleteKey` is one revoke from its first removal: the real handler
-     * pauses right after the key's Keystore entry is gone, before its metadata
+     * pauses as the key's Keystore entry goes, before its metadata
      * row goes, and a share of the key waiting at admission resumes in that
      * window. The share is refused, with nothing written and no nonce
      * consumed, and the delete then completes.
@@ -783,18 +789,17 @@ class StreamPairingSessionRevocationTest {
         val keyDao = mockk<KeyDao>(relaxed = true)
         val removed = CompletableDeferred<Unit>()
         val finish = CountDownLatch(1)
-        val keystore = mockk<KeystoreManager>(relaxed = true)
         // The Keystore entry goes, then the delete pauses there.
-        every { keystore.deleteGeneralKey(any()) } answers {
+        val keystore = heldKeystore {
             removed.complete(Unit)
             finish.await(TIMEOUT_MS, TimeUnit.MILLISECONDS)
-            true
         }
         val deleter = realHandler(keyDao, keystore)
         var response: JSONObject? = null
         var deletedKeyId: String? = null
         assertRevokedAtAdmissionDuring { store, resumeShare ->
             deletedKeyId = store.keyId
+            keyRow(keyDao, store.keyId)
             val request = JSONObject().put("jsonrpc", "2.0").put("id", 3).put("method", "local.deleteKey")
                 .put("params", JSONObject().put("keyId", store.keyId))
             val deleting = scope.async(Dispatchers.IO) {
@@ -812,38 +817,32 @@ class StreamPairingSessionRevocationTest {
             "the delete must succeed, got $response",
             response?.optJSONObject("result")?.optBoolean("deleted") == true
         )
-        coVerify { keyDao.deleteByKeyId(deletedKeyId!!) }
+        assertTrue("the delete never reached the Keystore entry", removed.isCompleted)
+        assertNull("the key's metadata row must be gone", tables.key(deletedKeyId!!))
     }
 
     /**
-     * A delete through the alias form of a key's ID is a revoke of the key
-     * itself: the legacy `deleteKey` RPC with `credentialId = xkey_key_<id>`
-     * removes the same Keystore entry as `<id>`, so a share of `<id>` waiting
-     * at admission is refused, and `<id>`'s metadata row goes too.
+     * The alias form of a key's ID never names the key (#255): the legacy
+     * `deleteKey` RPC with `credentialId = xkey_key_<id>`, an alias with no
+     * user key of its own, is refused as an internal key before any row or
+     * material is touched, so `<id>`'s Keystore entry and metadata row stay.
      */
     @Test
-    fun aShareOfAKeyDeletedThroughItsAliasFormWhileItWaitsWritesNothing() = runBlocking<Unit> {
+    fun aDeleteThroughTheAliasFormOfAKeyIdIsRefusedAndDeletesNothing() = runBlocking<Unit> {
         val keyDao = mockk<KeyDao>(relaxed = true)
-        val keystore = mockk<KeystoreManager>(relaxed = true)
-        every { keystore.keyExists(any()) } returns true
-        every { keystore.deleteKey(any()) } returns true
-        // The raw alias resolves to itself, as KeystoreManager does for it.
-        every { keystore.resolveKeystoreAlias(any()) } answers {
-            firstArg<String>().takeIf { it.startsWith("xkey_key_") }
-        }
+        val keystore = heldKeystore()
+        every { keystore.holdsInternalKey(any()) } answers { firstArg<String>().startsWith("xkey_key_") }
         val deleter = realHandler(keyDao, keystore)
-        var deletedKeyId: String? = null
-        assertRevokedAtAdmission { store ->
-            deletedKeyId = store.keyId
-            val request = JSONObject().put("jsonrpc", "2.0").put("id", 4).put("method", "deleteKey")
-                .put("params", JSONObject().put("credentialId", "xkey_key_" + store.keyId))
-            val response = JSONObject(String(deleter.handleRawRequest(request.toString().toByteArray())))
-            assertTrue(
-                "the delete must succeed, got $response",
-                response.optJSONObject("result")?.optBoolean("deleted") == true
-            )
-        }
-        coVerify { keyDao.deleteByKeyId(deletedKeyId!!) }
+        val request = JSONObject().put("jsonrpc", "2.0").put("id", 4).put("method", "deleteKey")
+            .put("params", JSONObject().put("credentialId", "xkey_key_shared"))
+        val response = JSONObject(String(deleter.handleRawRequest(request.toString().toByteArray())))
+        assertEquals(
+            "the alias form must be refused, got $response",
+            ErrorCodes.OPERATION_DENIED,
+            response.optJSONObject("error")?.optInt("code")
+        )
+        verify(exactly = 0) { keystore.deleteUserKeyGeneration(any(), any()) }
+        coVerify(exactly = 0) { keyDao.deleteByKeyId(any()) }
     }
 
     /**
@@ -985,7 +984,7 @@ class StreamPairingSessionRevocationTest {
             finish.await(TIMEOUT_MS, TimeUnit.MILLISECONDS)
             Unit
         }
-        val manager = PivKeyManager(mockk<PivSlotDao>(relaxed = true))
+        val manager = testPivKeyManager(mockk<PivSlotDao>(relaxed = true), pqcStore = mockk(relaxed = true))
         assertRevokedAtAdmissionDuring(slot.keystoreAlias) { _, resumeShare ->
             val deleting = scope.async(Dispatchers.IO) { manager.deleteKey(slot) }
             try {
@@ -1012,11 +1011,16 @@ class StreamPairingSessionRevocationTest {
         val replacing = CompletableDeferred<Unit>()
         val finish = CountDownLatch(1)
         val newKey = keyPair(ByteArray(91) { 5 })
-        val manager = PivKeyManager(mockk<PivSlotDao>(relaxed = true)) { _, _ ->
-            replacing.complete(Unit)
-            finish.await(TIMEOUT_MS, TimeUnit.MILLISECONDS)
-            newKey
-        }
+        val manager = testPivKeyManager(
+            mockk<PivSlotDao>(relaxed = true),
+            pqcStore = mockk(relaxed = true),
+            generateKeyPair = { _, _ ->
+                replacing.complete(Unit)
+                finish.await(TIMEOUT_MS, TimeUnit.MILLISECONDS)
+                newKey
+            },
+            securityLevelOf = { KeySecurityLevel.TEE }
+        )
         var generated: PivSlotInfo? = null
         assertRevokedAtAdmissionDuring(slot.keystoreAlias) { _, resumeShare ->
             val generating = scope.async(Dispatchers.IO) { manager.generateKey(slot, PivAlgorithm.ES256) }
@@ -1040,7 +1044,12 @@ class StreamPairingSessionRevocationTest {
         val slot = PivSlot.CARD_AUTHENTICATION
         pivEdges()
         val newKey = keyPair(ByteArray(91) { 7 })
-        val manager = PivKeyManager(mockk<PivSlotDao>(relaxed = true)) { _, _ -> newKey }
+        val manager = testPivKeyManager(
+            mockk<PivSlotDao>(relaxed = true),
+            pqcStore = mockk(relaxed = true),
+            generateKeyPair = { _, _ -> newKey },
+            securityLevelOf = { KeySecurityLevel.TEE }
+        )
         val phone = connectPaired()
         val router = BidirectionalMessageRouter(requestHandler)
         val session = ShareSession.of(listOf(ShareSession.Transport(pairing.boundSender()!!.second, router))) { true }!!
@@ -1088,18 +1097,51 @@ class StreamPairingSessionRevocationTest {
         return JSONObject(String(handler.handleRawRequest(request.toString().toByteArray())))
     }
 
+    /** The key rows, policies and grants of [realHandler]'s key store. */
+    private val tables = com.automatethethings.xkey.storage.FakeKeyPolicyTables()
+
+    /**
+     * Gives [keyId] a key row in [tables], the row [keyDao] reads for it,
+     * as a key the handler deletes has.
+     */
+    private fun keyRow(keyDao: KeyDao, keyId: String) {
+        tables.addKey(keyId, SharingPolicyType.ALL_PEERS)
+        coEvery { keyDao.getByKeyId(keyId) } returns tables.key(keyId)
+    }
+
+    /**
+     * A Keystore holding one general key under every user-key id, as this
+     * branch's delete reads it: the id names its own key, never an internal
+     * one, and its material generation is the `xkey_key_<id>` entry, which
+     * [onDelete] (run before it goes) then removes.
+     */
+    private fun heldKeystore(onDelete: () -> Unit = {}): KeystoreManager =
+        mockk<KeystoreManager>(relaxed = true).also {
+            every { it.keyExists(any(), any()) } returns true
+            every { it.userKeyIdInUse(any()) } returns true
+            every { it.holdsAnyKey(any()) } returns true
+            every { it.holdsInternalKey(any()) } returns false
+            every { it.userKeyGeneration(any()) } answers { mapOf("keystore:xkey_key_${firstArg<String>()}" to "1") }
+            every { it.deleteUserKeyGeneration(any(), any()) } answers {
+                onDelete()
+                emptyMap()
+            }
+        }
+
     /** The real [RequestHandler] with only its Android and storage edges mocked. */
     private fun realHandler(
         keyDao: KeyDao,
-        keystore: KeystoreManager = mockk<KeystoreManager>(relaxed = true).also {
-            every { it.keyExists(any()) } returns true
-            every { it.deleteKey(any()) } returns true
-        },
+        keystore: KeystoreManager = heldKeystore(),
     ): RequestHandler {
         mockkStatic(Looper::class)
         every { Looper.getMainLooper() } returns mockk(relaxed = true)
         val database = mockk<XKeyDatabase>(relaxed = true)
         every { database.keyDao() } returns keyDao
+        // The handler's key store is over the in-memory [tables], its
+        // transaction inline: a mock database has no Room transaction
+        // executor, so withTransaction would never return.
+        mockkObject(com.automatethethings.xkey.storage.KeyPolicyStore.Companion)
+        every { com.automatethethings.xkey.storage.KeyPolicyStore.of(any(), any()) } answers { tables.store() }
         mockkObject(XKeyDatabase.Companion)
         every { XKeyDatabase.getInstance(any()) } returns database
         every { context.getSystemService(Context.KEYGUARD_SERVICE) } returns mockk<KeyguardManager>(relaxed = true)

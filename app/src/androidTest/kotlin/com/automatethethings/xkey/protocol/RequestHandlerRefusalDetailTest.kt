@@ -82,7 +82,7 @@ class RequestHandlerRefusalDetailTest {
 
         /**
          * A paired desktop, so a co-sign request is from a confirmed peer and
-         * reaches the digest checks (#177): an anonymous session is refused
+         * reaches the digest checks: an anonymous session is refused
          * before its digest is ever decoded.
          */
         private val peerKeyHex =
@@ -208,7 +208,7 @@ class RequestHandlerRefusalDetailTest {
     /**
      * Same shape on the PIV side: the slot and the certificate are validated
      * separately, and a certificate that is not base64 must be refused after
-     * the slot has been accepted, as a bad parameter rather than a crash (#173).
+     * the slot has been accepted, as a bad parameter rather than a crash.
      */
     @Test
     fun importingAPivCertificateThatIsNotBase64IsRejected() {
@@ -280,7 +280,7 @@ class RequestHandlerRefusalDetailTest {
      * validation and reaches the owner's approval, which is what makes the
      * refusals above attributable to the digest rather than to the peer or
      * the key. This handler has no prompt to show, so the owner cannot
-     * approve and nothing is signed (#177).
+     * approve and nothing is signed.
      */
     @Test
     fun cosignOfAWellFormedDigestStillNeedsTheOwnersApproval() {

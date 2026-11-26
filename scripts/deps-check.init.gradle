@@ -1,7 +1,4 @@
-// Init script for `make deps-check` (scripts/deps-check.sh): applies the
-// gradle-versions-plugin to the root project without touching the build
-// files. deps-check.sh downloads the plugin jar and checks it against
-// DEPS_CHECK_PLUGIN_SHA256 in scripts/tool-pins.sh before Gradle reads this.
+// Applies gradle-versions-plugin for `make deps-check`; deps-check.sh verifies the jar's pinned SHA-256 first.
 initscript {
     repositories {
         mavenCentral()

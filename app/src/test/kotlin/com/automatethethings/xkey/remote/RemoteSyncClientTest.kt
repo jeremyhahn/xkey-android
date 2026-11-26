@@ -15,12 +15,21 @@
 package com.automatethethings.xkey.remote
 
 import android.content.Context
+import android.net.Uri
+import com.automatethethings.xkey.audit.AuditLogDao
+import com.automatethethings.xkey.audit.AuditLogEntity
 import com.automatethethings.xkey.audit.AuditLogger
+import com.automatethethings.xkey.oath.OathCredentialDao
+import com.automatethethings.xkey.oath.OathSecretManager
 import com.automatethethings.xkey.password.PasswordStoreLockedException
 import com.automatethethings.xkey.protocol.ErrorCodes
 import com.automatethethings.xkey.protocol.ProtocolException
 import com.automatethethings.xkey.protocol.RequestHandler
+import com.automatethethings.xkey.protocol.RpcId
+import com.automatethethings.xkey.storage.XKeyDatabase
+import com.automatethethings.xkey.protocol.Request
 import com.automatethethings.xkey.sync.SyncEngine
+import com.automatethethings.xkey.truststore.TestCertificates
 import com.automatethethings.xkey.R
 import com.automatethethings.xkey.ui.SyncStatusText
 import io.mockk.coEvery
@@ -29,9 +38,12 @@ import io.mockk.every
 import io.mockk.mockk
 import io.mockk.mockkConstructor
 import io.mockk.mockkObject
+import io.mockk.mockkStatic
 import io.mockk.slot
 import io.mockk.unmockkAll
 import io.mockk.verify
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -45,9 +57,14 @@ import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Before
 import org.junit.Test
+import java.net.URI
+import java.net.URLDecoder
+import java.nio.file.Files
+import java.security.KeyStore
 import java.security.SecureRandom
 import java.time.ZoneOffset
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Unit tests for [RemoteSyncClient], the phone-initiated (`remote.sync*`) half
@@ -87,6 +104,8 @@ class RemoteSyncClientTest {
 
     @After
     fun tearDown() {
+        auditHolder<AuditLogDao>("daoRef").set(null)
+        auditHolder<CoroutineScope>("scopeRef").set(null)
         unmockkAll()
     }
 
@@ -112,13 +131,19 @@ class RemoteSyncClientTest {
         return String(CharArray(16) { 'a' + random.nextInt(26) })
     }
 
-    /** Stubs every gather to empty and every merge to zero counts. */
-    private fun stubIdleEngine() {
+    /**
+     * Stubs every gather to empty and every merge to zero counts. With
+     * [realCertificateMerge] the certificate merge is left unstubbed, so the
+     * constructor mock passes it to the real suspend method.
+     */
+    private fun stubIdleEngine(realCertificateMerge: Boolean = false) {
         coEvery { anyConstructed<SyncEngine>().gatherCertificates() } returns JSONArray()
         coEvery { anyConstructed<SyncEngine>().gatherOath() } returns JSONArray()
         coEvery { anyConstructed<SyncEngine>().gatherPasswords() } returns JSONArray()
-        coEvery { anyConstructed<SyncEngine>().mergeCertificates(any()) } returns
-            SyncEngine.CertCounts(added = 0, skipped = 0)
+        if (!realCertificateMerge) {
+            coEvery { anyConstructed<SyncEngine>().mergeCertificates(any()) } returns
+                SyncEngine.CertCounts(added = 0, skipped = 0)
+        }
         coEvery { anyConstructed<SyncEngine>().mergeOath(any()) } returns
             SyncEngine.ItemCounts(added = 0, updated = 0, skipped = 0)
         coEvery { anyConstructed<SyncEngine>().mergePasswords(any()) } returns
@@ -421,6 +446,163 @@ class RemoteSyncClientTest {
         }
     }
 
+    @Suppress("UNCHECKED_CAST")
+    private fun <T> auditHolder(name: String): AtomicReference<T?> =
+        AuditLogger::class.java.getDeclaredField(name)
+            .apply { isAccessible = true }
+            .get(AuditLogger) as AtomicReference<T?>
+
+    /** Routes real AuditLogger writes into [audited] so entries are read by type name. */
+    private fun captureAudit(): MutableList<AuditLogEntity> {
+        val audited = mutableListOf<AuditLogEntity>()
+        val dao = mockk<AuditLogDao>(relaxed = true)
+        coEvery { dao.insert(any()) } answers {
+            audited += firstArg<AuditLogEntity>()
+            audited.size.toLong()
+        }
+        auditHolder<AuditLogDao>("daoRef").set(dao)
+        auditHolder<CoroutineScope>("scopeRef").set(CoroutineScope(Dispatchers.Unconfined))
+        return audited
+    }
+
+    /** Answers the trust-store leg with [trustStoreReply] and every other leg with an empty success. */
+    private fun replyPerLeg(trustStoreReply: (Request) -> String) {
+        sender.replyWith { request ->
+            if (request.method == "remote.syncTrustStore") trustStoreReply(request)
+            else """{"id":${request.id},"result":{"added":0,"updated":0,"local":[]}}"""
+        }
+    }
+
+    @Test
+    fun `syncAll with a self-signed root in the trust-store reply still syncs the other stores`() = runTest {
+        val audited = captureAudit()
+        // The real certificate merge, with no stub answer around it, runs
+        // against a trust store in a temp directory.
+        stubIdleEngine(realCertificateMerge = true)
+        val trustStoreDir = Files.createTempDirectory("trust_store").toFile()
+        every { context.getDir("trust_store", Context.MODE_PRIVATE) } returns trustStoreDir
+        val root = JSONObject()
+            .put("pem", TestCertificates.ROOT_CA_A_PEM)
+            .put("fingerprint", TestCertificates.fingerprint(TestCertificates.ROOT_CA_A_PEM))
+        replyPerLeg { request ->
+            """{"id":${request.id},"result":{"added":0,"local":${JSONArray().put(root)}}}"""
+        }
+
+        val result = auditedClient().syncAll()
+
+        assertEquals(
+            listOf("remote.syncTrustStore", "remote.syncOATH", "remote.syncPasswords"),
+            sender.sent.map { it.method }
+        )
+        coVerify(exactly = 1) { anyConstructed<SyncEngine>().markSynced() }
+        // The trust-store leg succeeded: the root was refused, not stored.
+        val entry = audited.single { it.operationType.name == "TRUST_STORE_SYNC_PERFORMED" }
+        assertEquals(true, entry.success)
+        val details = JSONObject(entry.details!!)
+        assertEquals(0, details.getInt("added"))
+        assertEquals(1, details.getInt("skipped"))
+        assertEquals(0, result.certsPulled)
+        assertEquals(0, trustStoreDir.listFiles()?.size ?: 0)
+    }
+
+    @Test
+    fun `syncAll still syncs the other stores when the trust-store leg fails`() = runTest {
+        stubIdleEngine()
+        replyPerLeg { request ->
+            """{"id":${request.id},"error":{"code":-32603,"message":"trust store unavailable"}}"""
+        }
+
+        auditedClient().syncAll()
+
+        assertEquals(
+            listOf("remote.syncTrustStore", "remote.syncOATH", "remote.syncPasswords"),
+            sender.sent.map { it.method }
+        )
+        coVerify(exactly = 1) { anyConstructed<SyncEngine>().markSynced() }
+    }
+
+    @Test
+    fun `syncTrustStore records one outbound entry with counts and the desktop`() = runTest {
+        val audited = captureAudit()
+        stubIdleEngine()
+        coEvery { anyConstructed<SyncEngine>().gatherCertificates() } returns certificates("aa")
+        coEvery { anyConstructed<SyncEngine>().mergeCertificates(any()) } returns
+            SyncEngine.CertCounts(added = 1, skipped = 2)
+        sender.succeedWith("""{"added":1,"local":${certificates("bb", "cc", "dd")}}""")
+
+        auditedClient().syncTrustStore()
+
+        val entry = audited.single { it.operationType.name == "TRUST_STORE_SYNC_PERFORMED" }
+        assertEquals(true, entry.success)
+        assertEquals(DESK_PEER, entry.deviceId)
+        assertEquals(DESK_NAME, entry.deviceName)
+        val details = JSONObject(entry.details!!)
+        assertEquals("outbound", details.getString("direction"))
+        assertEquals(1, details.getInt("added"))
+        assertEquals(2, details.getInt("skipped"))
+        assertFalse(entry.details!!.contains("BEGIN CERTIFICATE"))
+    }
+
+    @Test
+    fun `syncAll still runs the password leg when the OATH reply carries an invalid item`() = runTest {
+        // The real OATH merge, over a recording DAO; every other store is idle.
+        coEvery { anyConstructed<SyncEngine>().gatherCertificates() } returns JSONArray()
+        coEvery { anyConstructed<SyncEngine>().gatherOath() } returns JSONArray()
+        coEvery { anyConstructed<SyncEngine>().gatherPasswords() } returns JSONArray()
+        coEvery { anyConstructed<SyncEngine>().mergeCertificates(any()) } returns
+            SyncEngine.CertCounts(added = 0, skipped = 0)
+        coEvery { anyConstructed<SyncEngine>().mergePasswords(any()) } returns
+            SyncEngine.ItemCounts(added = 0, updated = 0, skipped = 0)
+        val dao = mockk<OathCredentialDao>(relaxed = true)
+        coEvery { dao.getByOathId(any()) } returns null
+        coEvery { dao.insertIfAbsent(any()) } returns 1L
+        val db = mockk<XKeyDatabase>()
+        every { db.oathCredentialDao() } returns dao
+        mockkObject(XKeyDatabase.Companion)
+        every { XKeyDatabase.getInstance(any()) } returns db
+        mockkStatic(KeyStore::class)
+        every { KeyStore.getInstance("AndroidKeyStore") } returns mockk(relaxed = true)
+        mockkConstructor(OathSecretManager::class)
+        every { anyConstructed<OathSecretManager>().encryptSecret(any()) } answers { firstArg() }
+        mockkStatic(Uri::class)
+        every { Uri.parse(any()) } answers { jvmUri(firstArg()) }
+        // A synced add writes a created row; the logger is not initialized on the JVM.
+        mockkObject(AuditLogger)
+        every { AuditLogger.logOathCredentialCreated(any(), any(), any(), any(), any(), any()) } returns Unit
+
+        val oathReply = JSONArray()
+            .put(JSONObject().put("id", "good").put("account_name", "alice").put("secret", "JBSWY3DPEHPK3PXP"))
+            .put(JSONObject().put("id", "bad").put("account_name", "bob").put("secret", "ABC1!"))
+        sender.replyWith { request ->
+            val local = if (request.method == "remote.syncOATH") oathReply else JSONArray()
+            """{"id":${request.id},"result":{"added":0,"updated":0,"local":$local}}"""
+        }
+
+        val result = client.syncAll()
+
+        assertEquals(
+            listOf("remote.syncTrustStore", "remote.syncOATH", "remote.syncPasswords"),
+            sender.sent.map { it.method }
+        )
+        assertEquals(1, result.oathPulled)
+        coVerify(exactly = 1) { anyConstructed<SyncEngine>().mergePasswords(any()) }
+        coVerify(exactly = 1) { anyConstructed<SyncEngine>().markSynced() }
+    }
+
+    /** An android [Uri] answering what the OATH import reads, from [URI] (the JVM has no android.net). */
+    private fun jvmUri(uriString: String): Uri {
+        val uri = URI(uriString)
+        val params = uri.rawQuery.orEmpty().split("&").filter { it.isNotEmpty() }
+            .map { it.split("=", limit = 2) }
+            .associate { it[0] to URLDecoder.decode(it.getOrElse(1) { "" }, Charsets.UTF_8.name()) }
+        return mockk {
+            every { scheme } returns uri.scheme
+            every { host } returns uri.host
+            every { encodedPath } returns uri.rawPath
+            every { getQueryParameter(any()) } answers { params[firstArg()] }
+        }
+    }
+
     @Test
     fun `sync answers as before when the audit logger is not initialized`() = runTest {
         assertFalse(AuditLogger.isInitialized())
@@ -595,7 +777,7 @@ class RemoteSyncClientTest {
         stubIdleEngine()
         sender.neverReply()
         expectProtocolException { client.syncOath() }
-        val abandoned = sender.lastRequest.id
+        val abandoned = sender.lastRequest.id.longValueOrNull()!!
 
         // A late reply for the abandoned id must be discarded, not applied.
         router.processMessage("""{"id":$abandoned,"result":{"local":[]}}""".toByteArray())
@@ -603,7 +785,7 @@ class RemoteSyncClientTest {
 
         client.syncOath()
 
-        assertEquals(abandoned + 1, sender.lastRequest.id)
+        assertEquals(RpcId.of(abandoned + 1), sender.lastRequest.id)
     }
 
     // --- SyncResult ---------------------------------------------------------

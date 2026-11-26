@@ -485,6 +485,21 @@ class BleClientPhoneInitiatedAttestTest {
         assertTrue("the handler must not see it", handler.requests.isEmpty())
     }
 
+    /** The refusal carries the request's id exactly as sent, a string included. */
+    @Test
+    fun aRefusedMethodEchoesAStringIdAsSent(): Unit = runBlocking {
+        val handler = RecordingHandler()
+        val h = harness(handler)
+        h.client.connect(h.address, randomKey())
+
+        h.desktopSends("""{"jsonrpc":"2.0","id":"abc","method":"local.listKeys"}""".toByteArray())
+
+        val answer = JSONObject(String(h.awaitResponses(1)[0], Charsets.UTF_8))
+        assertEquals("abc", answer.get("id"))
+        assertEquals(ErrorCodes.METHOD_NOT_FOUND, answer.getJSONObject("error").getInt("code"))
+        assertTrue("the handler must not see it", handler.requests.isEmpty())
+    }
+
     /** Without a handler the desktop is told no, rather than left to time out. */
     @Test
     fun withNoHandlerTheAttestationIsRefused(): Unit = runBlocking {

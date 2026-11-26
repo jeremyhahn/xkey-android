@@ -129,11 +129,24 @@ class GattServerOutboundProbe(val server: GattServer) {
         invoke(sendNotificationMethod, device, characteristic, data)
     }
 
+    /**
+     * Sends on the server's current [noiseSession], as the enrollment ceremony
+     * does on the session it was started for.
+     *
+     * The session is passed as the server holds it, null included: a private
+     * Kotlin parameter carries no null check, and the refusals these suites
+     * pin (no router, no device, no channel) all come before it is read.
+     */
     suspend fun sendRequestAndWaitForResponse(method: String, params: JSONObject): JSONObject =
-        callSuspend(sendRequestMethod, method, params) as JSONObject
+        callSuspend(sendRequestMethod, noiseSession, method, params) as JSONObject
 
+    /**
+     * Runs the ceremony on the server's current [noiseSession], the one
+     * `pairing.confirm` hands it when the desktop pairs. As with
+     * [sendRequestAndWaitForResponse], a null session is passed through.
+     */
     suspend fun performPostPairingEnrollment(publicKeyHex: String, deviceName: String) {
-        callSuspend(enrollmentMethod, publicKeyHex, deviceName)
+        callSuspend(enrollmentMethod, publicKeyHex, deviceName, noiseSession)
     }
 
     /**
@@ -195,8 +208,12 @@ class GattServerOutboundProbe(val server: GattServer) {
     suspend fun interceptOrRoute(plaintext: ByteArray): ByteArray? =
         callSuspend(interceptOrRouteMethod, plaintext) as ByteArray?
 
+    /**
+     * Passes the server's current session (null when it has none), as
+     * `interceptOrRoute` does for a request that arrived on it.
+     */
     suspend fun handlePairingConfirmIfNeeded(plaintext: ByteArray): ByteArray? =
-        callSuspend(pairingConfirmMethod, plaintext) as ByteArray?
+        callSuspend(pairingConfirmMethod, plaintext, noiseSession) as ByteArray?
 
     // -----------------------------------------------------------------
     // Reflection plumbing
@@ -244,6 +261,7 @@ class GattServerOutboundProbe(val server: GattServer) {
         )
         private val sendRequestMethod = declaredMethod(
             "sendRequestAndWaitForResponse",
+            NoiseSession::class.java,
             String::class.java,
             JSONObject::class.java,
             Continuation::class.java
@@ -252,6 +270,7 @@ class GattServerOutboundProbe(val server: GattServer) {
             "performPostPairingEnrollment",
             String::class.java,
             String::class.java,
+            NoiseSession::class.java,
             Continuation::class.java
         )
         private val refuseMethod = declaredMethod(
@@ -294,7 +313,10 @@ class GattServerOutboundProbe(val server: GattServer) {
             "interceptOrRoute", ByteArray::class.java, Continuation::class.java
         )
         private val pairingConfirmMethod = declaredMethod(
-            "handlePairingConfirmIfNeeded", ByteArray::class.java, Continuation::class.java
+            "handlePairingConfirmIfNeeded",
+            ByteArray::class.java,
+            NoiseSession::class.java,
+            Continuation::class.java
         )
 
         private fun declaredMethod(name: String, vararg types: Class<*>): Method = try {

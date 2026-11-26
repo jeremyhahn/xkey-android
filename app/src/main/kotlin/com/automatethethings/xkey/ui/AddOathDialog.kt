@@ -222,7 +222,7 @@ object AddOathDialog {
                 }
             }
         }
-        dialog.show()
+        SecureScreens.show(dialog)
     }
 
     // -------------------------------------------------------------------------

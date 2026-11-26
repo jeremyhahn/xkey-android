@@ -27,6 +27,8 @@ import androidx.credentials.provider.BeginGetPublicKeyCredentialOption
 import androidx.credentials.provider.CallingAppInfo
 import androidx.credentials.provider.ProviderCreateCredentialRequest
 import androidx.credentials.provider.ProviderGetCredentialRequest
+import io.mockk.every
+import io.mockk.mockk
 import org.json.JSONArray
 import org.json.JSONObject
 import java.security.MessageDigest
@@ -66,6 +68,26 @@ object CredentialRequestFixtures {
         packageName: String = "com.example.fakebrowser",
         origin: String = "https://not-my-site.example.com"
     ): CallingAppInfo = CallingAppInfo(packageName, SigningInfo(), origin)
+
+    /**
+     * A privileged browser that Android verified to be on `https://<rpId>`:
+     * the only caller whose own `clientDataHash` the handlers accept, and the
+     * caller every successful ceremony needs. Android verifies a browser by its
+     * package and signing certificate, which a test cannot present, so the
+     * verified origin is mocked.
+     */
+    fun privilegedBrowserOn(
+        rpId: String,
+        packageName: String = "com.android.chrome"
+    ): CallingAppInfo = mockk(relaxed = true) {
+        every { this@mockk.packageName } returns packageName
+        every { isOriginPopulated() } returns true
+        every { getOrigin(any()) } returns "https://$rpId"
+    }
+
+    /** The default caller: a privileged browser on [rpId], or no origin when there is none. */
+    private fun browserFor(rpId: String?): CallingAppInfo =
+        rpId?.takeIf { it.isNotEmpty() }?.let { privilegedBrowserOn(it) } ?: appWithoutOrigin()
 
     /** A registration request in the shape Chrome/Vanadium send. */
     fun createRequestJson(
@@ -154,8 +176,9 @@ object CredentialRequestFixtures {
 
     /**
      * The `clientDataHash` a privileged browser supplies through Credential
-     * Manager. Its presence is what lets a ceremony skip origin verification:
-     * the browser, not this provider, authored and will bind the client data.
+     * Manager. The browser, not this provider, authored the client data, so it
+     * is taken only from a privileged browser on an origin the rpId is valid
+     * for: the handlers verify the caller's origin whether or not it is present.
      */
     val BROWSER_CLIENT_DATA_HASH: ByteArray =
         MessageDigest.getInstance("SHA-256").digest("xkey-fixture-client-data".toByteArray())
@@ -168,14 +191,17 @@ object CredentialRequestFixtures {
      * The final-phase registration request, exactly as
      * `CredentialProviderService` would hand it to the handler.
      *
-     * @param clientDataHash non-null models a privileged browser; null forces
-     *        the provider to author client data itself, which requires a
-     *        verified origin for [callingAppInfo].
+     * @param clientDataHash non-null models a browser-authored hash; null forces
+     *        the provider to author client data itself. Either way the caller
+     *        needs a verified origin the rpId is valid for.
+     * @param callingAppInfo defaults to a privileged browser on the request's
+     *        rp.id (no origin when the request names none).
      */
     fun providerCreateRequest(
         requestJson: String,
         clientDataHash: ByteArray? = BROWSER_CLIENT_DATA_HASH,
-        callingAppInfo: CallingAppInfo = appWithoutOrigin()
+        callingAppInfo: CallingAppInfo =
+            browserFor(JSONObject(requestJson).optJSONObject("rp")?.optString("id"))
     ): ProviderCreateCredentialRequest = ProviderCreateCredentialRequest(
         CreatePublicKeyCredentialRequest(
             requestJson = requestJson,
@@ -188,7 +214,7 @@ object CredentialRequestFixtures {
     fun providerGetRequest(
         requestJson: String,
         clientDataHash: ByteArray? = BROWSER_CLIENT_DATA_HASH,
-        callingAppInfo: CallingAppInfo = appWithoutOrigin()
+        callingAppInfo: CallingAppInfo = browserFor(JSONObject(requestJson).optString("rpId"))
     ): ProviderGetCredentialRequest = ProviderGetCredentialRequest(
         listOf(
             GetPublicKeyCredentialOption(

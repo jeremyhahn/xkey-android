@@ -148,6 +148,9 @@ enum class AuditOperationType {
     /** Passwords were synced with a paired device. */
     PASSWORD_SYNC_PERFORMED,
 
+    /** Trust-store certificates were synced with a paired device. */
+    TRUST_STORE_SYNC_PERFORMED,
+
     // Co-signing operations
     /** A co-sign request was initiated. */
     COSIGN_INITIATED,
@@ -192,7 +195,13 @@ enum class AuditOperationType {
     /** A paired desktop stored an encrypted backup on the phone. */
     BACKUP_CREATED,
     /** A paired desktop fetched a stored backup from the phone. */
-    BACKUP_RESTORED
+    BACKUP_RESTORED,
+
+    // Audit log maintenance (stored by name, so no schema change)
+    /** The user cleared the whole audit log; details carry the deleted count. */
+    AUDIT_LOG_CLEARED,
+    /** The user deleted old audit entries; details carry the count and cutoff. */
+    AUDIT_LOG_PRUNED
 }
 
 /**

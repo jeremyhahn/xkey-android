@@ -1,28 +1,33 @@
 # Hardware-backed keys architecture
 
-> **Status: REFERENCE** · Last verified: 2026-10-09
-> As-built description of xKey's hardware-backed key hierarchy and signing flows, and of the application architecture, component map and data model that serve it.
+> **Status: REFERENCE** · Last verified: 2026-11-23
+> As-built description of xKey's key hierarchy and signing flows, followed by the app's component map and Room schema, which the key code depends on.
 
-This document describes the hardware-backed cryptography system in xKey, including
-the key hierarchy, supported algorithms, key lifecycle, signing flows, and the
-ECIES file encryption scheme.
+This document covers the keys xKey holds: which algorithms it supports, where
+each key lives, how a key is generated, used and deleted, and the `local.*`
+RPCs a paired desktop uses to drive them. The second half maps the app's
+activities, services and storage.
 
-## Design Principle
+## Design principle
 
-All asymmetric private key operations execute inside Android Keystore, which
-delegates to TEE (Trusted Execution Environment) or StrongBox (dedicated secure
-element) hardware. Private keys never leave the secure boundary. Derived
-symmetric keys (e.g., from ECDH) are used in software only after the
-hardware-protected key agreement step.
+Asymmetric private keys are generated and used inside Android Keystore, which
+puts them in the TEE (Trusted Execution Environment) or in StrongBox (a
+separate secure element) when the device has one. The private key never
+leaves that boundary. There are three exceptions, all stored encrypted at rest
+in app storage rather than in Keystore: Ed25519 keys, which Keystore cannot
+create; exportable symmetric keys (see `docs/exportable-symmetric-keys/`); and
+the Noise static key. Symmetric keys derived from an ECDH agreement, such as
+the file encryption key, are used in software after the agreement runs in
+Keystore.
 
-## Key Hierarchy
+## Key hierarchy
 
 ```mermaid
 graph TB
     subgraph Hardware["Android Keystore (TEE / StrongBox)"]
         FIDO[FIDO2 Keys<br/>PURPOSE_SIGN<br/>EC P-256]
-        SIGN[Signing Keys<br/>PURPOSE_SIGN<br/>EC P-256/384/521, RSA]
-        AGREE[Encryption Keys<br/>PURPOSE_AGREE_KEY<br/>EC P-256]
+        SIGN[EC keys<br/>PURPOSE_SIGN + PURPOSE_AGREE_KEY on API 31+<br/>P-256/384/521]
+        RSA[RSA keys<br/>PURPOSE_SIGN + PURPOSE_DECRYPT<br/>2048/3072/4096]
         AES[Symmetric Keys<br/>PURPOSE_ENCRYPT/DECRYPT<br/>AES-128/256-GCM]
         HMAC[HMAC Keys<br/>PURPOSE_SIGN/VERIFY<br/>HMAC-SHA256/512]
         EPHEM[Ephemeral Keys<br/>PURPOSE_AGREE_KEY<br/>EC P-256, single-use]
@@ -37,9 +42,9 @@ graph TB
     end
 ```
 
-## Supported Algorithms
+## Supported algorithms
 
-### Asymmetric Signing
+### Asymmetric signing
 
 | Algorithm | Curve / Size | JCA Algorithm | Key Purpose |
 |-----------|-------------|---------------|-------------|
@@ -50,8 +55,14 @@ graph TB
 | RS384 | RSA 3072 | SHA384withRSA | `PURPOSE_SIGN` |
 | RS512 | RSA 4096 | SHA512withRSA | `PURPOSE_SIGN` |
 | Ed25519 | Curve25519 | Ed25519 (JCE) | Software only |
+| ML-DSA-44 | FIPS 204, COSE -48 | Pure ML-DSA (Bouncy Castle, or the Keystore backend) | Software (Keystore-wrapped) or hardware where reported |
+| ML-DSA-65 | FIPS 204, COSE -49 | Pure ML-DSA (Bouncy Castle, or the Keystore backend) | Software (Keystore-wrapped) or hardware where reported |
+| ML-DSA-87 | FIPS 204, COSE -50 | Pure ML-DSA (Bouncy Castle, or the Keystore backend) | Software (Keystore-wrapped) or hardware where reported |
 
-### Symmetric Encryption
+ML-DSA keys and their two backings are described in
+[../pqc-keys/architecture.md](../pqc-keys/architecture.md).
+
+### Symmetric encryption
 
 | Algorithm | Key Size | Mode | Key Purpose |
 |-----------|----------|------|-------------|
@@ -65,7 +76,7 @@ graph TB
 | HMAC-SHA256 | 32 bytes | `PURPOSE_SIGN \| PURPOSE_VERIFY` |
 | HMAC-SHA512 | 64 bytes | `PURPOSE_SIGN \| PURPOSE_VERIFY` |
 
-### Key Agreement
+### Key agreement
 
 | Algorithm | Curve | Key Purpose |
 |-----------|-------|-------------|
@@ -81,7 +92,7 @@ before the device was upgraded to API 31 has no agree purpose either;
 with `PURPOSE_AGREE_KEY`. Ed25519 is not advertised in `supportedAlgorithms`:
 `local.generateKey` cannot parse the name yet.
 
-## Key Lifecycle
+## Key lifecycle
 
 ```mermaid
 stateDiagram-v2
@@ -106,9 +117,9 @@ stateDiagram-v2
     end note
 ```
 
-## Authentication Duration
+## Authentication duration
 
-Keys support three authentication modes controlled by `authDurationSeconds`:
+`authDurationSeconds` sets how a key is unlocked:
 
 | Value | Behavior |
 |-------|----------|
@@ -116,10 +127,26 @@ Keys support three authentication modes controlled by `authDurationSeconds`:
 | `0` | Per-operation authentication (biometric every time) |
 | `> 0` | Authentication cached for N seconds after biometric |
 
-The default is 5 seconds, which prevents double-prompts during rapid sequential
-requests (e.g., Chrome conditional UI discovery followed by actual authentication).
+`generateKeyForAlgorithm` defaults to 5 seconds for EC, RSA and Ed25519 keys,
+so two requests in quick succession (Chrome's conditional UI lookup followed
+by the real sign-in, for example) need one prompt, not two.
+`generateSymmetricKey` defaults to -1 (no authentication). HMAC keys are
+always created without user authentication.
 
-## Signing Flow
+## Signing flow
+
+Every prompted signature goes through `KeystoreManager.signWithPrompt`. A key
+with a time window (`authDurationSeconds > 0`) cannot be bound to a
+`CryptoObject`, so the user authenticates first and a fresh `Signature` is
+initialised inside the new window. A per-operation key (0) is initialised
+first and the prompt unlocks that `Signature` through its `CryptoObject`.
+
+Devices refuse an auth-bound key in two ways. Most throw
+`UserNotAuthenticatedException` from `initSign`; some accept the init and fail
+only at `sign()` with a `KeyStoreException` whose error code is
+`ERROR_USER_AUTHENTICATION_REQUIRED` (API 33+). `requiresUserAuthentication`
+recognises both, and either one leads to the prompt rather than an error.
+The diagram shows the common case.
 
 ```mermaid
 sequenceDiagram
@@ -148,23 +175,22 @@ sequenceDiagram
     KM-->>App: Signature bytes
 ```
 
-## Key Purpose Reference
+## Key purposes
 
-| Key Type | Purpose Flags | Operations |
-|----------|---------------|------------|
-| FIDO2 credential | `PURPOSE_SIGN` | WebAuthn registration/authentication |
-| Signing key | `PURPOSE_SIGN` | File signing, media signing, co-signing |
-| Encryption key | `PURPOSE_AGREE_KEY` | ECDH for file encryption/decryption |
-| Ephemeral key | `PURPOSE_AGREE_KEY` | Single-use ECDH, deleted after use |
-| AES symmetric | `PURPOSE_ENCRYPT \| PURPOSE_DECRYPT` | Direct AES-GCM encryption |
-| RSA key | `PURPOSE_SIGN \| PURPOSE_DECRYPT` | Signing and RSA-OAEP decryption |
+| Key type | Purpose flags | Used for |
+|----------|---------------|----------|
+| FIDO2 credential | `PURPOSE_SIGN` | WebAuthn registration and authentication |
+| EC general key | `PURPOSE_SIGN`, plus `PURPOSE_AGREE_KEY` on API 31+ | Signing (files, media, co-signing), ECDH, decrypting `.xkeyenc` files |
+| Ephemeral file key | `PURPOSE_AGREE_KEY` | One ECDH for one file encryption, deleted afterwards |
+| RSA general key | `PURPOSE_SIGN \| PURPOSE_DECRYPT` | PKCS#1 signing and RSA-OAEP decryption |
+| AES key | `PURPOSE_ENCRYPT \| PURPOSE_DECRYPT` | AES-GCM encryption |
 | HMAC key | `PURPOSE_SIGN \| PURPOSE_VERIFY` | Message authentication codes |
 
-## StrongBox vs TEE
+## StrongBox and TEE
 
-xKey prefers StrongBox when available, falling back to TEE. StrongBox provides
-a dedicated secure element isolated from the main processor, offering stronger
-protection against physical and side-channel attacks.
+xKey asks for StrongBox when the device has it and falls back to the TEE.
+StrongBox is a separate secure element with its own processor and memory,
+which makes physical and side-channel attacks harder than on the TEE.
 
 ```mermaid
 graph LR
@@ -176,20 +202,25 @@ graph LR
     TEE --> Done
 ```
 
-Detection is performed via `PackageManager.FEATURE_STRONGBOX_KEYSTORE` on API 28+.
+`KeystoreManager.isStrongBoxAvailable` checks
+`PackageManager.FEATURE_STRONGBOX_KEYSTORE`. Only EC and RSA general keys and
+FIDO2 credentials ask for StrongBox, and the fallback catches any generation
+failure. Android only requires StrongBox to support P-256 and RSA-2048, so
+the other curves and sizes usually end up in the TEE. AES and HMAC keys never ask for
+StrongBox.
 
 The `securityLevel` that `generateKey` and `local.generateKey` report, and the
-`strongBoxBacked` flag stored with the key, come from the generated key's own
-`KeyInfo`, not from whether the device has StrongBox. Each handler reads the
-exact alias it just generated: `generateKey` its credential
-(`KeystoreManager.credentialSecurityLevel`), `local.generateKey` its general key
-(`KeystoreManager.generalKeySecurityLevel`), never a credential that shares the
-general key's id. Both results carry `securityLevel`; the base result keeps
-`strongBoxBacked` for older clients. A `KeyInfo` read that fails is an error
-(`KeyInfoUnavailableException`): the key is discarded and nothing is reported or
-stored as `software`. A key generated with `preferStrongBox = false`, a StrongBox request
-that fell back to the TEE (P-384, P-521, RSA-4096) and every AES or HMAC key
-therefore report `tee` on a StrongBox device.
+`strongBoxBacked` flag those handlers store with the key, come from the
+generated key's own `KeyInfo`, not from whether the device has StrongBox. Each
+handler reads the exact alias it just generated: `generateKey` its credential
+(`KeystoreManager.credentialSecurityLevel`), `local.generateKey` its general
+key (`KeystoreManager.generalKeySecurityLevel`), never a credential that
+shares the general key's id. Both results carry `securityLevel`; the
+`generateKey` result keeps `strongBoxBacked` for older clients. A `KeyInfo`
+read that fails is an error (`KeyInfoUnavailableException`): the key is
+discarded and nothing is reported or stored as `software`. A key generated
+with `preferStrongBox = false`, a StrongBox request that fell back to the TEE,
+and every AES or HMAC key therefore report `tee` on a StrongBox device.
 
 | API | KeyInfo | Reported |
 |-----|---------|----------|
@@ -201,22 +232,30 @@ therefore report `tee` on a StrongBox device.
 | 28-30 | not inside secure hardware | `software` |
 
 Before API 31 `KeyInfo` cannot tell StrongBox from the TEE, so the key
-generators record, per process, each alias whose StrongBox spec succeeded; after
-a restart such a key reads `tee`, an under-claim and never an over-claim.
-Exportable keys and Ed25519 keys live outside the Keystore and report
-`software`.
+generators record, per process, each alias whose StrongBox spec succeeded
+(`markStrongBoxSpec`). After a restart such a key reads `tee`: an
+under-claim, never an over-claim. Exportable keys and Ed25519 keys live
+outside Keystore and report `software`.
 
-## Ed25519 Software Fallback
+Passkeys created through the Android Credential Manager are the exception:
+`CreateCredentialHandler` stores `strongBoxBacked` from
+`isStrongBoxAvailable()`, so on a StrongBox device that flag says what the
+device has, not where the key landed.\n\nThose are the only backends: StrongBox, the TEE, and encrypted app storage
+for the software keys named above.
 
-Android Keystore does not support Ed25519 keys. When an Ed25519 key is requested
-(API 33+), xKey generates it using the JCE `Ed25519` provider and stores the
-private key in `EncryptedSharedPreferences` (AES-256-GCM encrypted by a Keystore
-master key). This provides at-rest encryption but not the same hardware isolation
-as Keystore-backed keys.
+## Ed25519 software keys
 
-## HKDF Key Derivation
+Android Keystore cannot create Ed25519 keys. `generateKeyForAlgorithm` with
+`Ed25519` (API 33+) generates the pair with the JCE `Ed25519` provider and
+stores the private key in the `xkey_ed25519_keys` `EncryptedSharedPreferences`
+file, encrypted under a Keystore AES-256-GCM master key. The key is encrypted
+at rest but is not isolated in hardware. `local.generateKey` cannot create one
+yet: it parses algorithm names through `CoseAlgorithms.fromName`, which has no
+Ed25519.
 
-File encryption uses HKDF-SHA256 (via Bouncy Castle) to derive the AES-256 key
+## HKDF key derivation
+
+`FileEncryptor` uses HKDF-SHA256 (Bouncy Castle) to derive the AES-256 key
 from the ECDH shared secret:
 
 ```
@@ -226,27 +265,61 @@ Info = "xkey-file-encryption-v1" (UTF-8)
 OKM  = 32 bytes (AES-256 key)
 ```
 
-## Alias Conventions
+## Keystore aliases
 
-Keys in Android Keystore use the following alias prefixes:
+| Alias | Holds |
+|-------|-------|
+| `xkey_credential_<id>` | FIDO2 credential keys |
+| `xkey_key_<keyId>` | General keys made by `local.generateKey` and the key screens (signing, ECDH, AES, HMAC) |
+| `xkey_attest_<keyId>_<nanos>` | Temporary key for `getKeyAttestationWithChallenge`, deleted after use |
+| `xkey_key_ephemeral_<uuid>` | Ephemeral ECDH key for one file encryption (`FileEncryptor.EPHEMERAL_KEY_PREFIX`), deleted after use |
+| `xkey_piv_<slot>` | PIV slot keys |
+| `xkey_device_attestation_key` | Device Attestation Key (see `docs/device-attestation/`) |
+| `xkey_user_verification_key` | Key that signs `local.verifyUser` answers (see `docs/fido2-built-in-uv/`) |
+| `xkey_root_ca`, `xkey_intermediate_ca` | Local CA keys (see `docs/certificate-authority/`) |
+| `xkey_device_identity_<...>` | Device identity keys issued by the local CA |
+| `xkey_oath_secret_encryption_key`, `xkey_password_encryption_key`, `xkey_seal_store_key`, `xkey_software_key_store` | AES keys that encrypt OATH secrets, vault entries, sealed blobs and exportable key material in the database |
 
-| Prefix | Usage |
-|--------|-------|
-| `xkey_credential_` | FIDO2 credential keys |
-| `xkey_key_` | General-purpose keys (signing, encryption, HMAC) |
-| `xkey_attest_` | Ephemeral attestation keys (deleted after use) |
-| `ephemeral_` | Ephemeral ECDH keys for file encryption (deleted after use) |
+## The local.* key RPCs
 
-This document describes the high-level architecture of the xKey Android application,
-a hardware-backed security key that provides FIDO2/WebAuthn authentication, file
-cryptography, media signing, and multi-party attestation over BLE and USB transports.
+A paired desktop drives these keys over the Noise session with the methods in
+`protocol/Messages.kt` (`MethodNames`), handled by `RequestHandler` in
+`protocol/Handler.kt`:
 
-## System Context
+| Method | Does |
+|--------|------|
+| `local.generateKey` | Creates an EC, RSA, AES, HMAC or ML-DSA key (ML-DSA takes an optional `keyBacking`: `hardware` or `software`), or an exportable software key; returns `publicKeyDer` and `securityLevel` |
+| `local.sign` | Signs with an EC, RSA or ML-DSA key (pure ML-DSA) |
+| `local.decrypt` | RSA-OAEP decryption |
+| `local.symmetricEncrypt`, `local.symmetricDecrypt` | AES-GCM with an AES key |
+| `local.hmac` | HMAC-SHA256 or HMAC-SHA512 |
+| `local.ecdh` | ECDH with an EC key (API 31+) |
+| `local.getPublicKey` | Public key as DER, PEM, SSH or COSE (ML-DSA: DER or PEM only) |
+| `local.listKeys`, `local.getKeyInfo` | Key metadata |
+| `local.deleteKey` | Deletes the key and its row |
+| `local.setKeyPolicy` | Opens or closes a key to peers (below) |
+| `local.attestKey` | Keystore attestation chain for a key |
+| `local.attestDevice` | Device attestation (see `docs/device-attestation/`) |
+| `local.getCapabilities` | Algorithms, the hardware-backed ML-DSA sets (`hardwareAlgorithms`), StrongBox, biometrics, ECDH, export formats and key count |
 
-xKey operates as a security key on an Android device, communicating with desktop
-clients over BLE or USB to perform cryptographic operations. All private key
-material remains inside Android Keystore (TEE/StrongBox) and never leaves the
-secure hardware boundary.
+The base protocol also keeps the original `generateKey`, `sign`,
+`deleteKey`, `listKeys` and `getInfo` methods for FIDO2 credentials.
+`local.getCapabilities` lists the algorithms from
+`KeystoreCapabilities.supportedAlgorithms`: ES256, ES384, ES512, RS256,
+RS384, RS512, AES128, AES256, HMAC-SHA256 and HMAC-SHA512, then ML-DSA-44,
+ML-DSA-65 and ML-DSA-87 (held in software on every device).
+
+# Application architecture
+
+The rest of this document describes the xKey app as a whole: a hardware-backed
+security key for FIDO2/WebAuthn, file cryptography, media signing and
+multi-party signing, reached over BLE, USB and TCP.
+
+## System context
+
+xKey runs on an Android phone and answers desktop clients over BLE, USB or
+TCP. Private keys stay in Android Keystore apart from the software keys
+listed under the design principle.
 
 ```mermaid
 C4Context
@@ -263,17 +336,17 @@ C4Context
     System_Ext(mediastore, "Android MediaStore", "System media database for photos and videos")
 
     Rel(user, xkey, "Manages keys, signs/encrypts files, views verified media")
-    Rel(xkey, desktop, "BLE GATT / USB AOA with Noise_XX encryption")
+    Rel(xkey, desktop, "BLE GATT / USB AOA / TCP with Noise_XX encryption")
     Rel(camera, mediastore, "Writes new photos/videos")
     Rel(xkey, mediastore, "Observes new media, embeds signatures in EXIF/XMP")
     Rel(apps, xkey, "Shares files via ACTION_SEND intent")
     Rel(xkey, keystore, "All private key operations (sign, ECDH, encrypt)")
 ```
 
-## Layered Architecture
+## Layers
 
-The application is organized into five layers. Each layer depends only on
-layers below it.
+The app has five layers. The diagram lists the main classes in each; the
+full list of screens is in the next table.
 
 ```mermaid
 graph TB
@@ -317,7 +390,7 @@ graph TB
     end
 
     subgraph Storage["Storage Layer"]
-        DB[(XKeyDatabase v12)]
+        DB[(XKeyDatabase v13)]
         DS[DataStore Repositories]
         ESP[EncryptedSharedPreferences]
     end
@@ -332,28 +405,40 @@ graph TB
     Crypto --> Storage
 ```
 
-## Application Layer
+## Screens
 
-All activities use programmatic Material 3 UI built via `PremiumCardFactory`.
-There are no traditional XML layout files for the main screens.
+The screens build their Material 3 views in code, mostly through
+`PremiumCardFactory`, rather than from XML layouts. Every activity below is in
+`ui/` unless a package is given, and is declared in
+`app/src/main/AndroidManifest.xml`.
 
 | Activity | Purpose |
 |----------|---------|
-| `MainActivity` | Home screen with BLE toggle, key summary, recent audit activity |
+| `MainActivity` | Home screen: BLE toggle, key summary, recent audit activity |
 | `SettingsActivity` | Biometric policy, media signing, connectivity, device trust |
-| `KeyManagementActivity` | List, create, and delete cryptographic keys |
-| `KeyDetailActivity` | View key properties, export public key, manage sharing policy |
-| `ContactManagementActivity` | Import, export, and manage recipient public keys |
-| `FileOperationActivity` | Sign, verify, encrypt, decrypt files received via Share sheet |
-| `CoSignActivity` | Multi-party co-signing via QR or BLE exchange |
-| `VerifiedMediaViewerActivity` | Display media with signature verification badges |
-| `PairedDevicesActivity` | List paired BLE/USB devices |
-| `DeviceDetailActivity` | View device details and attestation status |
-| `TrustStoreActivity` | Manage trusted CA certificates |
-| `AuditLogActivity` | Browse security audit log |
-| `CertificateManagementActivity` | Manage X.509 certificates issued by the local CA |
+| `KeyManagementActivity` | List, create and delete keys |
+| `KeyDetailActivity` | Key properties, public key export, sharing policy |
+| `PasskeysActivity`, `PasskeyDetailActivity` | Passkeys and their details |
+| `OathActivity` | TOTP and HOTP codes |
+| `PasswordManagementActivity` | Password vault |
+| `PinManagementActivity` | Device PIN |
+| `PivActivity`, `PivSlotDetailActivity` | PIV slots |
+| `ContactManagementActivity` | Import, export and manage recipient public keys |
+| `FileOperationActivity` | Sign, verify, encrypt and decrypt files received from the share sheet |
+| `CoSignActivity` | Multi-party co-signing by QR or BLE |
+| `VerifiedMediaViewerActivity` | Media with signature verification badges |
+| `PairedDevicesActivity` | Paired desktops |
+| `DeviceDetailActivity` | One paired desktop: details and attestation state |
+| `DesktopKeysActivity` | Keys held by the paired desktop's xkmsd backends, opened from the device detail screen |
+| `TrustStoreActivity` | Trusted CA certificates |
+| `CertificateManagementActivity`, `CertificateDetailActivity` | Certificates issued by the local CA |
+| `AuditLogActivity` | Security audit log |
+| `QrScannerActivity` | Camera QR scanner |
+| `TransparentBiometricActivity` | Shows a biometric prompt for a background service |
+| `CryptoSigningActivity` | Runs a biometric prompt bound to a signature for a background service |
+| `credential/ui/CredentialSelectorActivity` | Passkey picker for the Android Credential Manager |
 
-## Crypto Layer
+## Crypto layer
 
 | Component | Responsibility |
 |-----------|---------------|
@@ -365,25 +450,25 @@ There are no traditional XML layout files for the main screens.
 | `QrCodeGenerator` | QR code bitmap generation via ZXing |
 | `QrCodeScannerHelper` | QR scanning via ML Kit + CameraX |
 
-## Storage Layer
+## Storage layer
 
-### Room Database (XKeyDatabase v12)
+### Room database (XKeyDatabase v13)
 
-SQLite database `xkey_credentials.db` with nine entities:
+The SQLite database `xkey_credentials.db` has nine entities:
 
 - `keys` -- unified key metadata for all key types
 - `credential_metadata` -- legacy FIDO2 credential table
 - `key_sharing_policies` -- per-key, per-peer sharing rules
-- `audit_logs` -- comprehensive security event log
+- `audit_logs` -- security event log
 - `certificates` -- X.509 certificates issued by the local CA
 - `contacts` -- recipient public keys for encryption and verification
 - `oath_credentials` -- TOTP/HOTP credentials with encrypted secrets
 - `piv_slots` -- PIV smart card key slots
 - `passwords` -- password manager entries with encrypted values
 
-### DataStore Repositories
+### DataStore repositories
 
-Preference-based settings stored via Jetpack DataStore:
+Settings kept in Jetpack DataStore:
 
 | Repository | Settings |
 |------------|----------|
@@ -393,52 +478,64 @@ Preference-based settings stored via Jetpack DataStore:
 | `UsbHsmSettingsRepository` | Native USB, ADB TCP, port config |
 | `MediaSigningSettingsRepository` | Auto-sign toggle, key selection, photo/video |
 | `CredentialProviderSettingsRepository` | Passkey provider enable/disable |
-| `PairedDeviceRepository` | Trusted device records with attestation state |
+| `PinSettingsRepository` | Device PIN state |
+| `SyncStateRepository` | Store sync state |
 
 ### EncryptedSharedPreferences
 
-- Noise_XX static key pair (X25519)
-- Ed25519 software-backed private keys (Keystore does not support Ed25519)
+- Noise_XX static key pair (X25519), file `xkey_noise_keys`
+- Ed25519 private keys, file `xkey_ed25519_keys`
+- Paired desktops (`PairedDeviceRepository`), file `xkey_paired_devices`
+- Local CA state (`xkey_ca`), device identities (`xkey_device_identity`) and enrolled devices (`xkey_enrolled_devices`)
 
-## Package Structure
+## Packages
 
 ```
 com.automatethethings.xkey
-  /audit          AuditLog, AuditLogger, AuditLogDao, AuditLogEntity
-  /auth           BiometricHelper, SessionAuthManager, BiometricActivityLauncher
+  /audit          AuditLog, AuditLogger, AuditLogDao
+  /auth           SessionAuthManager, BiometricActivityLauncher, BiometricNotificationHelper, PromptOwnership
+  /backup         BackupStore
   /ble            XKeyGattService, GattServer, Advertiser, NoiseSession, FragmentReassembler
-  /bootstrap      BootstrapClient, BootstrapSettings
-  /ca             AndroidCA, CertificateEntity, CertificateDao, CertificateProfile
-  /credential     XKeyCredentialService, CreateCredentialHandler, GetCredentialHandler
-  /crypto         KeystoreManager, FileEncryptor, BiometricHelper, CborEncoder
-  /keychain       KeychainService, LocalKeychainService, CertificateStore
+  /ble/fido       FidoGattServer, Ctap2Authenticator, AndroidFidoCredentialBackend
+  /bootstrap      BootstrapClient, DaneTlsa
+  /ca             AndroidCA, CertificateEntity, CertificateDao, CertificateProfile, DeviceIdentity, SSHCertificateAuthority
+  /credential     XKeyCredentialService, handler/CreateCredentialHandler, handler/GetCredentialHandler
+  /crypto         KeystoreManager, KeystoreCapabilities, FileEncryptor, BiometricHelper, CborEncoder, DeviceAttestationKey, UserVerificationKey, SoftwareKeyStore
   /media          MediaSigningService, MediaHasher, XmpMetadataHelper, SignatureFormat
-  /protocol       RequestHandler, Messages, AttestationHelper
+  /oath           OATH credentials and codes
+  /password       Password vault
+  /pin            Device PIN
+  /piv            PIV slots
+  /protocol       RequestHandler (Handler.kt), Messages, AttestationHelper
   /qr             QrCodeGenerator, QrCodeScannerHelper
-  /remote         RemoteKeyClient, BidirectionalMessageRouter, RemoteKeySyncManager
-  /settings       BiometricSettings, BootstrapSettings, MediaSigningSettings, ...
-  /storage        XKeyDatabase, KeyEntity, ContactEntity, CredentialMetadataEntity, ...
+  /remote         RemoteKeyClient, BidirectionalMessageRouter, RemoteShareClient, RemoteSyncClient
+  /settings       BiometricSettings, BootstrapSettings, MediaSigningSettings, PairedDeviceRepository, ...
+  /storage        XKeyDatabase, KeyStoreSyncManager, SealStore, dao/, entity/
+  /sync           SyncEngine, PasswordSync
+  /tcp            TcpHsmServer
+  /transport      StreamMessageFraming, StreamPairingSession
   /truststore     TrustStoreRepository, CABundleFetcher, IDevIDVerifier
-  /ui             All Activity classes, PremiumCardFactory, UIHelpers
-  /usb            UsbAccessoryServer, TcpHsmServer, UsbHsmSettings
+  /ui             Activities, PremiumCardFactory, UIHelpers
+  /usb            UsbAccessoryServer, UsbHsmSettings
   /util           JsonExtensions
 ```
 
-## Build Configuration
+## Build configuration
 
 | Property | Value |
 |----------|-------|
-| `minSdk` | 28 (Android 9 Pie) |
+| `minSdk` | 28 (Android 9) |
 | `targetSdk` | 34 (Android 14) |
-| Database | Room v12 (`xkey_credentials.db`) |
+| `compileSdk` | 37 |
+| Required hardware | Bluetooth LE; fingerprint, USB accessory and camera are optional |
+| Database | Room v13 (`xkey_credentials.db`) |
 | License | AGPL-3.0 / Commercial dual license |
 | Package | `com.automatethethings.xkey` |
 
-This document maps how all components in xKey communicate with each other,
-including activity-to-service bindings, service-to-crypto calls, database
-access patterns, and inter-process communication.
+## Component map
 
-## Full Component Communication Map
+The diagram shows which components call which. It leaves out the newer
+screens (passkeys, OATH, passwords, PIV) to stay readable.
 
 ```mermaid
 graph TB
@@ -552,30 +649,29 @@ graph TB
     RH --> AL
 ```
 
-## Service to KeystoreManager
+## Services and KeystoreManager
 
-All services access `KeystoreManager` for cryptographic operations:
+| Component | KeystoreManager use |
+|-----------|---------------------|
+| `XKeyGattService` | Creates one `KeystoreManager` and hands it to `RequestHandler`, which serves every `local.*` and FIDO2 RPC from it |
+| `MediaSigningService` | `publicKeyDERAt()`, `signApproved()` |
+| `CreateCredentialHandler` (passkey provider) | `generateKeyWithAuthDuration()`, `getPublicKey()`, `deleteKey()` |
+| `GetCredentialHandler` (passkey provider) | `sign()`, `signWithoutBiometric()` |
 
-| Service | Operations Used |
-|---------|----------------|
-| `XKeyGattService` | `sign()`, `signWithAlgorithm()`, `generateKeyForAlgorithm()`, `deleteKey()`, `getPublicKeyDER()`, `performECDH()`, `symmetricEncrypt()`, `symmetricDecrypt()`, `computeHMAC()` |
-| `MediaSigningService` | `signWithAlgorithm()`, `getPublicKeyDER()` |
-| `XKeyCredentialService` | `generateKey()`, `sign()`, `getCOSEPublicKey()` |
+Each component creates its own `KeystoreManager`. It holds a `KeyStore`
+reference and little else, so there is nothing to share.
 
-`KeystoreManager` is instantiated per-service (not shared) since it holds only
-a `KeyStore` reference and is lightweight.
+## Services and the Room database
 
-## Service to Room Database
-
-| Service | DAOs Used | Operations |
-|---------|-----------|------------|
-| `XKeyGattService` | `KeyDao` | List keys, get key by ID, update use count |
+| Component | DAOs used | Operations |
+|-----------|-----------|------------|
+| `XKeyGattService` | `KeyDao`, `CredentialMetadataDao`, `KeySharingPolicyDao`, `CertificateDao` | Passes them to `RequestHandler`, `SharePermission`, `PasskeySignCounter` and the CA |
 | `MediaSigningService` | `KeyDao` | Get signing key by ID |
-| `XKeyCredentialService` | `CredentialMetadataDao`, `KeyDao` | CRUD for credentials |
+| `CreateCredentialHandler`, `GetCredentialHandler` | `CredentialMetadataDao`, `KeyDao` | Store and read passkeys |
 
-The database singleton is obtained via `XKeyDatabase.getInstance(context)`.
+Every caller gets the database from `XKeyDatabase.getInstance(context)`.
 
-## Shared Singletons
+## Shared singletons
 
 | Singleton | Access Pattern | Thread Safety |
 |-----------|---------------|---------------|
@@ -584,13 +680,11 @@ The database singleton is obtained via `XKeyDatabase.getInstance(context)`.
 | DataStore repositories | Per-component instantiation | Thread-safe (DataStore) |
 | `KeystoreManager` | Per-component instantiation | Thread-safe (Keystore is thread-safe) |
 
-> **Status: REFERENCE** · Last verified: 2026-11-12
-> As-built description of the xKey Room schema (`XKeyDatabase.kt`, version 12).
+# Data model
 
-This document describes the Room database schema, migration history, DataStore
-repositories, and indexing strategy used by the xKey Android application.
+The Room schema is `storage/XKeyDatabase.kt`, version 13.
 
-## Entity-Relationship Diagram
+## Entity-relationship diagram
 
 ```mermaid
 erDiagram
@@ -609,6 +703,7 @@ erDiagram
         boolean exportable
         boolean shareable
         string sharing_policy
+        long policy_revision
         string source
         string remote_backend
         long use_count
@@ -746,21 +841,26 @@ erDiagram
     ContactEntity ||--o{ AuditLogEntity : "contact operations logged"
 ```
 
-## Entity Details
+## Entity details
 
 ### KeyEntity (`keys`)
 
-Unified key metadata table for all key types managed by xKey. Actual
-cryptographic key material remains in Android Keystore; this table stores
-metadata, usage tracking, and policy configuration.
+One metadata row per key of every type. Key material stays in Android
+Keystore, or for software keys in encrypted storage; the row holds metadata,
+usage counts and the sharing policy.
 
-**Key types**: `fido2`, `tls`, `signing`, `encryption`, `secret`, `hmac`, `ca`, `attestation`
+Key types: `fido2`, `tls`, `signing`, `encryption`, `secret`, `hmac`, `ca`, `attestation`.
 
-**Sources**: `local`, `remote_ble`, `remote_usb`, `xkmsd`
+Sources: `local`, `remote_ble`, `remote_usb`, `xkmsd`.
 
-**Sharing policies**: `PRIVATE` (default), `ALL_PEERS`, `SELECTED_PEERS`
+Sharing policies: `PRIVATE` (default), `ALL_PEERS`, `SELECTED_PEERS`.
+`policy_revision` goes up on every policy change, so an approved policy write
+can tell that the policy moved since the approval, even if it moved back. The
+DAO's policy writers bump it themselves. The `keys_policy_revision_forward`
+trigger covers the other path: a whole-row `@Update` written from an older
+copy, which would otherwise put an old revision back.
 
-## Migration History
+## Migration history
 
 ```mermaid
 graph LR
@@ -775,6 +875,7 @@ graph LR
     V9 --> V10["v10<br/>+ passwords"]
     V10 --> V11["v11<br/>keys.source<br/>keychaind to xkmsd"]
     V11 --> V12["v12<br/>+ passwords policy columns"]
+    V12 --> V13["v13<br/>+ keys.policy_revision"]
 ```
 
 | Migration | Changes |
@@ -790,8 +891,9 @@ graph LR
 | v9 -> v10 | Created `passwords` table (`source` default `local`) with unique index on `password_id` and indices on `name` and `source`. |
 | v10 -> v11 | Data only: renamed the `keys.source` value `keychaind` to `xkmsd`, matching the renamed go-xkms daemon. |
 | v11 -> v12 | Added `passwords` columns `expires_at` (nullable text), `shared` (default `0`) and `tenant_id` (default `''`, the default tenant). Existing entries become personal entries of the default tenant. |
+| v12 -> v13 | Added `keys.policy_revision` (default `0`) and the `keys_policy_revision_forward` trigger, which moves the revision forward when an update would leave it in place or take it back. A fresh install creates the trigger in an `onCreate` callback (`CREATE_TRIGGERS`), since Room's schema does not carry triggers. |
 
-## Index Strategy
+## Index strategy
 
 ### keys
 
@@ -803,9 +905,9 @@ graph LR
 | `index_keys_source` | `source` | No | Filter by origin (local, remote_ble, etc.) |
 | `index_keys_rp_id` | `rp_id` | No | FIDO2 credential lookup by relying party |
 
-## DataStore Repositories
+## DataStore files
 
-| Repository | File | Key Settings |
+| Repository | File | Settings |
 |------------|------|--------------|
 | `BiometricSettingsRepository` | `biometric_settings` | Auth mode, UV policy, attestation policy, session duration |
 | `BootstrapSettingsRepository` | `bootstrap_settings` | Auto-bootstrap enable, bootstrap methods |
@@ -813,13 +915,18 @@ graph LR
 | `UsbHsmSettingsRepository` | `usb_hsm_settings` | Native USB enable, ADB TCP enable, port config |
 | `MediaSigningSettingsRepository` | `media_signing_settings` | Auto-sign enable, signing key ID, photo/video toggles |
 | `CredentialProviderSettingsRepository` | `credential_provider_settings` | Passkey provider enable/disable |
-| `PairedDeviceRepository` | `paired_devices` | Device name, public key, attestation state, trust level |
+| `PinSettingsRepository` | `pin_settings` | Device PIN state |
+| `SyncStateRepository` | `sync_state` | Store sync state |
 
-## Database Access Pattern
+`PairedDeviceRepository` is not a DataStore: it keeps device name, public
+key, attestation state and trust level in the `xkey_paired_devices`
+EncryptedSharedPreferences file.
 
-The database uses a singleton pattern with `AtomicReference` and double-checked
-locking. DAOs return `Flow<List<T>>` for reactive UI updates where needed
-(e.g., `AuditLogDao.observeRecent(5)` for the home screen).
+## Database access
+
+`XKeyDatabase.getInstance` is a singleton built with an `AtomicReference` and
+double-checked locking. DAOs that feed a screen return `Flow<List<T>>`, for
+example `AuditLogDao.observeRecent(limit)` for the recent activity list.
 
 ```kotlin
 val database = XKeyDatabase.getInstance(context)
@@ -828,7 +935,7 @@ val contactDao = database.contactDao()
 val auditLogDao = database.auditLogDao()
 ```
 
-## Type Converters
+## Type converters
 
 | Converter | Type | Storage |
 |-----------|------|---------|

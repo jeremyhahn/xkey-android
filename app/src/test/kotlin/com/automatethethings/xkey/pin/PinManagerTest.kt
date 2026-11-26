@@ -108,8 +108,11 @@ class PinManagerTest {
             currentSettings = settingsSlot.captured
         }
 
-        pinManager = PinManager(pinSettingsRepo)
+        pinManager = PinManager(pinSettingsRepo, clock)
     }
+
+    /** The lockout's clocks; the wall clock starts at the real time the epoch-field tests use. */
+    private val clock = FakeLockoutClock(wall = System.currentTimeMillis())
 
     @After
     fun tearDown() {
@@ -440,8 +443,159 @@ class PinManagerTest {
     }
 
     // -------------------------------------------------------------------------
+    // Monotonic lockout, escalation and permanent block
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun `moving the wall clock forward does not end a User PIN lockout`() = runTest {
+        currentSettings = userPinProvisioned(backoffEnabled = false)
+        repeat(5) { assertTrue(wrongUserPin() is PinIncorrectException) }
+
+        clock.wall += YEAR_MS
+
+        val e = runCatching { pinManager.verifyUserPIN("correct-user-pin") }.exceptionOrNull()
+        assertTrue("still locked after the wall clock jumped: $e", e is PinLockedException)
+        assertTrue(pinManager.getLockoutStatus(PinType.USER_PIN).isLocked)
+    }
+
+    @Test
+    fun `moving the wall clock back does not extend a User PIN lockout`() = runTest {
+        currentSettings = userPinProvisioned(backoffEnabled = false)
+        repeat(5) { wrongUserPin() }
+
+        clock.wall -= YEAR_MS
+        clock.elapsed += 300_000L
+
+        assertTrue(pinManager.verifyUserPIN("correct-user-pin"))
+        assertEquals(0, currentSettings.failedUserPinAttempts)
+        assertEquals(0L, currentSettings.userPinLockoutRemainingMs)
+    }
+
+    @Test
+    fun `a User PIN lockout survives a restart on a new boot`() = runTest {
+        currentSettings = userPinProvisioned(backoffEnabled = false)
+        repeat(5) { wrongUserPin() }
+        clock.advance(100_000L)
+        assertEquals(200, pinManager.getLockoutStatus(PinType.USER_PIN).recoverySeconds)
+
+        clock.reboot("boot-2")
+        val restarted = PinManager(pinSettingsRepo, clock)
+
+        val status = restarted.getLockoutStatus(PinType.USER_PIN)
+        assertTrue(status.isLocked)
+        assertEquals(200, status.recoverySeconds)
+        val e = runCatching { restarted.verifyUserPIN("correct-user-pin") }.exceptionOrNull()
+        assertTrue(e is PinLockedException)
+    }
+
+    @Test
+    fun `with backoff the next lockout doubles`() = runTest {
+        currentSettings = userPinProvisioned(backoffEnabled = true)
+        repeat(5) { wrongUserPin() }
+        assertEquals(300, pinManager.getLockoutStatus(PinType.USER_PIN).recoverySeconds)
+
+        clock.advance(300_000L)
+        assertTrue(wrongUserPin() is PinIncorrectException)
+
+        val status = pinManager.getLockoutStatus(PinType.USER_PIN)
+        assertEquals(6, status.failedAttempts)
+        assertEquals(600, status.recoverySeconds)
+        assertFalse(status.permanent)
+    }
+
+    @Test
+    fun `without backoff every lockout lasts the configured duration`() = runTest {
+        currentSettings = userPinProvisioned(backoffEnabled = false)
+        repeat(5) { wrongUserPin() }
+        clock.advance(300_000L)
+
+        wrongUserPin()
+
+        assertEquals(300, pinManager.getLockoutStatus(PinType.USER_PIN).recoverySeconds)
+    }
+
+    @Test
+    fun `the User PIN blocks for good at the ceiling and only resetLockout clears it`() = runTest {
+        currentSettings = userPinProvisioned(backoffEnabled = true)
+        failUserPinToCeiling()
+
+        val status = pinManager.getLockoutStatus(PinType.USER_PIN)
+        assertTrue(status.isLocked)
+        assertTrue(status.permanent)
+        assertEquals(PinLockout.PERMANENT_BLOCK_ATTEMPTS, status.failedAttempts)
+        assertEquals(Long.MAX_VALUE, status.lockoutUntil)
+
+        clock.advance(100L * PinLockout.MAX_LOCKOUT_MS)
+        clock.reboot("boot-3")
+        val e = runCatching { pinManager.verifyUserPIN("correct-user-pin") }.exceptionOrNull()
+        assertTrue(e is PinLockedException)
+        assertTrue((e as PinLockedException).lockoutStatus.permanent)
+
+        pinManager.resetLockout(soPIN = "correct-so-pin")
+
+        assertFalse(pinManager.getLockoutStatus(PinType.USER_PIN).isLocked)
+        assertTrue(pinManager.verifyUserPIN("correct-user-pin"))
+    }
+
+    @Test
+    fun `a permanently blocked SO PIN cannot reset itself`() = runTest {
+        currentSettings = userPinProvisioned(backoffEnabled = true)
+        repeat(PinLockout.PERMANENT_BLOCK_ATTEMPTS) {
+            runCatching { pinManager.verifySOPIN("wrong-so-pin") }
+            clock.advance(PinLockout.MAX_LOCKOUT_MS)
+        }
+        assertTrue(pinManager.getLockoutStatus(PinType.SO_PIN).permanent)
+
+        val e = runCatching { pinManager.resetLockout(soPIN = "correct-so-pin") }.exceptionOrNull()
+
+        assertTrue(e is PinLockedException)
+        assertTrue((e as PinLockedException).lockoutStatus.permanent)
+    }
+
+    @Test
+    fun `a success before the ceiling clears the count and the lockout`() = runTest {
+        currentSettings = userPinProvisioned(backoffEnabled = true)
+        repeat(5) { wrongUserPin() }
+        clock.advance(300_000L)
+
+        assertTrue(pinManager.verifyUserPIN("correct-user-pin"))
+
+        val status = pinManager.getLockoutStatus(PinType.USER_PIN)
+        assertEquals(0, status.failedAttempts)
+        assertFalse(status.isLocked)
+        assertEquals(0L, status.lockoutUntil)
+    }
+
+    // -------------------------------------------------------------------------
     // Helper methods
     // -------------------------------------------------------------------------
+
+    /** SO and User PIN set, with the default thresholds (5 attempts, 300 s). */
+    private fun userPinProvisioned(backoffEnabled: Boolean) = PinSettingsData(
+        soPinSet = true,
+        soPinHashBase64 = encodedHash(),
+        soPinSaltBase64 = encodedSalt(),
+        userPinSet = true,
+        userPinHashBase64 = encodedHash(),
+        userPinSaltBase64 = encodedSalt(),
+        backoffEnabled = backoffEnabled
+    )
+
+    /** One wrong User PIN; returns what it threw. */
+    private suspend fun wrongUserPin(): Throwable? =
+        runCatching { pinManager.verifyUserPIN("wrong-user-pin") }.exceptionOrNull()
+
+    /** Wrong User PINs, waiting out each lockout, up to the permanent block. */
+    private suspend fun failUserPinToCeiling() {
+        repeat(PinLockout.PERMANENT_BLOCK_ATTEMPTS) {
+            assertTrue(wrongUserPin() is PinIncorrectException)
+            clock.advance(PinLockout.MAX_LOCKOUT_MS)
+        }
+    }
+
+    private companion object {
+        const val YEAR_MS = 365L * 24 * 60 * 60 * 1000
+    }
 
     /** Returns a Base64-encoded version of [fixedHash] using java.util.Base64. */
     private fun encodedHash(): String =

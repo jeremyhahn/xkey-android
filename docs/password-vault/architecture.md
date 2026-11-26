@@ -1,6 +1,6 @@
 # Password vault architecture
 
-> **Status: REFERENCE** · Last verified: 2026-11-12
+> **Status: REFERENCE** · Last verified: 2026-11-23
 > As-built description of the phone's password store, the vault lock in front of it, and its sync with the desktop.
 
 ## Summary
@@ -33,13 +33,13 @@ USB `Password*` methods are described in
 | `PasswordVaultFactorStore`, `FilePasswordVaultFactorStore` | same file | Enrolled factors in `filesDir/password_vault/factors.json` (`PasswordVault.FACTOR_DIR`), written through a temporary file and a rename |
 | `PasswordVaultFactorRecord` | same file | One factor: id, factor type, label, salt, Argon2id verifier |
 | `Argon2PassphraseHasher`, `PassphraseHasher` | same file | Argon2id, 64 MiB, 3 iterations, 4 lanes, 32-byte output |
-| `VaultUnlockAttemptStore`, `PinSettingsVaultUnlockAttemptStore` | same file | Persisted failed-unlock counter, held to the PIN's `maxPinAttempts` and `lockoutDurationSeconds` |
+| `VaultUnlockAttemptStore`, `PinSettingsVaultUnlockAttemptStore` | same file | Persisted failed-unlock counter, held to the PIN's `maxPinAttempts`, `lockoutDurationSeconds` and backoff on the same monotonic clock ([PIN lockout](../pin/architecture.md#lockout)), without the permanent block |
 | `SessionPasswordVault` | same file | Coroutine-context element naming the session's vault for code below the transport |
 | `requirePasswordStoreUnlocked` | same file | The lock check used by every path without a vault of its own |
 | `PasswordVaultCredential` | `app/src/main/kotlin/com/automatethethings/xkey/password/PasswordVaultCredential.kt` | Credential types `Passphrase`, `Passkey`, `Key` |
 | `PasswordSync` | `app/src/main/kotlin/com/automatethethings/xkey/sync/PasswordSync.kt` | Sync gather and merge behind the lock |
 | `PasswordStoreMethods` | `app/src/main/kotlin/com/automatethethings/xkey/usb/PasswordStoreMethods.kt` | USB `Password*` methods; `routingContext()` adds `SessionPasswordVault` to every USB request |
-| `XKeyGattService` | `app/src/main/kotlin/com/automatethethings/xkey/ble/XKeyGattService.kt` | Builds one `PasswordVault` per USB accessory session |
+| `XKeyGattService` | `app/src/main/kotlin/com/automatethethings/xkey/ble/XKeyGattService.kt` | Builds one `PasswordVault` per USB accessory attach, and only when "Native USB Mode" is on; BLE and TCP get no vault |
 | `PasswordEdits` | `app/src/main/kotlin/com/automatethethings/xkey/password/PasswordEdits.kt` | On-phone `add` and `delete`: writes through `PasswordRepository`, then audits the edit |
 | `PasswordManagementActivity` | `app/src/main/kotlin/com/automatethethings/xkey/ui/PasswordManagementActivity.kt` | On-phone list and detail through `PasswordRepository`; add and delete through `PasswordEdits` |
 
@@ -121,7 +121,7 @@ audited here.
 
 | Exception | Meaning |
 |-----------|---------|
-| `PasswordStoreLockedException` | The store is locked. `local.syncPasswords` answers `ErrorCodes.PASSWORD_STORE_LOCKED` (-32040); `RemoteSyncClient.syncAll()` skips the password leg |
+| `PasswordStoreLockedException` | The store is locked. `local.syncPasswords` answers `ErrorCodes.PASSWORD_STORE_LOCKED` (-32057); `RemoteSyncClient.syncAll()` skips the password leg |
 | `PasswordVaultFactorsUnreadableException` | The factor file exists but cannot be read; never taken as "no factor", so every gate stays shut |
 | `VaultNotInitializedException` | `unlock` or `lock` with no factor enrolled |
 | `VaultCredentialRejectedException` | No enrolled factor matched; the failure is counted. Carries no detail |
@@ -135,7 +135,7 @@ before it reads the factors, so a lock that throws never leaves the store open.
 
 | Test class | Covers |
 |------------|--------|
-| `PasswordVaultTest` (`app/src/test/.../password/`) | Unlock, lock, enrollment, lockout |
+| `PasswordVaultTest`, `PasswordVaultCredentialTest` (`app/src/test/.../password/`) | Unlock, lock, enrollment, lockout; credential parsing |
 | `PinSettingsVaultUnlockAttemptStoreTest` (`app/src/test/.../password/`) | Persisted unlock counter |
 | `PasswordRepositoryTest`, `PasswordRepositoryPolicyTest`, `PasswordRepositoryUpdateTest`, `PasswordEntityTest` (`app/src/test/.../password/`) | Repository, policy fields, updates, entity |
 | `PasswordEditsTest` (`app/src/test/.../password/`), `AuditLoggerDispatchTest` (`app/src/test/.../audit/`) | On-phone add and delete audit entries |
@@ -143,7 +143,7 @@ before it reads the factors, so a lock that throws never leaves the store open.
 | `PasswordStoreMethodsTest`, `UsbWireContractTest` (`app/src/test/.../usb/`) | USB `Password*` methods |
 | `PasswordDaoTest` (`app/src/androidTest/.../password/`) | Room queries |
 | `SyncEngineTest` (`app/src/androidTest/.../sync/`) | Password sync on a device database |
-| `PasswordManagementActivityUiTest`, `PasswordManagementFlowTest` (`app/src/androidTest/.../ui/`) | On-phone password screens |
+| `PasswordManagementActivityUiTest`, `PasswordManagementFlowTest`, `PasswordAdapterDiffTest` (`app/src/androidTest/.../ui/`), `PasswordDiffCallbackTest` (`app/src/test/.../ui/`) | On-phone password screens and list updates |
 
 ## Related features
 

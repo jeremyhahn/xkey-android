@@ -1,7 +1,7 @@
 # Trust store and bootstrap architecture
 
-> **Status: REFERENCE** · Last verified: 2026-11-12
-> As-built description of how xKey fetches CA certificates from a server, keeps them in its trust store, and checks device certificate chains against them.
+> **Status: REFERENCE** · Last verified: 2026-11-23
+> How xKey fetches CA certificates from a server, keeps them in its trust store, and checks device certificate chains against them.
 
 ## Summary
 
@@ -13,14 +13,14 @@ skipped.
 
 Certificates reach the store in four ways:
 
-- **Bootstrap** (`BootstrapClient`): fetch the CA bundle from a server at
+- Bootstrap (`BootstrapClient`): fetch the CA bundle from a server at
   `/v1/ca/bootstrap`, trusting the connection by DANE, Noise_NK, an SPKI pin or
   the system trust store.
-- **URL import** (`CABundleFetcher`): fetch `/acme/ca-bundle` from a given base
+- URL import (`CABundleFetcher`): fetch `/acme/ca-bundle` from a given base
   URL and import each certificate.
-- **Manual or built-in import**: `importCertificate` from the trusted-CA screen,
+- Manual or built-in import: `importCertificate` from the trusted-CA screen,
   and `importInternalCACertificate` for the xKey root and intermediate CAs.
-- **Sync** with the desktop (see [store-sync](../store-sync/architecture.md)).
+- Sync with the desktop (see [store-sync](../store-sync/architecture.md)).
 
 The store is then used to check chains: `verifyIDevIDChain` runs PKIX
 validation (revocation checking off) against the stored CAs. TPM enrollment in
@@ -36,7 +36,7 @@ validation (revocation checking off) against the stored CAs. TPM enrollment in
 | `DnsTlsaResolver`, `TlsaRecord`, `DaneVerifier`, `DaneTlsaException` | `app/src/main/kotlin/com/automatethethings/xkey/bootstrap/DaneTlsa.kt` | TLSA lookup over UDP (TCP on truncation) or DNS-over-TLS, with the DNSSEC AD flag required when configured; DANE-EE and DANE-TA chain checks |
 | `BootstrapException` and subclasses | `app/src/main/kotlin/com/automatethethings/xkey/bootstrap/BootstrapExceptions.kt` | Typed bootstrap failures |
 | `BootstrapMethod`, `BootstrapSettingsData` | `app/src/main/kotlin/com/automatethethings/xkey/settings/BootstrapSettings.kt` | Methods `DANE`, `NOISE`, `SPKI`, `DIRECT`; per-method config (`daneConfig`, `noiseConfig`, `spkiConfig`, `directConfig`), `timeoutSeconds`, `getEnabledMethods()` |
-| `CABundleFetcher`, `CABundleFetchException` | `app/src/main/kotlin/com/automatethethings/xkey/truststore/CABundleFetcher.kt` | `fetchBundle(baseUrl)`: GET `/acme/ca-bundle` (30 s timeout); a content type other than `application/pem-certificate-chain` is only logged. Declares its own `CABundleResult` |
+| `CABundleFetcher`, `CABundleFetchException` | `app/src/main/kotlin/com/automatethethings/xkey/truststore/CABundleFetcher.kt` | `fetchBundle(baseUrl)`: GET `/acme/ca-bundle` (30 s timeout), with the same 1 MB and 64-certificate limits as `BootstrapClient`; a content type other than `application/pem-certificate-chain` is only logged. Declares its own `CABundleResult` |
 | `TrustStoreRepository`, `TrustedCA`, `VerificationResult`, `ImportResult` | `app/src/main/kotlin/com/automatethethings/xkey/truststore/TrustStoreRepository.kt` | Store: `importCertificate`, `importFromURL`, `importInternalCACertificate`, `getAllCertificates`, `getCertificateDER`, `hasCertificate`, `deleteCertificate`, `clearAll`, `getExpiringCertificates`, `getExpiredCertificates`, `refreshSystemInstallStatus`, `updateSystemInstalled`, `verifyIDevIDChain` |
 | `IDevIDVerifier`, `IDevIDVerificationResult` | `app/src/main/kotlin/com/automatethethings/xkey/truststore/IDevIDVerifier.kt` | `verify(certificateChain)` and `isIDevIDStillValid`, built on `verifyIDevIDChain` |
 | `SettingsActivity` | `app/src/main/kotlin/com/automatethethings/xkey/ui/SettingsActivity.kt` | "Fetch CA" button: derives bootstrap settings from the server URL, runs `fetchCABundle`, imports the result |
@@ -49,7 +49,7 @@ There is no wire method that fetches or imports a CA bundle; the inbound and
 outbound `sync*TrustStore` methods are described in
 [store-sync](../store-sync/architecture.md).
 
-- `SettingsActivity`, "Fetch CA": `deriveSettingsFromUrl(url)`, then
+- `SettingsActivity`, "Fetch CA": `BootstrapSettingsRepository.deriveSettingsFromUrl(url)`, then
   `BootstrapClient(settings).fetchCABundle()`, then `importCertificate` for each
   certificate with the label `Bootstrap (<method displayName>)`. It also saves
   the URL as the XKMS endpoint (`updateXkmsEndpoint`).
@@ -86,7 +86,7 @@ sequenceDiagram
     participant IV as IDevIDVerifier
 
     User->>UI: Fetch CA (server URL)
-    UI->>UI: deriveSettingsFromUrl(url)
+    UI->>UI: BootstrapSettingsRepository.deriveSettingsFromUrl(url)
     UI->>BC: fetchCABundle()
     loop each enabled method (DANE, NOISE, SPKI, DIRECT)
         BC->>Srv: fetchWithMethod(method)
@@ -126,7 +126,8 @@ Bootstrap (`BootstrapException` subclasses):
 | `CertificateParseException` | Too many certificates in the bundle |
 
 URL import: `CABundleFetchException` for a network error, a non-success HTTP
-status, an empty body, or a body with no valid certificate.
+status, an empty body, a body over 1 MB, more than 64 certificates, or a body
+with no valid certificate.
 
 Trust store:
 

@@ -1,9 +1,5 @@
 # shellcheck shell=sh disable=SC2034  # sourced: every name is read by its caller
-# The one pin file: every tool version, with a
-# SHA-256 for each download. Read by build/docker/devcontainer/Dockerfile (sourced
-# in each fetch step), by the Makefile (`include`) and by scripts/install-trivy.sh.
-# Plain KEY=value lines only, no quotes or spaces, so make and sh both read it.
-# Next versions come from each upstream named on the line above its pin.
+# Every tool version and download SHA-256, as plain KEY=value lines read by the Dockerfile, the Makefile and install-trivy.sh.
 
 # Debian stable slim, by index digest (docker.io/library/debian:trixie-slim).
 # Debian, not alpine: aapt2 and the rest of the Android
@@ -31,10 +27,7 @@ ANDROID_BUILD_TOOLS=36.0.0
 ANDROID_BUILD_TOOLS_ARCHIVE=build-tools_r36_linux.zip
 ANDROID_BUILD_TOOLS_SHA256=5d9ac77fb6ff43d9da518a337b4fcf8f9097113df531d99ccefe80ef7ce8250b
 
-# Gradle: the distribution gradle/wrapper/gradle-wrapper.properties names
-# (https://services.gradle.org/distributions/gradle-9.8.1-bin.zip.sha256).
-# AGP 9.4 needs Gradle 9.6.0 or newer. 9.8.1 bundles jackson 2.22.3 and
-# bcprov 1.85 and drops jsoup, which clears the trivy findings in /opt/gradle/lib.
+# Gradle, as gradle-wrapper.properties names it; AGP 9.4 needs 9.6.0 or newer.
 GRADLE_VERSION=9.8.1
 GRADLE_SHA256=dce76f55f8e251a3a1f130eb120f30b3d271de2b76c9b0729d316b5a1b6dc01f
 

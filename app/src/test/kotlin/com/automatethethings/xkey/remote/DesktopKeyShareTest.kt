@@ -76,10 +76,10 @@ class DesktopKeyShareTest {
     private val pem = "-----BEGIN PUBLIC KEY-----\nMFkw\n-----END PUBLIC KEY-----\n"
     private val listed = mutableSetOf<Pair<String, String>>()
     private val grants = mockk<KeySharingPolicyDao> {
-        coEvery { isKeySharedWithPeer(any(), any()) } answers { (firstArg<String>() to secondArg<String>()) in listed }
+        coEvery { isPeerGranted(any(), any()) } answers { (firstArg<String>() to secondArg<String>()) in listed }
     }
     private val paired = PairedDeviceRepository(InMemorySharedPreferences())
-    private val permission = SharePermission(grants, paired)
+    private val permission = SharePermission(grants, paired, com.automatethethings.xkey.storage.FakeKeyPolicyTables().store())
 
     /** The key store as it stands now; [entity] records every key it builds. */
     private val stored = mutableMapOf<String, KeyEntity>()

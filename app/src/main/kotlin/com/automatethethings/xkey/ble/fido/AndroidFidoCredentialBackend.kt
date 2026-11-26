@@ -25,6 +25,8 @@ import com.automatethethings.xkey.crypto.BiometricRequiredException
 import com.automatethethings.xkey.crypto.KeyNotFoundException
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.crypto.UserCancelledException
+import com.automatethethings.xkey.crypto.GeneratedKeyDiscard
+import com.automatethethings.xkey.crypto.UserKeyKind
 import com.automatethethings.xkey.protocol.Fido2WireIds.decodeBase64
 import com.automatethethings.xkey.protocol.Fido2WireIds.wireId
 import com.automatethethings.xkey.protocol.KeyIdReservations
@@ -281,6 +283,9 @@ class AndroidFidoCredentialBackend(
         // is written. Any failure here, a cancellation (the client
         // disconnected or sent CANCEL) included, removes the new key and
         // leaves the old passkeys untouched.
+        // Each replaced passkey's key as recorded: its ID and the namespace
+        // its row's key lives in, read before the rows go.
+        var replacedKeys = emptyList<PendingKey>()
         val replaced = try {
             // The discoverable passkeys this client could see for the same
             // account. One the sharing policy hides from BLE clients is never
@@ -302,8 +307,12 @@ class AndroidFidoCredentialBackend(
             currentCoroutineContext().ensureActive()
             // Their keys are recorded before their rows go, so a key whose
             // deletion throws, or whose process dies first, is deleted by a
-            // later retry. Without the record no old passkey goes.
-            if (stillReplaceable.isNotEmpty()) pendingKeyDeletions.add(stillReplaceable.map { it.keyId })
+            // later retry. Without the record no old passkey goes. Each is
+            // recorded under the alias its row's key really lives at: a
+            // passkey local.generateKey made has a general key, not a
+            // credential one.
+            replacedKeys = stillReplaceable.map { PendingKey(it.keyId, keyKindOf(it)) }
+            if (replacedKeys.isNotEmpty()) pendingKeyDeletions.add(replacedKeys)
             stillReplaceable
         } catch (e: Throwable) {
             withContext(NonCancellable) { dropNewKey(keyId) }
@@ -372,9 +381,9 @@ class AndroidFidoCredentialBackend(
         forget(keyId)
         (replaced.map { it.keyId } - removed.toSet()).forEach { forget(it) }
         withContext(NonCancellable) {
-            removed.forEach { id ->
+            replacedKeys.filter { it.keyId in removed }.forEach { key ->
                 try {
-                    deleteUnownedKey(id)
+                    deleteUnownedKey(key)
                 } catch (e: Exception) {
                     Log.w(TAG, "A replaced passkey's Keystore key could not be deleted or recorded", e)
                 }
@@ -628,7 +637,7 @@ class AndroidFidoCredentialBackend(
      */
     private suspend fun dropNewKey(keyId: String) {
         try {
-            deleteUnownedKey(keyId)
+            deleteUnownedKey(PendingKey(keyId, UserKeyKind.CREDENTIAL))
         } catch (e: Exception) {
             Log.w(TAG, "A failed registration's Keystore key could not be deleted or recorded", e)
         }
@@ -644,30 +653,55 @@ class AndroidFidoCredentialBackend(
         KeyIdReservations.process.withKeyLock(storedKeyLockId(keyId), block)
 
     /**
-     * The one way this backend removes a passkey's Keystore key: under
-     * [withStoredKey], and only while no row owns [keyId]. A row there now,
+     * The one way this backend removes a passkey's Keystore key, [key]'s
+     * alias in its own namespace: under [withStoredKey], and only while no
+     * row owns its ID. A row there now,
      * one completed by a registration or made again under the ID by another
      * transport, owns the key, which stays; only the record is dropped.
      */
-    private suspend fun deleteUnownedKey(keyId: String) = withStoredKey(keyId) {
-        if (keyDao.getByKeyId(keyId) != null) forget(keyId) else deleteKey(keyId)
+    private suspend fun deleteUnownedKey(key: PendingKey) = withStoredKey(key.keyId) {
+        if (keyDao.getByKeyId(key.keyId) != null) forget(key.keyId) else deleteKey(key)
     }
 
     /**
-     * Deletes a Keystore key, for a passkey with no row left; called only
-     * from [deleteUnownedKey]. A deletion that throws is kept in [pendingKeyDeletions] for
-     * [retryPendingKeyDeletions], never discarded; one that succeeds is
-     * forgotten. Throws only when a failed deletion cannot be recorded.
+     * The namespace [entity]'s key lives in: a general key when its row's
+     * alias ([KeystoreManager.keyRowAlias]) is the general one, as for a
+     * fido2 key local.generateKey made, else a credential.
      */
-    private fun deleteKey(keyId: String) {
-        try {
-            keystoreManager.deleteKey(keyId)
-        } catch (e: Exception) {
-            Log.w(TAG, "A passkey's Keystore key could not be deleted; it is kept for a later retry", e)
-            pendingKeyDeletions.add(listOf(keyId))
+    private fun keyKindOf(entity: KeyEntity): UserKeyKind =
+        if (keystoreManager.keyRowAlias(entity.keyId, KeyTypeFido2, entity.publicKeyDer) ==
+            KeystoreManager.userKeyAlias(entity.keyId, UserKeyKind.GENERAL)
+        ) UserKeyKind.GENERAL else UserKeyKind.CREDENTIAL
+
+    /**
+     * Deletes a Keystore key, for a passkey with no row left; called only
+     * from [deleteUnownedKey]. A deletion that throws or reports
+     * [GeneratedKeyDiscard.FAILED] is kept in [pendingKeyDeletions] for
+     * [retryPendingKeyDeletions], never discarded; one whose key is now gone
+     * (deleted, or absent already) is forgotten. Throws only when a failed
+     * deletion cannot be recorded. A record whose namespace is not known
+     * deletes the key under its ID in every namespace
+     * ([PendingKey.candidates]) and is forgotten only once none failed.
+     */
+    private fun deleteKey(key: PendingKey) {
+        val outcomes = key.candidates.map { kind ->
+            try {
+                keystoreManager.deleteKey(key.keyId, kind)
+            } catch (e: Exception) {
+                Log.w(TAG, "A passkey's Keystore key could not be deleted", e)
+                GeneratedKeyDiscard.FAILED
+            }
+        }
+        if (GeneratedKeyDiscard.FAILED in outcomes) {
+            Log.w(TAG, "A passkey's Keystore key is still there; it is kept for a later retry")
+            pendingKeyDeletions.add(listOf(key))
             return
         }
-        forget(keyId)
+        try {
+            pendingKeyDeletions.remove(key)
+        } catch (e: Exception) {
+            Log.w(TAG, "A pending Keystore deletion record could not be cleared", e)
+        }
     }
 
     /**
@@ -683,14 +717,16 @@ class AndroidFidoCredentialBackend(
      */
     private suspend fun retryPendingKeyDeletions() {
         val recorded = try {
-            pendingKeyDeletions.all() + pendingKeyDeletions.registrations()
+            // A registration's key is the credential key it made.
+            pendingKeyDeletions.all() +
+                pendingKeyDeletions.registrations().map { PendingKey(it, UserKeyKind.CREDENTIAL) }
         } catch (e: Exception) {
             Log.w(TAG, "Pending Keystore deletions could not be read; they stay recorded", e)
             emptySet()
         }
-        for (keyId in recorded) {
+        for (key in recorded) {
             try {
-                deleteUnownedKey(keyId)
+                deleteUnownedKey(key)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {

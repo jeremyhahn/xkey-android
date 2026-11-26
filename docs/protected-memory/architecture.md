@@ -1,9 +1,9 @@
 # Protected memory architecture
 
-> **Status: REFERENCE** · Last verified: 2026-11-12
-> As-built description of how `NoiseSession` overwrites Noise key material on the heap with `fill(0)`, and the limits of that on Android's managed heap.
+> Status: reference. Last checked against main on 2026-11-23.
+> This page describes how `NoiseSession` overwrites Noise key material on the heap with `fill(0)`, and the limits of that on Android's managed heap.
 
-## Summary
+## Overview
 
 `NoiseSession` runs the responder side of `Noise_XX_25519_ChaChaPoly_SHA256`
 for the BLE (`GattServer`), TCP (`TcpHsmServer`) and USB
@@ -15,7 +15,7 @@ hash and the send and receive transport keys. The intermediates are zeroed
 too: DH outputs, the HKDF pseudorandom key, PKCS#8 encodings and the clamped
 scalar copy.
 
-The class KDoc says this is **best effort** and hygiene, not a compliance
+The class KDoc calls this best effort: it is hygiene and makes no compliance
 claim. A generational collector may copy an array before it is zeroed. The
 JCA objects (`SecretKeySpec`, `PKCS8EncodedKeySpec`, `PrivateKey`, `Mac`,
 `Cipher`) keep their own clones. The static key is stored as an immutable
@@ -26,6 +26,10 @@ key lives as long as the session object.
 Public keys (ours, the peer's, both ephemerals) and the prologue are not
 secret and are not zeroed. Their getters (`getRemoteStaticKey`,
 `getStaticPublicKey`, `getPrologue`) return copies.
+
+This covers the responder only. `BleClient` (`ble/BleClient.kt`), the phone's
+BLE initiator, runs its own Noise state outside `NoiseSession` and does not
+zero it.
 
 ## Components
 
@@ -99,6 +103,6 @@ not prove that no copy is left on the heap.
 
 ## Related features
 
-- [Noise pairing](../noise-pairing/architecture.md) — the handshake these keys belong to.
-- [BLE transport](../ble-transport/architecture.md)
-- [Exportable symmetric keys](../exportable-symmetric-keys/architecture.md) — software key material, which is outside this zeroization scope.
+- [Noise pairing](../noise-pairing/architecture.md): the handshake these keys belong to.
+- [BLE transport](../ble-transport/architecture.md): the BLE side of the session lifecycle.
+- [Exportable symmetric keys](../exportable-symmetric-keys/architecture.md): software key material, which is outside this zeroization scope.

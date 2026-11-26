@@ -41,6 +41,9 @@ import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import com.automatethethings.xkey.R
 import com.automatethethings.xkey.ble.XKeyGattService
+import com.automatethethings.xkey.crypto.PqcBacking
+import com.automatethethings.xkey.crypto.PqcHardware
+import com.automatethethings.xkey.crypto.PqcSoftwareKeyStore
 import com.automatethethings.xkey.piv.PivAlgorithm
 import com.automatethethings.xkey.piv.PivKeyManager
 import com.automatethethings.xkey.piv.PivSlot
@@ -53,6 +56,7 @@ import com.google.android.material.card.MaterialCardView
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.snackbar.Snackbar
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.Flow
@@ -62,6 +66,7 @@ import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.mapLatest
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.security.MessageDigest
 import java.security.cert.CertificateFactory
 import java.security.cert.X509Certificate
@@ -80,7 +85,8 @@ import java.util.Locale
  * - Gradient toolbar with slot summary
  * - Hero summary card showing populated slot count and type badges
  * - Per-slot cards with key status, algorithm badges, and certificate expiry indicators
- * - Key generation dialog supporting ES256, ES384, and RS2048 algorithms
+ * - Key generation dialog listing every PivAlgorithm (ECDSA P-256/P-384, RSA 2048/3072/4096),
+ *   with Ed25519 and X25519 on Android 13 and later
  * - Reactive UI updates via Room Flow observation
  *
  * Follows the programmatic UI pattern established by [OathActivity].
@@ -140,7 +146,10 @@ class PivActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
 
         val db = XKeyDatabase.getInstance(this)
-        pivKeyManager = PivKeyManager(db.pivSlotDao())
+        pivKeyManager = PivKeyManager(
+            db.pivSlotDao(),
+            pqcStore = PqcSoftwareKeyStore.registerShared(applicationContext)
+        )
 
         buildUI()
         setContentView(rootLayout)
@@ -947,21 +956,70 @@ class PivActivity : AppCompatActivity() {
     // -------------------------------------------------------------------------
 
     private fun showGenerateKeyDialog(slot: PivSlot) {
-        val algorithms = PivAlgorithm.entries.toTypedArray()
+        lifecycleScope.launch {
+            // Ed25519 and X25519 need the Android 13 Keystore in secure
+            // hardware; the manager's list leaves them out on a device that
+            // cannot make them there. Its first check may generate a probe
+            // key, so it runs off the main thread.
+            val algorithms = withContext(Dispatchers.IO) { pivKeyManager.availableAlgorithms() }
+            if (!isFinishing && !isDestroyed) showGenerateKeyDialog(slot, algorithms.toTypedArray())
+        }
+    }
+
+    private fun showGenerateKeyDialog(slot: PivSlot, algorithms: Array<PivAlgorithm>) {
         val algorithmNames = algorithms.map { it.displayName }.toTypedArray()
         var selectedIndex = 0
 
         // AlertController only attaches a choice list when the message is
         // null, so setting both silently drops the list and pins the
         // selection to the first algorithm. The prompt therefore lives in the
-        // title rather than as a message.
-        MaterialAlertDialogBuilder(this)
+        // title rather than as a message, and the Android 13 note is a
+        // custom view below the list.
+        val builder = MaterialAlertDialogBuilder(this)
             .setTitle(getString(R.string.piv_generate_title, slot.hexId))
             .setSingleChoiceItems(algorithmNames, selectedIndex) { _, which ->
                 selectedIndex = which
             }
             .setPositiveButton(getString(R.string.piv_generate_key)) { _, _ ->
-                generateKey(slot, algorithms[selectedIndex])
+                val algorithm = algorithms[selectedIndex]
+                val set = algorithm.mlDsaSet
+                if (set == null) {
+                    generateKey(slot, algorithm)
+                } else {
+                    showStorageDialog(slot, algorithm, KeyCreationAlgorithms.storageOptions(set, PqcHardware.supported()))
+                }
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+        if (algorithms.size < PivAlgorithm.entries.size) {
+            val padding = UIHelpers.dpToPxInt(this, 24)
+            builder.setView(TextView(this).apply {
+                text = getString(R.string.piv_generate_curve25519_needs_android13)
+                setPadding(padding, UIHelpers.dpToPxInt(this@PivActivity, 8), padding, 0)
+            })
+        }
+        builder.show()
+    }
+
+    /**
+     * Where an ML-DSA slot key lives. Hardware is listed only for the sets
+     * the device makes there; software alone needs no choice.
+     */
+    private fun showStorageDialog(slot: PivSlot, algorithm: PivAlgorithm, options: List<PqcBacking>) {
+        if (options.size == 1) {
+            generateKey(slot, algorithm, options.single())
+            return
+        }
+        val labels = options.map {
+            getString(if (it == PqcBacking.HARDWARE) R.string.key_storage_hardware else R.string.key_storage_software)
+        }.toTypedArray()
+        var selectedIndex = 0
+        MaterialAlertDialogBuilder(this)
+            .setTitle(getString(R.string.piv_storage_title, algorithm.displayName))
+            .setSingleChoiceItems(labels, selectedIndex) { _, which ->
+                selectedIndex = which
+            }
+            .setPositiveButton(getString(R.string.piv_generate_key)) { _, _ ->
+                generateKey(slot, algorithm, options[selectedIndex])
             }
             .setNegativeButton(android.R.string.cancel, null)
             .show()
@@ -976,10 +1034,10 @@ class PivActivity : AppCompatActivity() {
     internal var generateJob: Job? = null
         private set
 
-    private fun generateKey(slot: PivSlot, algorithm: PivAlgorithm) {
+    private fun generateKey(slot: PivSlot, algorithm: PivAlgorithm, backing: PqcBacking = PqcBacking.SOFTWARE) {
         generateJob = lifecycleScope.launch {
             try {
-                pivKeyManager.generateKey(slot, algorithm)
+                pivKeyManager.generateKey(slot, algorithm, backing)
                 Snackbar.make(
                     rootLayout,
                     getString(R.string.piv_generate_success, slot.hexId),

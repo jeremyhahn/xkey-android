@@ -101,7 +101,7 @@ class CreateCredentialHandlerTest {
         runBlocking {
             for (rpId in touchedRpIds) {
                 for (row in credentialDao.getByRpId(rpId)) {
-                    runCatching { keystoreManager.deleteKey(row.credentialId) }
+                    runCatching { keystoreManager.deleteKey(row.credentialId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) }
                     credentialDao.deleteByCredentialId(row.credentialId)
                     keyDao.deleteByKeyId(row.credentialId)
                 }
@@ -220,6 +220,50 @@ class CreateCredentialHandlerTest {
             failure.message!!.contains("origin")
         )
         assertNotNull("The framework failure should be preserved", failure.cause)
+        assertTrue(
+            "A refused ceremony must not leave a credential behind",
+            runBlocking { credentialDao.getByRpId(rpId) }.isEmpty()
+        )
+    }
+
+    @Test
+    fun browserSuppliedHash_isRefusedWhenTheCallerHasNoVerifiedOrigin() {
+        val rpId = nextRpId()
+        val request = CredentialRequestFixtures.providerCreateRequest(
+            requestJson = CredentialRequestFixtures.createRequestJson(rpId),
+            callingAppInfo = CredentialRequestFixtures.appWithoutOrigin()
+        )
+
+        val failure = assertThrows(CredentialCreationException::class.java) {
+            runBlocking { handler.handleCreateCredential(request, userVerified = true) }
+        }
+
+        assertTrue(
+            "A supplied hash fixes the origin, so it needs a verified one: ${failure.message}",
+            failure.message!!.contains("verified web origin")
+        )
+        assertTrue(
+            "A refused ceremony must not leave a credential behind",
+            runBlocking { credentialDao.getByRpId(rpId) }.isEmpty()
+        )
+    }
+
+    @Test
+    fun browserSuppliedHash_isRefusedFromABrowserOnAnotherSite() {
+        val rpId = nextRpId()
+        val request = CredentialRequestFixtures.providerCreateRequest(
+            requestJson = CredentialRequestFixtures.createRequestJson(rpId),
+            callingAppInfo = CredentialRequestFixtures.privilegedBrowserOn("other-site.example.com")
+        )
+
+        val failure = assertThrows(CredentialCreationException::class.java) {
+            runBlocking { handler.handleCreateCredential(request, userVerified = true) }
+        }
+
+        assertTrue(
+            "The refusal should name the relying party: ${failure.message}",
+            failure.message!!.contains("not valid for the caller's origin")
+        )
         assertTrue(
             "A refused ceremony must not leave a credential behind",
             runBlocking { credentialDao.getByRpId(rpId) }.isEmpty()
@@ -358,7 +402,7 @@ class CreateCredentialHandlerTest {
         val inner = response.getJSONObject("response")
 
         val advertised = CredentialRequestFixtures.decodeUrl(inner.getString("publicKey"))
-        val fromKeystore = keystoreManager.getPublicKey(credentialId)
+        val fromKeystore = keystoreManager.getPublicKey(credentialId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL)
 
         assertNotNull("The Keystore should hold the generated key", fromKeystore)
         assertArrayEquals(

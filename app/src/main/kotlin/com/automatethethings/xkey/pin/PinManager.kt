@@ -50,16 +50,23 @@ enum class PinType {
  *
  * @property failedAttempts Number of consecutive failed attempts.
  * @property maxAttempts Maximum allowed attempts before lockout.
- * @property isLocked Whether the PIN is currently locked.
- * @property lockoutUntil Epoch milliseconds until lockout expires (0 = not locked).
- * @property recoverySeconds Remaining seconds until lockout expires.
+ * @property isLocked Whether the PIN is currently locked (timed or permanent).
+ * @property lockoutUntil Informational wall-clock epoch milliseconds the lockout
+ *   ends at (0 = not locked, [Long.MAX_VALUE] = blocked for good). The lockout
+ *   runs on a monotonic clock; this is the remaining time added to the wall
+ *   clock when the status was built.
+ * @property recoverySeconds Remaining seconds until the lockout ends
+ *   ([Int.MAX_VALUE] when blocked for good).
+ * @property permanent Whether the PIN is blocked until reset: the User PIN by
+ *   [PinManager.resetLockout], the SO PIN only by a full reset.
  */
 data class LockoutStatus(
     val failedAttempts: Int,
     val maxAttempts: Int,
     val isLocked: Boolean,
     val lockoutUntil: Long,
-    val recoverySeconds: Int
+    val recoverySeconds: Int,
+    val permanent: Boolean = false
 )
 
 /**
@@ -91,7 +98,10 @@ class PinRequiredException(message: String) : PinException(message)
  * @property lockoutStatus The current lockout status at the time of the exception.
  */
 class PinLockedException(val lockoutStatus: LockoutStatus) :
-    Exception("PIN is locked until ${lockoutStatus.lockoutUntil}")
+    Exception(
+        if (lockoutStatus.permanent) "PIN is blocked until reset"
+        else "PIN is locked until ${lockoutStatus.lockoutUntil}"
+    )
 
 /**
  * Core PIN management logic for the xKey security key.
@@ -128,9 +138,11 @@ class PinLockedException(val lockoutStatus: LockoutStatus) :
  * ```
  *
  * @param pinSettingsRepository Repository for persisting PIN settings.
+ * @param clock The monotonic time base of the lockout ([PinLockout]).
  */
 class PinManager(
-    private val pinSettingsRepository: PinSettingsRepository
+    private val pinSettingsRepository: PinSettingsRepository,
+    private val clock: LockoutClock = pinSettingsRepository.lockoutClock
 ) {
 
     private companion object {
@@ -186,12 +198,10 @@ class PinManager(
 
         val wasAlreadySet = settings.soPinSet
         pinSettingsRepository.updateSettings(
-            settings.copy(
+            withLockoutState(PinType.SO_PIN, settings, LockoutState()).copy(
                 soPinSet = true,
                 soPinHashBase64 = Base64.encodeToString(hash, Base64.NO_WRAP),
-                soPinSaltBase64 = Base64.encodeToString(salt, Base64.NO_WRAP),
-                failedSoPinAttempts = 0,
-                soPinLockedUntil = 0
+                soPinSaltBase64 = Base64.encodeToString(salt, Base64.NO_WRAP)
             )
         )
         if (wasAlreadySet) AuditLogger.logPinChanged(PinType.SO_PIN.auditName)
@@ -272,12 +282,10 @@ class PinManager(
         val currentSettings = pinSettingsRepository.getSettings()
         val wasAlreadySet = currentSettings.userPinSet
         pinSettingsRepository.updateSettings(
-            currentSettings.copy(
+            withLockoutState(PinType.USER_PIN, currentSettings, LockoutState()).copy(
                 userPinSet = true,
                 userPinHashBase64 = Base64.encodeToString(hash, Base64.NO_WRAP),
-                userPinSaltBase64 = Base64.encodeToString(salt, Base64.NO_WRAP),
-                failedUserPinAttempts = 0,
-                userPinLockedUntil = 0
+                userPinSaltBase64 = Base64.encodeToString(salt, Base64.NO_WRAP)
             )
         )
         if (wasAlreadySet) AuditLogger.logPinChanged(PinType.USER_PIN.auditName)
@@ -309,12 +317,10 @@ class PinManager(
         // Re-read settings after User PIN verification (it may have updated attempt counters)
         val currentSettings = pinSettingsRepository.getSettings()
         pinSettingsRepository.updateSettings(
-            currentSettings.copy(
+            withLockoutState(PinType.USER_PIN, currentSettings, LockoutState()).copy(
                 userPinSet = true,
                 userPinHashBase64 = Base64.encodeToString(hash, Base64.NO_WRAP),
-                userPinSaltBase64 = Base64.encodeToString(salt, Base64.NO_WRAP),
-                failedUserPinAttempts = 0,
-                userPinLockedUntil = 0
+                userPinSaltBase64 = Base64.encodeToString(salt, Base64.NO_WRAP)
             )
         )
         AuditLogger.logPinChanged(PinType.USER_PIN.auditName)
@@ -347,9 +353,20 @@ class PinManager(
      * @param pinType The PIN type to check.
      * @return The current [LockoutStatus].
      */
-    suspend fun getLockoutStatus(pinType: PinType): LockoutStatus {
+    suspend fun getLockoutStatus(pinType: PinType): LockoutStatus = pinStateMutex.withLock {
         val settings = pinSettingsRepository.getSettings()
-        return buildLockoutStatus(pinType, settings)
+        val state = lockoutState(pinType, settings)
+        val policy = policy(settings)
+        // Re-anchor a running timed lockout to this boot, so a restart resumes
+        // from what was left now rather than from an older measurement.
+        if (PinLockout.remainingMs(state, clock) > 0) {
+            val reanchored = PinLockout.reanchor(state, clock)
+            if (reanchored != state) {
+                pinSettingsRepository.updateSettings(withLockoutState(pinType, settings, reanchored))
+            }
+            return@withLock statusOf(reanchored, policy)
+        }
+        statusOf(state, policy)
     }
 
     /**
@@ -374,10 +391,7 @@ class PinManager(
         // Re-read settings after SO PIN verification
         val currentSettings = pinSettingsRepository.getSettings()
         pinSettingsRepository.updateSettings(
-            currentSettings.copy(
-                failedUserPinAttempts = 0,
-                userPinLockedUntil = 0
-            )
+            withLockoutState(PinType.USER_PIN, currentSettings, LockoutState())
         )
         AuditLogger.logPinLockoutReset()
     }
@@ -409,31 +423,21 @@ class PinManager(
         return pinSettingsRepository.getSettings().userPinSet
     }
 
-    /**
-     * Internal PIN verification with lockout enforcement.
-     *
-     * Steps:
-     * 1. Check lockout status; throw [PinLockedException] if locked.
-     * 2. Hash the input PIN with the stored salt.
-     * 3. Compare against the stored hash.
-     * 4. On failure: increment failed attempts, trigger lockout if max exceeded.
-     * 5. On success: reset failed attempts counter.
-     *
-     * @param pin The plaintext PIN to verify.
-     * @param pinType The type of PIN being verified.
-     * @param settings The current PIN settings snapshot.
-     * @return `true` if the PIN is correct.
-     * @throws PinLockedException if the PIN is currently locked out.
-     * @throws PinIncorrectException if the PIN is incorrect.
-     */
     private suspend fun verifyPinInternal(
         pin: String,
         pinType: PinType,
         settings: com.automatethethings.xkey.settings.PinSettingsData
     ): Boolean {
-        // Step 1: Check lockout status
-        val lockoutStatus = buildLockoutStatus(pinType, settings)
-        if (lockoutStatus.isLocked) {
+        // Step 1: Check lockout status. A timed lockout is re-anchored to this
+        // boot as it is refused, so a later boot resumes from here.
+        val state = lockoutState(pinType, settings)
+        val policy = policy(settings)
+        if (PinLockout.isLocked(state, policy, clock)) {
+            val reanchored = PinLockout.reanchor(state, clock)
+            if (reanchored != state) {
+                pinSettingsRepository.updateSettings(withLockoutState(pinType, settings, reanchored))
+            }
+            val lockoutStatus = statusOf(reanchored, policy)
             AuditLogger.logPinVerificationFailed(pinType.auditName, lockoutStatus.failedAttempts)
             throw PinLockedException(lockoutStatus)
         }
@@ -464,111 +468,105 @@ class PinManager(
 
         if (isValid) {
             // Step 5: Reset failed attempts on success
-            when (pinType) {
-                PinType.SO_PIN -> {
-                    pinSettingsRepository.updateSettings(
-                        settings.copy(
-                            failedSoPinAttempts = 0,
-                            soPinLockedUntil = 0
-                        )
-                    )
-                }
-                PinType.USER_PIN -> {
-                    pinSettingsRepository.updateSettings(
-                        settings.copy(
-                            failedUserPinAttempts = 0,
-                            userPinLockedUntil = 0
-                        )
-                    )
-                }
-            }
+            pinSettingsRepository.updateSettings(withLockoutState(pinType, settings, LockoutState()))
             AuditLogger.logPinVerificationSuccess(pinType.auditName)
             return true
         }
 
-        // Step 4: Increment failed attempts on failure, possibly trigger lockout
-        val newFailedAttempts: Int
-        when (pinType) {
-            PinType.SO_PIN -> {
-                newFailedAttempts = settings.failedSoPinAttempts + 1
-                val lockedUntil = PinLockout.lockedUntil(
-                    newFailedAttempts, settings.maxPinAttempts, settings.lockoutDurationSeconds,
-                    System.currentTimeMillis()
-                )
-                pinSettingsRepository.updateSettings(
-                    settings.copy(
-                        failedSoPinAttempts = newFailedAttempts,
-                        soPinLockedUntil = lockedUntil
-                    )
-                )
-            }
-            PinType.USER_PIN -> {
-                newFailedAttempts = settings.failedUserPinAttempts + 1
-                val lockedUntil = PinLockout.lockedUntil(
-                    newFailedAttempts, settings.maxPinAttempts, settings.lockoutDurationSeconds,
-                    System.currentTimeMillis()
-                )
-                pinSettingsRepository.updateSettings(
-                    settings.copy(
-                        failedUserPinAttempts = newFailedAttempts,
-                        userPinLockedUntil = lockedUntil
-                    )
-                )
-            }
-        }
+        // Step 4: Count the failure; it may start a (longer) lockout or a permanent block
+        val failed = PinLockout.recordFailure(state, policy, clock)
+        pinSettingsRepository.updateSettings(withLockoutState(pinType, settings, failed))
 
-        AuditLogger.logPinVerificationFailed(pinType.auditName, newFailedAttempts)
-        if (newFailedAttempts >= settings.maxPinAttempts) {
+        AuditLogger.logPinVerificationFailed(pinType.auditName, failed.failedAttempts)
+        if (PinLockout.isLocked(failed, policy, clock)) {
             AuditLogger.logPinLockoutTriggered(
                 pinType.auditName,
-                System.currentTimeMillis() + (settings.lockoutDurationSeconds * 1000L)
+                PinLockout.displayDeadline(failed, policy, clock)
             )
         }
         throw PinIncorrectException()
     }
 
     /**
-     * Build a [LockoutStatus] from the current settings snapshot.
-     *
-     * If the lockout time has expired, the PIN is not considered locked
-     * even if [lockoutUntil] is non-zero (the counter will be cleared
-     * on the next successful verification).
-     *
-     * @param pinType The PIN type to check.
-     * @param settings The current settings snapshot.
-     * @return The computed [LockoutStatus].
+     * The lockout policy the PINs are held to: the configured thresholds and
+     * backoff, with the permanent block at [PinLockout.PERMANENT_BLOCK_ATTEMPTS].
      */
+    private fun policy(settings: com.automatethethings.xkey.settings.PinSettingsData) =
+        PinLockout.Policy(
+            maxAttempts = settings.maxPinAttempts,
+            lockoutDurationSeconds = settings.lockoutDurationSeconds,
+            backoff = settings.backoffEnabled,
+            permanentBlock = true
+        )
+
+    /** The stored lockout state of [pinType], migrating an old epoch deadline. */
+    private fun lockoutState(
+        pinType: PinType,
+        settings: com.automatethethings.xkey.settings.PinSettingsData
+    ): LockoutState = when (pinType) {
+        PinType.SO_PIN -> PinLockout.fromStored(
+            failedAttempts = settings.failedSoPinAttempts,
+            remainingMs = settings.soPinLockoutRemainingMs,
+            anchorElapsedMs = settings.soPinLockoutAnchorElapsedMs,
+            anchorBootId = settings.soPinLockoutBootId,
+            legacyLockedUntil = settings.soPinLockedUntil,
+            wallNow = clock.currentTimeMillis()
+        )
+        PinType.USER_PIN -> PinLockout.fromStored(
+            failedAttempts = settings.failedUserPinAttempts,
+            remainingMs = settings.userPinLockoutRemainingMs,
+            anchorElapsedMs = settings.userPinLockoutAnchorElapsedMs,
+            anchorBootId = settings.userPinLockoutBootId,
+            legacyLockedUntil = settings.userPinLockedUntil,
+            wallNow = clock.currentTimeMillis()
+        )
+    }
+
+    /** [settings] with [pinType]'s lockout replaced by [state]; a default [LockoutState] clears it. */
+    private fun withLockoutState(
+        pinType: PinType,
+        settings: com.automatethethings.xkey.settings.PinSettingsData,
+        state: LockoutState
+    ): com.automatethethings.xkey.settings.PinSettingsData {
+        val deadline = PinLockout.displayDeadline(state, policy(settings), clock)
+        return when (pinType) {
+            PinType.SO_PIN -> settings.copy(
+                failedSoPinAttempts = state.failedAttempts,
+                soPinLockedUntil = deadline,
+                soPinLockoutRemainingMs = state.remainingMs,
+                soPinLockoutAnchorElapsedMs = state.anchorElapsedMs,
+                soPinLockoutBootId = state.anchorBootId
+            )
+            PinType.USER_PIN -> settings.copy(
+                failedUserPinAttempts = state.failedAttempts,
+                userPinLockedUntil = deadline,
+                userPinLockoutRemainingMs = state.remainingMs,
+                userPinLockoutAnchorElapsedMs = state.anchorElapsedMs,
+                userPinLockoutBootId = state.anchorBootId
+            )
+        }
+    }
+
+    /** The [LockoutStatus] of [state] under [policy], measured now. */
+    private fun statusOf(state: LockoutState, policy: PinLockout.Policy): LockoutStatus {
+        val permanent = PinLockout.isPermanent(state.failedAttempts, policy)
+        val remaining = PinLockout.remainingMs(state, clock)
+        return LockoutStatus(
+            failedAttempts = state.failedAttempts,
+            maxAttempts = policy.maxAttempts,
+            isLocked = permanent || remaining > 0,
+            lockoutUntil = PinLockout.displayDeadline(state, policy, clock),
+            recoverySeconds = when {
+                permanent -> Int.MAX_VALUE
+                remaining > 0 -> ((remaining + 999) / 1000).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+                else -> 0
+            },
+            permanent = permanent
+        )
+    }
+
     private fun buildLockoutStatus(
         pinType: PinType,
         settings: com.automatethethings.xkey.settings.PinSettingsData
-    ): LockoutStatus {
-        val failedAttempts: Int
-        val lockedUntil: Long
-        when (pinType) {
-            PinType.SO_PIN -> {
-                failedAttempts = settings.failedSoPinAttempts
-                lockedUntil = settings.soPinLockedUntil
-            }
-            PinType.USER_PIN -> {
-                failedAttempts = settings.failedUserPinAttempts
-                lockedUntil = settings.userPinLockedUntil
-            }
-        }
-
-        val now = System.currentTimeMillis()
-        val isLocked = PinLockout.isLocked(lockedUntil, now)
-        val recoverySeconds = if (isLocked) {
-            ((lockedUntil - now) / 1000).toInt().coerceAtLeast(0)
-        } else {
-            0
-        }
-
-        return LockoutStatus(
-            failedAttempts = failedAttempts,
-            maxAttempts = settings.maxPinAttempts,
-            isLocked = isLocked,
-            lockoutUntil = lockedUntil,
-            recoverySeconds = recoverySeconds
-        )
-    }
+    ): LockoutStatus = statusOf(lockoutState(pinType, settings), policy(settings))
 }

@@ -16,10 +16,12 @@ package com.automatethethings.xkey.remote
 
 import com.automatethethings.xkey.crypto.FileEncryptor
 import com.automatethethings.xkey.crypto.KeystoreManager
-import com.automatethethings.xkey.crypto.SoftwareKeyStore
+import com.automatethethings.xkey.crypto.UserKeyKind
 import com.automatethethings.xkey.protocol.RequestHandler
-import com.automatethethings.xkey.storage.dao.KeyDao
-import com.automatethethings.xkey.storage.deleteKeyRow
+import com.automatethethings.xkey.storage.FakeKeyPolicyTables
+import com.automatethethings.xkey.storage.materialDelete
+import com.automatethethings.xkey.ui.UserKeyDelete
+import com.automatethethings.xkey.ui.deleteUserKey
 import com.automatethethings.xkey.storage.entity.KeyEntity
 import com.automatethethings.xkey.storage.entity.SharingPolicyType
 import io.mockk.coEvery
@@ -100,7 +102,7 @@ class KeyMaterialRemovalShareTest {
      * Software key `xkey_key_a` and hardware key `a` (Keystore alias
      * `xkey_key_a`) both have rows, as in LocalDeleteKeyExactIdTest. A share
      * of `a` waits for admission while [path] (both activities' deleteKey is
-     * one [deleteKeyRow] call) deletes the `xkey_key_a` row: only the
+     * one [deleteUserKey] call through the policy store) deletes the `xkey_key_a` row: only the
      * software key goes, its ID is the one revoked, and the share of `a`
      * sends only while `a`'s material stands.
      */
@@ -109,27 +111,34 @@ class KeyMaterialRemovalShareTest {
         val hardware = row("a")
         val keystoreAliases = mutableSetOf("xkey_key_a")
         val keystore = mockk<KeystoreManager>(relaxed = true)
-        every { keystore.resolveKeystoreAlias(any()) } answers {
+        // This branch's alias rule (#255): an id's general alias is
+        // `xkey_key_<id>`, so only `a` resolves to `xkey_key_a`; the id
+        // `xkey_key_a` is never read as hardware key a's raw alias.
+        every { keystore.resolveKeystoreAlias(any(), any()) } answers {
             when (firstArg<String>()) {
-                "a", "xkey_key_a" -> "xkey_key_a".takeIf { it in keystoreAliases }
+                "a" -> "xkey_key_a".takeIf { secondArg<UserKeyKind>() == UserKeyKind.GENERAL && it in keystoreAliases }
                 else -> null
             }
         }
         every { keystore.deleteByAlias(any()) } answers { keystoreAliases.remove(firstArg<String>()) }
         every { keystore.deleteGeneralKey(any()) } answers { keystoreAliases.remove("xkey_key_" + firstArg<String>()) }
         val softwareStore = mutableSetOf("xkey_key_a")
-        val softwareKeys = mockk<SoftwareKeyStore>(relaxed = true)
-        every { softwareKeys.contains(any()) } answers { firstArg<String>() in softwareStore }
-        every { softwareKeys.delete(any()) } answers { softwareStore -= firstArg<String>() }
-        val keyDao = mockk<KeyDao>(relaxed = true)
-        coEvery { keyDao.deleteByKeyId(any()) } answers { if (stored.remove(firstArg<String>()) != null) 1 else 0 }
+        // The software key's material delete: only the deleted ID's own
+        // software record goes (the alias rule is LocalDeleteKeyExactIdTest's).
+        val material = materialDelete { held -> softwareStore.remove(held.keyId) }
+        val tables = FakeKeyPolicyTables()
+        tables.addKey(software.keyId, SharingPolicyType.ALL_PEERS)
+        tables.addKey(hardware.keyId, SharingPolicyType.ALL_PEERS)
         val revisionBefore = SharePermissionLedger.revision(software.keyId)
 
         val s = ScriptedMessageSender(router).also { it.succeedWith(accepted) }
         var checks = 0
         val waiting = DesktopKeyShare(
             session(s) {
-                if (checks++ == 1) runBlocking { keyDao.deleteKeyRow(software, keystore, softwareKeys) }
+                if (checks++ == 1) runBlocking {
+                    assertEquals(UserKeyDelete.DELETED, deleteUserKey(tables.key(software.keyId)!!, tables.store(), material))
+                    if (tables.key(software.keyId) == null) stored.remove(software.keyId)
+                }
                 true
             },
             200
@@ -162,7 +171,7 @@ class KeyMaterialRemovalShareTest {
     @Test
     fun `a discovered ephemeral key whose share waits while file encryption completes sends nothing`() = runTest {
         val keystore = mockk<KeystoreManager>(relaxed = true)
-        every { keystore.getPublicKeyDER(any()) } returns ByteArray(91) { 1 }
+        every { keystore.getPublicKeyDER(any(), any()) } returns ByteArray(91) { 1 }
         coEvery { keystore.performECDH(any(), any()) } returns ByteArray(32) { 2 }
         val generated = CompletableFuture<String>()
         val release = CountDownLatch(1)
@@ -173,7 +182,7 @@ class KeyMaterialRemovalShareTest {
                 return -1
             }
         }
-        val encryptor = FileEncryptor(keystore) { alias -> generated.complete(alias) }
+        val encryptor = FileEncryptor(keystore, com.automatethethings.xkey.storage.FakeKeyPolicyTables().store()) { alias -> generated.complete(alias); ByteArray(91) { 1 } }
         val encryption = thread {
             runBlocking { encryptor.encryptForRecipient(ByteArray(91) { 3 }, plaintext, ByteArrayOutputStream()) }
         }
@@ -199,7 +208,7 @@ class KeyMaterialRemovalShareTest {
             encryption.join(5_000)
         }
 
-        verify { keystore.deleteKey(keyId) }
+        verify { keystore.discardGeneratedKey("xkey_key_$keyId") }
         assertEquals(DesktopKeyShare.Outcome.Refused(DesktopShareDecision.POLICY_DENIED), out)
         assertTrue("the deleted ephemeral key's public half never reaches the wire", s.sent.isEmpty())
     }

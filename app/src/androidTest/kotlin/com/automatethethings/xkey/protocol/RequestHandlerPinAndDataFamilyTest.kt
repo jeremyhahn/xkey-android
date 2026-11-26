@@ -581,9 +581,7 @@ class RequestHandlerPinAndDataFamilyTest {
         assertEquals("AES128-GCM", SoftwareKeyStore(context).get(keyId)!!.algorithm)
     }
 
-    // ------------------------------------------------------------------
     // OATH
-    // ------------------------------------------------------------------
 
     /**
      * The secret is Base32 on the wire. An undecodable one must be refused

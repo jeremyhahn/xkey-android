@@ -18,11 +18,14 @@ package com.automatethethings.xkey.storage
 import android.content.ContentValues
 import android.content.Context
 import androidx.room.Room
+import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import androidx.sqlite.db.SupportSQLiteOpenHelper
 import androidx.sqlite.db.framework.FrameworkSQLiteOpenHelperFactory
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.automatethethings.xkey.password.PasswordDeletionEntity
+import com.automatethethings.xkey.storage.entity.KeyPolicyEntity
 import com.automatethethings.xkey.storage.entity.SharingPolicyType
 import kotlinx.coroutines.runBlocking
 import org.junit.After
@@ -104,6 +107,18 @@ class XKeyDatabaseMigrationTest {
 
     @Test
     fun migratesFromVersion11() = assertMigratesAndPreservesData(11)
+
+    @Test
+    fun migratesFromVersion12() = assertMigratesAndPreservesData(12)
+
+    @Test
+    fun migratesFromVersion13() = assertMigratesAndPreservesData(13)
+
+    @Test
+    fun migratesFromVersion14() = assertMigratesAndPreservesData(14)
+
+    @Test
+    fun migratesFromVersion15() = assertMigratesAndPreservesData(15)
 
     /**
      * Guards the fixture itself: if a new schema is exported without a matching
@@ -205,6 +220,107 @@ class XKeyDatabaseMigrationTest {
     }
 
     /**
+     * MIGRATION_13_14 adds the password deletion records. Every entry written
+     * at 13 is kept as it was, none starts with a deletion record, and the new
+     * table takes and drops records.
+     */
+    @Test
+    fun migration13To14KeepsPasswordsAndStartsWithNoDeletionRecords() {
+        createLegacyDatabase(13) { db ->
+            insertRow(
+                db,
+                "passwords",
+                mapOf(
+                    "password_id" to "pw-13",
+                    "name" to "Kept",
+                    "username" to "user@example.com",
+                    "password_encrypted" to byteArrayOf(4, 5, 6),
+                    "source" to "local",
+                    "created_at" to 1_000L,
+                    "updated_at" to 2_000L,
+                    "expires_at" to "2030-01-01T00:00:00Z",
+                    "shared" to 1,
+                    "tenant_id" to "work"
+                )
+            )
+        }
+
+        withMigratedDatabase { db ->
+            val dao = db.passwordDao()
+            val kept = requireNotNull(dao.getByPasswordId("pw-13"))
+            assertEquals("Kept", kept.name)
+            assertEquals("user@example.com", kept.username)
+            assertEquals(1_000L, kept.createdAt)
+            assertEquals(2_000L, kept.updatedAt)
+            assertEquals("2030-01-01T00:00:00Z", kept.expiresAt)
+            assertTrue(kept.shared)
+            assertEquals("work", kept.tenantId)
+            assertTrue(kept.passwordEncrypted.contentEquals(byteArrayOf(4, 5, 6)))
+            assertNull("no entry starts with a deletion record", dao.getDeletedAt("pw-13"))
+
+            dao.recordDeletion(PasswordDeletionEntity("pw-gone", 3_000L))
+            assertEquals(3_000L, dao.getDeletedAt("pw-gone"))
+            assertEquals(1, dao.pruneDeletionsBefore(3_001L))
+            assertNull(dao.getDeletedAt("pw-gone"))
+        }
+    }
+
+    /**
+     * MIGRATION_14_15 gives every key its one policy row (#193), bound to its
+     * key row and holding its stored policy, and moves in a denial a failed
+     * narrowing recorded outside the database: a PRIVATE denial also owes the
+     * key's grant clear. A record for a key row that no longer exists is
+     * dropped, not attached to a later key under the same id.
+     */
+    @Test
+    fun migration14To15MovesRecordedDenialsIntoTheKeyPolicyRows() {
+        val instances = mutableMapOf<String, Long>()
+        createLegacyDatabase(12) { db ->
+            insertKey(db, keyId = "denied", source = "local", shareable = true)
+            insertKey(db, keyId = "narrowed", source = "local", shareable = true)
+            insertKey(db, keyId = "recreated", source = "local", shareable = true)
+            insertKey(db, keyId = "plain", source = "local")
+            for (keyId in listOf("denied", "narrowed", "recreated", "plain")) {
+                db.query("SELECT id FROM keys WHERE key_id = ?", arrayOf(keyId)).use {
+                    it.moveToFirst()
+                    instances[keyId] = it.getLong(0)
+                }
+            }
+            insertRow(db, "key_sharing_policies", mapOf("key_id" to "denied", "peer_public_key_hex" to "aa", "allowed" to 1, "created_at" to 1L))
+        }
+        val recorded = mapOf(
+            "denied" to "${instances["denied"]}@PRIVATE",
+            "narrowed" to "${instances["narrowed"]}@SELECTED_PEERS",
+            "recreated" to "${instances.getValue("recreated") + 100}@PRIVATE"
+        )
+
+        withMigratedDatabase(XKeyDatabase.migration14To15 { recorded }) { db ->
+            val dao = db.keyPolicyDao()
+            val denied = requireNotNull(dao.policyRow("denied"))
+            assertEquals(instances["denied"], denied.keyInstance)
+            assertEquals(SharingPolicyType.ALL_PEERS, denied.sharingPolicy)
+            assertEquals(SharingPolicyType.PRIVATE, denied.denial)
+            assertEquals(SharingPolicyType.PRIVATE, denied.pendingPolicy)
+            assertTrue("a PRIVATE denial owes the grant clear", denied.clearGrants)
+            assertEquals(SharingPolicyType.PRIVATE, denied.enforced)
+
+            val narrowed = requireNotNull(dao.policyRow("narrowed"))
+            assertEquals(SharingPolicyType.SELECTED_PEERS, narrowed.denial)
+            assertFalse(narrowed.clearGrants)
+
+            val recreated = requireNotNull(dao.policyRow("recreated"))
+            assertNull("a record for another key row is dropped", recreated.denial)
+            assertEquals(SharingPolicyType.ALL_PEERS, recreated.enforced)
+
+            val plain = requireNotNull(dao.policyRow("plain"))
+            assertEquals(KeyPolicyEntity("plain", instances.getValue("plain"), SharingPolicyType.PRIVATE), plain)
+
+            assertEquals(1, db.keyDao().deleteByKeyId("denied"))
+            assertNull("deleting the key row deletes its policy row", dao.policyRow("denied"))
+        }
+    }
+
+    /**
      * MIGRATION_12_13 adds the keys table's policy revision. Every key
      * written at 12 starts at revision 0 with its policy kept, and from then
      * on every policy write moves the revision forward: the DAO's own
@@ -256,6 +372,93 @@ class XKeyDatabaseMigrationTest {
     }
 
     /**
+     * MIGRATION_13_14 adds the OATH delete records and changes no existing
+     * table: an OATH credential written at 13 is still there, whole, and a
+     * deletion is recorded in the new table.
+     */
+    @Test
+    fun migration13To14KeepsOathCredentialsAndRecordsDeletions() {
+        createLegacyDatabase(13) { db ->
+            db.execSQL(
+                "INSERT INTO oath_credentials (oath_id, oath_type, algorithm, digits, period_seconds, counter, " +
+                    "issuer, account_name, secret_encrypted, source, remote_device_id, created_at, last_used_at, use_count) " +
+                    "VALUES ('oath-v13', 'HOTP', 'SHA1', 6, 30, 7, 'Acme', 'alice', X'0102030405', 'local', NULL, 1000, NULL, 3)"
+            )
+        }
+
+        withMigratedDatabase { db ->
+            val oath = db.oathCredentialDao()
+            val row = requireNotNull(oath.getByOathId("oath-v13"))
+            assertEquals("Acme", row.issuer)
+            assertEquals("alice", row.accountName)
+            assertEquals(7L, row.counter)
+            assertEquals(3, row.useCount)
+            assertEquals(listOf<Byte>(1, 2, 3, 4, 5), row.secretEncrypted.toList())
+            assertEquals(false, oath.isDeleted("oath-v13"))
+
+            oath.recordDeletion("oath-v13", 2000L)
+            oath.deleteByOathId("oath-v13")
+            assertNull(oath.getByOathId("oath-v13"))
+            assertEquals(true, oath.isDeleted("oath-v13"))
+        }
+    }
+
+    /**
+     * The one MIGRATION_13_14 adds both deletion tables at once: a password
+     * and an OATH credential written at 13 are both kept whole, and
+     * `password_deletions` and `oath_deletions` both start empty.
+     */
+    @Test
+    fun migration13To14KeepsPasswordsAndOathAndStartsBothDeletionTablesEmpty() {
+        createLegacyDatabase(13) { db ->
+            insertRow(
+                db,
+                "passwords",
+                mapOf(
+                    "password_id" to "pw-both",
+                    "name" to "Both",
+                    "username" to "user@example.com",
+                    "password_encrypted" to byteArrayOf(7, 8, 9),
+                    "source" to "local",
+                    "created_at" to 1_000L,
+                    "updated_at" to 2_000L,
+                    "shared" to 0,
+                    "tenant_id" to "default"
+                )
+            )
+            db.execSQL(
+                "INSERT INTO oath_credentials (oath_id, oath_type, algorithm, digits, period_seconds, counter, " +
+                    "issuer, account_name, secret_encrypted, source, remote_device_id, created_at, last_used_at, use_count) " +
+                    "VALUES ('oath-both', 'TOTP', 'SHA256', 8, 60, 0, 'Example', 'bob', X'0A0B0C', 'local', NULL, 1500, NULL, 2)"
+            )
+        }
+
+        withMigratedDatabase { db ->
+            val password = requireNotNull(db.passwordDao().getByPasswordId("pw-both"))
+            assertEquals("Both", password.name)
+            assertEquals("user@example.com", password.username)
+            assertEquals(1_000L, password.createdAt)
+            assertEquals(2_000L, password.updatedAt)
+            assertTrue(password.passwordEncrypted.contentEquals(byteArrayOf(7, 8, 9)))
+
+            val oath = requireNotNull(db.oathCredentialDao().getByOathId("oath-both"))
+            assertEquals("Example", oath.issuer)
+            assertEquals("bob", oath.accountName)
+            assertEquals(8, oath.digits)
+            assertEquals(60, oath.periodSeconds)
+            assertEquals(2, oath.useCount)
+            assertEquals(listOf<Byte>(10, 11, 12), oath.secretEncrypted.toList())
+
+            for (table in listOf("password_deletions", "oath_deletions")) {
+                db.openHelper.readableDatabase.query("SELECT COUNT(*) FROM `$table`").use { cursor ->
+                    assertTrue(cursor.moveToFirst())
+                    assertEquals("$table starts empty", 0, cursor.getInt(0))
+                }
+            }
+        }
+    }
+
+    /**
      * MIGRATION_3_4 introduced the per-key sharing policy and had to decide
      * what the pre-existing boolean `shareable` flag meant. A key that was
      * shareable keeps working (ALL_PEERS); one that was not stays PRIVATE.
@@ -288,14 +491,19 @@ class XKeyDatabaseMigrationTest {
     /**
      * Creates a database at [version] using that version's frozen DDL, seeds a
      * key and a FIDO2 credential, migrates it with the production migration
-     * set, and asserts both rows arrived intact.
+     * set, and asserts both rows arrived intact. The key is seeded with the
+     * legacy source token only where the path runs MIGRATION_10_11 (from 10
+     * or earlier), else with the current one.
      */
     private fun assertMigratesAndPreservesData(version: Int) {
         val keyId = "legacy-key-v$version"
         val credentialId = "legacy-credential-v$version"
+        // Only a path that crosses 10 -> 11 rewrites the legacy token; a
+        // database at 11 or later was written with the current one (#193 r7).
+        val seeded = if (version <= 10) LEGACY_SOURCE else CURRENT_SOURCE
 
         createLegacyDatabase(version) { db ->
-            insertKey(db, keyId = keyId, source = LEGACY_SOURCE)
+            insertKey(db, keyId = keyId, source = seeded)
             insertCredential(db, credentialId)
         }
 
@@ -305,7 +513,7 @@ class XKeyDatabaseMigrationTest {
             assertEquals("test-label", key!!.label)
             assertEquals("ES256", key.algorithm)
             assertEquals(
-                "MIGRATION_10_11 must run as part of every path",
+                "the key must come out with the current source token from v$version",
                 CURRENT_SOURCE,
                 key.source
             )
@@ -357,7 +565,10 @@ class XKeyDatabaseMigrationTest {
      * which runs the migrations and validates the final schema, then hands the
      * open database to [assertions].
      */
-    private fun withMigratedDatabase(assertions: suspend (XKeyDatabase) -> Unit) {
+    private fun withMigratedDatabase(
+        keyPolicyMigration: Migration = XKeyDatabase.MIGRATION_14_15,
+        assertions: suspend (XKeyDatabase) -> Unit
+    ) {
         val database = Room.databaseBuilder(context, XKeyDatabase::class.java, TEST_DB)
             .addMigrations(
                 XKeyDatabase.MIGRATION_1_2,
@@ -371,7 +582,10 @@ class XKeyDatabaseMigrationTest {
                 XKeyDatabase.MIGRATION_9_10,
                 XKeyDatabase.MIGRATION_10_11,
                 XKeyDatabase.MIGRATION_11_12,
-                XKeyDatabase.MIGRATION_12_13
+                XKeyDatabase.MIGRATION_12_13,
+                XKeyDatabase.MIGRATION_13_14,
+                keyPolicyMigration,
+                XKeyDatabase.MIGRATION_15_16
             )
             .build()
         try {

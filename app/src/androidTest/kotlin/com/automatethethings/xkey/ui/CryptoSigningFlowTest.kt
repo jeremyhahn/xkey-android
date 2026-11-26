@@ -102,7 +102,7 @@ class CryptoSigningFlowTest {
         receiver?.let { context.unregisterReceiver(it) }
         receiver = null
 
-        keystoreManager.deleteKey(ecCredentialId)
+        keystoreManager.deleteKey(ecCredentialId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL)
         val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
         val rsaAlias = credentialAlias(rsaCredentialId)
         if (keyStore.containsAlias(rsaAlias)) keyStore.deleteEntry(rsaAlias)

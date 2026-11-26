@@ -70,9 +70,7 @@ class GattServerQueueLifecycleTest {
         // GattServer.EVENT_QUEUE_CAPACITY.
         const val EVENT_QUEUE_CAPACITY = 1024
 
-        // GattServer.NOTIFICATION_READY_TIMEOUT_MS and DRAIN_DEADLINE_MS. The
-        // tracked scope holds both timers: neither fires unless a test
-        // advances its clock (#252).
+        // NOTIFICATION_READY_TIMEOUT_MS and DRAIN_DEADLINE_MS; neither fires unless a test advances the clock.
         const val NOTIFICATION_READY_TIMEOUT_MS = 5_000L
 
         val ENABLE = byteArrayOf(0x01, 0x00)
@@ -93,6 +91,7 @@ class GattServerQueueLifecycleTest {
 
     @Before
     fun setUp() {
+        NoiseTestKeyStore.install()
         mockkStatic(Log::class)
         every { Log.v(any(), any<String>()) } returns 0
         every { Log.d(any(), any<String>()) } returns 0
