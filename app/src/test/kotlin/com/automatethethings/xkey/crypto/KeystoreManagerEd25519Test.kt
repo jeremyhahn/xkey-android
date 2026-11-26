@@ -260,4 +260,66 @@ class KeystoreManagerEd25519Test {
         assertTrue("an Ed25519 key's KeyInfo is unread", manager.isPerOperationKey(alias))
         org.junit.Assert.assertNotNull(manager.generalKeySecurityLevel("ed"))
     }
+
+    /**
+     * A manager whose Keystore holds the per-operation Ed25519 key
+     * [approved] under [alias]: its certificate carries the approved public
+     * key and its KeyInfo (read through the EC factory) needs the user for
+     * every use. Only the Keystore edge is stubbed; the sign and its verify
+     * run as they do on a phone.
+     */
+    private fun perOperationEd25519Manager(alias: String, approved: java.security.KeyPair): KeystoreManager {
+        val handle = mockk<java.security.PrivateKey>(relaxed = true)
+        every { handle.algorithm } returns "EdDSA"
+        val certificate = mockk<java.security.cert.Certificate>(relaxed = true)
+        every { certificate.publicKey } returns approved.public
+        every { keyStore.containsAlias(alias) } returns true
+        every { keyStore.getKey(alias, null) } returns handle
+        every { keyStore.getCertificate(alias) } returns certificate
+        val info = mockk<android.security.keystore.KeyInfo>(relaxed = true)
+        every { info.isUserAuthenticationRequired } returns true
+        every { info.userAuthenticationValidityDurationSeconds } returns 0
+        val ecFactory = mockk<KeyFactory>(relaxed = true)
+        every { ecFactory.getKeySpec(handle, android.security.keystore.KeyInfo::class.java) } returns info
+        mockkStatic(KeyFactory::class)
+        every { KeyFactory.getInstance("EdDSA", "AndroidKeyStore") } throws java.security.NoSuchAlgorithmException("EdDSA")
+        every { KeyFactory.getInstance(KeyProperties.KEY_ALGORITHM_EC, "AndroidKeyStore") } returns ecFactory
+        return manager(34)
+    }
+
+    /** The CryptoObject prompt's signature, made here by the software key [signer]. */
+    private fun promptSigningWith(signer: java.security.KeyPair) = CryptoObjectSigner { _, jcaAlgorithm, data ->
+        java.security.Signature.getInstance(jcaAlgorithm).run {
+            initSign(signer.private)
+            update(data)
+            sign()
+        }
+    }
+
+    /**
+     * PR #400 review 3 (P1): a per-operation Ed25519 key signs through its
+     * CryptoObject prompt, and the real signApproved verifies the result
+     * under the approved key with Ed25519. The approved key's signature is
+     * returned; another Ed25519 key's is refused.
+     */
+    @Test
+    fun `signApproved verifies a per-operation Ed25519 signature under the approved key`() = runBlocking {
+        val alias = "xkey_key_ed"
+        val approved = credentialPair
+        val other = stalePair
+        val data = "challenge".toByteArray()
+        val manager = perOperationEd25519Manager(alias, approved)
+        val algorithm = KeystoreManager.jcaSignatureAlgorithm("EdDSA")
+
+        val signature = manager.signApproved(alias, approved.public.encoded, data, algorithm, promptSigningWith(approved))
+        val verifier = java.security.Signature.getInstance("Ed25519")
+        verifier.initVerify(approved.public)
+        verifier.update(data)
+        assertTrue("the approved key's signature is returned", verifier.verify(signature))
+
+        assertThrows(ApprovedKeyChangedException::class.java) {
+            runBlocking { manager.signApproved(alias, approved.public.encoded, data, algorithm, promptSigningWith(other)) }
+        }
+        Unit
+    }
 }
