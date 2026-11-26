@@ -24,11 +24,18 @@ import android.widget.EditText
 import android.widget.TextView
 import androidx.test.core.app.ActivityScenario
 import androidx.test.espresso.Espresso.onView
+import androidx.test.espresso.NoMatchingRootException
 import androidx.test.espresso.UiController
 import androidx.test.espresso.ViewAction
+import androidx.test.espresso.action.ViewActions.click
+import androidx.test.espresso.assertion.ViewAssertions.doesNotExist
+import androidx.test.espresso.assertion.ViewAssertions.matches
 import androidx.test.espresso.matcher.RootMatchers.isDialog
 import androidx.test.espresso.matcher.ViewMatchers.isAssignableFrom
+import androidx.test.espresso.matcher.ViewMatchers.isDisplayed
 import androidx.test.espresso.matcher.ViewMatchers.isRoot
+import androidx.test.espresso.matcher.ViewMatchers.withText
+import androidx.test.platform.app.InstrumentationRegistry
 import org.hamcrest.Matcher
 import org.junit.Assert.assertTrue
 
@@ -84,12 +91,118 @@ internal object DialogFlowSupport {
      * still runs every line of production code behind the button; only the
      * hit-testing is skipped, and that is covered by the suites that click a
      * dialog button without typing first.
+     *
+     * The button is waited for, up to [timeoutMs], rather than looked up once:
+     * the dialog may still be on its way, or a departing sheet may still be the
+     * topmost dialog window (see [awaitDialogRoot]).
      */
-    fun clickButton(buttonId: Int) {
-        onDialogRoot("click dialog button ${Integer.toHexString(buttonId)}") { root ->
-            val button = root.findViewById<View>(buttonId)
-                ?: throw AssertionError("The topmost dialog has no button $buttonId")
-            button.performClick()
+    fun clickButton(buttonId: Int, timeoutMs: Long = PROMPT_TIMEOUT_MS) {
+        awaitDialogRoot(
+            "click dialog button ${Integer.toHexString(buttonId)}",
+            timeoutMs,
+            ready = { root -> root.findViewById<View>(buttonId)?.isShown == true },
+            describeFailure = { "The topmost dialog has no button $buttonId" }
+        ) { root ->
+            root.findViewById<View>(buttonId).performClick()
+        }
+    }
+
+    /**
+     * Runs [block] against the topmost dialog's root once [ready] holds for it.
+     *
+     * Opening a dialog from a bottom sheet or from another dialog leaves the
+     * departing window on screen while it animates out, and the departing window
+     * can still be the one `isDialog()` resolves to. Picking it fails the very
+     * step that follows ("no button", a field that is not there). Polling until
+     * the root is the one the caller means waits for the previous root to go.
+     * [block] runs at most once; its failures are not retried.
+     */
+    private fun awaitDialogRoot(
+        description: String,
+        timeoutMs: Long,
+        ready: (View) -> Boolean,
+        describeFailure: () -> String,
+        block: (View) -> Unit
+    ) {
+        var ran = false
+        awaitCondition(timeoutMs, describeFailure) {
+            val attempt = runCatching {
+                onDialogRoot(description) { root ->
+                    if (ready(root)) {
+                        ran = true
+                        block(root)
+                    }
+                }
+            }
+            if (ran) attempt.getOrThrow()
+            ran
+        }
+    }
+
+    /**
+     * Waits until a view matching [matcher] is displayed in a dialog window.
+     *
+     * Use it after any step that replaces one dialog or sheet with another and
+     * before touching the new one: `inRoot(isDialog())` keeps resolving to the
+     * departing window until it is gone, so a first look can miss a view that
+     * is on its way.
+     */
+    fun awaitInDialog(matcher: Matcher<View>, timeoutMs: Long = PROMPT_TIMEOUT_MS) {
+        awaitCondition(timeoutMs, { "No dialog showed a view $matcher" }) {
+            runCatching {
+                onView(matcher).inRoot(isDialog()).check(matches(isDisplayed()))
+            }.isSuccess
+        }
+    }
+
+    /**
+     * Taps the view matching [matcher] in a dialog window once it is there.
+     *
+     * A confirmation dialog opened from a bottom sheet, a menu or a row tap
+     * arrives after the call that opened it returns; a first look can still
+     * resolve the departing window. The tap is retried only while the view
+     * cannot be found or is not yet tappable, so it lands once.
+     */
+    fun clickInDialog(matcher: Matcher<View>, timeoutMs: Long = PROMPT_TIMEOUT_MS) {
+        awaitCondition(timeoutMs, { "No dialog offered a view $matcher to tap" }) {
+            runCatching {
+                onView(matcher).inRoot(isDialog()).perform(click())
+            }.isSuccess
+        }
+    }
+
+    /** [clickInDialog] for the dialog view whose text is the string [textResId]. */
+    fun clickInDialog(textResId: Int, timeoutMs: Long = PROMPT_TIMEOUT_MS) {
+        clickInDialog(withText(textResId), timeoutMs)
+    }
+
+    /**
+     * Picks the option labelled [optionResId] from the bottom sheet (or option
+     * dialog) on screen, then waits for what the option opens.
+     *
+     * With [next] given, waits until a dialog shows a view matching it, which
+     * also means the sheet has given way. Without one (an option that opens
+     * nothing, or hands off to another activity), waits until no dialog
+     * window shows the option's label any more, so the caller never acts on the sheet's
+     * window while it is still animating out.
+     */
+    fun chooseFromSheet(
+        optionResId: Int,
+        next: Matcher<View>? = null,
+        timeoutMs: Long = PROMPT_TIMEOUT_MS
+    ) {
+        val label = InstrumentationRegistry.getInstrumentation().targetContext.getString(optionResId)
+        clickInDialog(withText(label), timeoutMs)
+        if (next != null) {
+            awaitInDialog(next, timeoutMs)
+        } else {
+            awaitCondition(timeoutMs, { "The sheet offering '$label' never closed" }) {
+                val check = runCatching {
+                    onView(withText(label)).inRoot(isDialog()).check(doesNotExist())
+                }
+                // No dialog window left at all is the sheet having closed too.
+                check.isSuccess || check.exceptionOrNull() is NoMatchingRootException
+            }
         }
     }
 

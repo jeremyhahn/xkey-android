@@ -53,19 +53,20 @@ Never does:
 | password-vault | shipped | The phone's password store, synced with the desktop through `syncPasswords` | `docs/password-vault/` |
 | contacts | shipped | Recipient public keys for encryption and signature verification, with import and export | `docs/contacts/` |
 | file-operations | shipped | Sign, verify, encrypt and decrypt files received through the Android Share sheet | `docs/file-operations/` |
-| media-signing | shipped | A foreground service watches MediaStore, hashes new photos and videos, signs them and embeds the signature in EXIF or XMP; auto-sign toggle and key choice | `docs/media-signing/` |
-| co-signing | shipped | Multi-party signing of media by QR or BLE exchange (`cosign.request`, `cosign.response`); Android-only, not part of the desktop contract | `docs/co-signing/` |
-| verified-media-viewer | shipped | Shows media with signature verification badges | `docs/verified-media-viewer/` |
+| media-signing | shipped | A foreground service watches MediaStore, hashes new photos and videos, signs them and stores the signature in the EXIF UserComment of a JPEG or in a `.xkeysig` file beside any other file; auto-sign toggle and key choice | `docs/media-signing/` |
+| co-signing | shipped | Multi-party signing of media: phones co-sign by QR exchange, and the phone answers `cosign.request` from a paired device with `cosign.response` (it never sends a request); Android-only, not part of the desktop contract | `docs/co-signing/` |
+| verified-media-viewer | shipped | Shows media with one coloured row per signer giving its verification result | `docs/verified-media-viewer/` |
 | audit-log | shipped | Records security events in Room; audit screen and recent activity on the home screen | `docs/audit-log/` |
 | release-signing | shipped | `assembleRelease` and `bundleRelease` sign with credentials outside version control and fail with a message when they are missing | `docs/release-signing/` |
 | remote-backup-password | shipped | Send the required `password` on `remote.createBackup` and `remote.restoreBackup` (go-xkms#690) | `docs/remote-backup-password/` |
-| password-vault-rpcs | planned | Answer the `Password*` and `SealStore*` methods the desktop sends over USB (go-xkms#692), including the per-user vault's new unlock body | none |
+| password-vault-rpcs | shipped | Answer the nine `Password*` and six `SealStore*` methods the desktop sends over USB (go-xkms#692), including the per-user vault's new unlock body | `docs/password-vault-rpcs/` |
 | phone-initiated-pairing | shipped | Answer `local.attestDevice` on sessions the phone opens and display the pairing SAS (go-xkms#1306) | `docs/phone-initiated-pairing/` |
 | request-generation-echo | shipped | Echo a per-request `generation` in every pairing response, the phone half of the go-xkms#128 flag day | `docs/request-generation-echo/` |
 | fido2-built-in-uv | shipped | A biometric-gated, verifiable "verify user" RPC so the desktop authenticator can issue a pinUvAuthToken through UV `local.verifyUser` per go-xkms#1716 | `docs/fido2-built-in-uv/` |
 | protected-memory | shipped | `NoiseSession` zeroes the Noise static, ephemeral and session keys, and the handshake intermediates, with `fill(0)` once they are no longer needed; on Android's managed heap this is best-effort hygiene, not a guarantee, since the collector and the JCA objects may keep copies, and the class documentation states that limit | `docs/protected-memory/` |
 | trusted-computing-enrollment | future | Android initiators for `remote.getTCGCSRIDevID`, `remote.activateCredential` and `remote.getAttestationQuote` (needs a Kotlin TPM2 credential-activation flow), and the `local.*` IDevID and TCG family, dormant on both sides | none |
 | maintenance | standing | Dependency updates (dependabot and manual) and CI configuration changes (ci.yml template adoptions, workflow fixes) are worked on `row/317-maintenance` and land as PRs from it; no dependency or CI branch exists outside this row; the row stays open and carries no Dev complete milestone (owner decision 1234, #317) | `#317` |
+| key-algorithm-parity | shipped | Key algorithms on a par with the desktop: PIV RSA 3072 (`0x05`) and RSA 4096 (`0x16`) with the desktop's wire names, `local.generateKey` takes the RSA modulus from `keySizeBits` (2048, 3072 or 4096; other sizes are INVALID_PARAMS), Key Management creates P-521, RSA 3072, AES-192 and HMAC-SHA384 keys, and `local.getCapabilities` lists ES512, AES192 and HMAC-SHA384; post-quantum is out of scope (#333) | `docs/piv/architecture.md` |
 
 ## Interfaces
 

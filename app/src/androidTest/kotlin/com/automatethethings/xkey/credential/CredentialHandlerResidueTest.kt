@@ -85,7 +85,7 @@ class CredentialHandlerResidueTest {
         if (!this::credentialDao.isInitialized) return
         runBlocking {
             for (credentialId in seededCredentialIds) {
-                runCatching { keystoreManager.deleteKey(credentialId) }
+                runCatching { keystoreManager.deleteKey(credentialId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) }
                 credentialDao.deleteByCredentialId(credentialId)
                 keyDao.deleteByKeyId(credentialId)
             }
@@ -163,7 +163,7 @@ class CredentialHandlerResidueTest {
         val credentialId = seedCredential(rpId, "user@example.com")
 
         // The metadata row survives; the key does not.
-        runBlocking { keystoreManager.deleteKey(credentialId) }
+        runBlocking { keystoreManager.deleteKey(credentialId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) }
 
         try {
             runBlocking {

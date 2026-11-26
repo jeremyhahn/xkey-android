@@ -14,13 +14,21 @@ import java.util.concurrent.ConcurrentHashMap
  *
  * Fragment header format (7 bytes):
  * - flags (1 byte): bit 0 = first fragment, bit 1 = last fragment
- * - sequence (2 bytes): sequence number within message (little-endian)
- * - total (2 bytes): total number of fragments (little-endian)
- * - length (2 bytes): payload length in this fragment (little-endian)
+ * - sequence (2 bytes): sequence number within message (big-endian)
+ * - total (2 bytes): total number of fragments (big-endian)
+ * - length (2 bytes): payload length in this fragment (big-endian)
+ *
+ * A partial message older than 30 seconds is dropped when the next fragment
+ * arrives.
  *
  * Thread safety: This class is thread-safe.
+ *
+ * @param clock milliseconds since the epoch, read once per fragment for the
+ *   partial-message timeout; tests inject their own
  */
-class FragmentReassembler {
+class FragmentReassembler(
+    private val clock: () -> Long = System::currentTimeMillis
+) {
     companion object {
         private const val TAG = "FragmentReassembler"
 
@@ -75,7 +83,7 @@ class FragmentReassembler {
         validateFragment(header, data)
 
         // Check for timeout
-        val now = System.currentTimeMillis()
+        val now = clock()
         if (startTime > 0 && now - startTime > TIMEOUT_MS) {
             Log.w(TAG, "Fragment timeout, resetting reassembly")
             reset()

@@ -18,7 +18,7 @@ private const val ENCODED_COLON = "%3A"
  * account name.
  *
  * A literal `:` separates the issuer and the account, and a `:` inside
- * either is written `%3A` (#156). The label is split before it is
+ * either is written `%3A`. The label is split before it is
  * percent-decoded, so that `%3A` stays in its part. With no literal `:`, the
  * label splits on the `%3A` after a decoded prefix equal to the `issuer`
  * query parameter, else on its first `%3A`: third-party generators encode
@@ -54,7 +54,7 @@ internal fun parseOathLabel(encodedLabel: String, issuerParam: String? = null): 
 /**
  * Parse a label the app wrote from separate issuer and account fields
  * (manual entry, sync): only a literal `:` separates them, so an issuerless
- * account containing a colon (`%3A`) stays whole (#156).
+ * account containing a colon (`%3A`) stays whole.
  *
  * @param encodedLabel The label as it appears in the URI path, still
  *        percent-encoded, without the leading `/`.

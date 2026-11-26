@@ -9,9 +9,11 @@ package com.automatethethings.xkey.sync
 import android.content.Context
 import android.util.Log
 import com.automatethethings.xkey.crypto.Base32
+import com.automatethethings.xkey.crypto.MalformedSyncValueException
 import com.automatethethings.xkey.crypto.SyncCodec
 import com.automatethethings.xkey.oath.OathRepository
 import com.automatethethings.xkey.oath.OathSecretManager
+import com.automatethethings.xkey.oath.SyncMergeOutcome
 import com.automatethethings.xkey.password.FilePasswordVaultFactorStore
 import com.automatethethings.xkey.password.PasswordRepository
 import com.automatethethings.xkey.password.PasswordVault
@@ -21,6 +23,7 @@ import com.automatethethings.xkey.truststore.TrustStoreRepository
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import kotlin.coroutines.cancellation.CancellationException
 
 /**
  * Single source of truth for bidirectional store synchronization. Owns the
@@ -51,8 +54,12 @@ class SyncEngine(
     /** Result of merging incoming certificates. */
     data class CertCounts(val added: Int, val skipped: Int)
 
-    /** Result of merging incoming OATH credentials or passwords. */
-    data class ItemCounts(val added: Int, val updated: Int, val skipped: Int)
+    /**
+     * Result of merging incoming OATH credentials or passwords. [conflicts]
+     * counts the OATH items skipped because the phone holds other key
+     * material under the same id; they are also in [skipped].
+     */
+    data class ItemCounts(val added: Int, val updated: Int, val skipped: Int, val conflicts: Int = 0)
 
     private val db by lazy { XKeyDatabase.getInstance(context) }
 
@@ -85,13 +92,25 @@ class SyncEngine(
                 skipped++
                 continue
             }
-            val der = SyncCodec.pemToDer(obj.optString("pem", ""))
-            if (der == null) {
+            val der = try {
+                SyncCodec.pemToDer(obj.optString("pem", ""))
+            } catch (e: MalformedSyncValueException) {
+                // Rejected, not imported; the rest of the batch still merges.
+                Log.w(TAG, "Rejected incoming certificate $i: ${e.message}")
                 skipped++
                 continue
             }
             val label = obj.optString("purpose", "").ifBlank { "sync" }
-            if (repo.importCertificate(der, label) != null) added++ else skipped++
+            // Stored as synced: shown and synced back out, never a trust anchor.
+            // Each certificate merges on its own: a storage failure skips it alone.
+            val stored = try {
+                repo.importSyncedCertificate(der, label)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                null
+            }
+            if (stored != null) added++ else skipped++
         }
         return CertCounts(added, skipped)
     }
@@ -120,13 +139,25 @@ class SyncEngine(
         return out
     }
 
-    /** Imports/updates incoming OATH credentials. */
+    /**
+     * Imports/updates incoming OATH credentials by the peer's `id`
+     * ([OathRepository.upsertStructured]): an item whose id is already stored
+     * updates that row in place, its HOTP counter never moving back, so
+     * merging the same payload again adds no rows. An item whose id was
+     * deleted on the phone is skipped and never added back. An item whose
+     * secret, type, algorithm, digits or period differ from the stored ones
+     * is skipped and counted as a conflict: only a matching item updates
+     * the label and counter. An item without an id,
+     * secret or account, or with an invalid field (a secret that is not
+     * Base32, say), is counted as skipped and the rest still merge.
+     */
     suspend fun mergeOath(incoming: JSONArray): ItemCounts {
         val secretManager = OathSecretManager()
         val oathRepo = OathRepository(db.oathCredentialDao(), secretManager)
         var added = 0
         var updated = 0
         var skipped = 0
+        var conflicts = 0
         for (i in 0 until incoming.length()) {
             val obj = incoming.optJSONObject(i) ?: continue
             val id = obj.optString("id", "").ifBlank { obj.optString("name", "") }
@@ -136,20 +167,37 @@ class SyncEngine(
                 skipped++
                 continue
             }
-            val existed = db.oathCredentialDao().getByOathId(id) != null
-            oathRepo.importStructured(
-                type = obj.optString("type", "totp"),
-                issuer = obj.optString("issuer", "").ifBlank { null },
-                accountName = accountName,
-                secret = secret,
-                algorithm = obj.optString("algorithm", "SHA1"),
-                digits = obj.optInt("digits", 6),
-                period = obj.optInt("period", 30),
-                counter = obj.optLong("counter", 0)
-            )
-            if (existed) updated++ else added++
+            val outcome = try {
+                oathRepo.upsertStructured(
+                    oathId = id,
+                    type = obj.optString("type", "totp"),
+                    issuer = obj.optString("issuer", "").ifBlank { null },
+                    accountName = accountName,
+                    secret = secret,
+                    algorithm = obj.optString("algorithm", "SHA1"),
+                    digits = obj.optInt("digits", 6),
+                    period = obj.optInt("period", 30),
+                    counter = obj.optLong("counter", 0)
+                )
+            } catch (e: IllegalArgumentException) {
+                // One invalid item never aborts the sync. The message can quote the secret, so it is not logged.
+                skipped++
+                continue
+            }
+            when (outcome) {
+                SyncMergeOutcome.ADDED -> added++
+                SyncMergeOutcome.UPDATED -> updated++
+                // Deleted on the phone: the peer's copy never brings it back.
+                SyncMergeOutcome.DELETED -> skipped++
+                // The phone holds other key material: kept, and counted as a skipped conflict.
+                SyncMergeOutcome.CONFLICT -> {
+                    skipped++
+                    conflicts++
+                }
+            }
         }
-        return ItemCounts(added, updated, skipped)
+        if (skipped > 0) Log.w(TAG, "Skipped $skipped incoming OATH credentials ($conflicts conflicts)")
+        return ItemCounts(added, updated, skipped, conflicts)
     }
 
     // --- Passwords ---

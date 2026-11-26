@@ -48,13 +48,22 @@ import javax.crypto.spec.SecretKeySpec
  * [version:1 byte][ephemeral_pubkey_len:2 bytes big-endian][ephemeral_pubkey][salt:32 bytes][iv:12 bytes][ciphertext][tag:16 bytes]
  * ```
  *
+ * Every ECDH runs inside the key's use gate
+ * ([com.automatethethings.xkey.storage.KeyPolicyStore.withUsableKey], #255
+ * review r4): a key whose delete was acknowledged, though its material may
+ * remain, never decrypts, and a delete that starts while a decryption runs
+ * waits until its key agreement ends.
+ *
  * @param keystoreManager The [KeystoreManager] instance used for ECDH and key operations.
+ * @param keyPolicyStore The store whose use gate every ECDH passes.
  * @param generateEphemeralKey Generates the ephemeral agreement key at the given
- *   Keystore alias; the Android Keystore unless a test supplies another.
+ *   Keystore alias and returns its DER public key; the Android Keystore unless
+ *   a test supplies another.
  */
 class FileEncryptor(
     private val keystoreManager: KeystoreManager,
-    private val generateEphemeralKey: (alias: String) -> Unit = ::generateKeystoreAgreementKey
+    private val keyPolicyStore: com.automatethethings.xkey.storage.KeyPolicyStore,
+    private val generateEphemeralKey: (alias: String) -> ByteArray? = ::generateKeystoreAgreementKey
 ) {
 
     companion object {
@@ -88,16 +97,20 @@ class FileEncryptor(
         output: OutputStream
     ) {
         val ephemeralKeyId = "$EPHEMERAL_KEY_PREFIX${UUID.randomUUID()}"
+        val ephemeralAlias = ephemeralAlias(ephemeralKeyId)
         try {
-            // Generate ephemeral EC key in Keystore with PURPOSE_AGREE_KEY
-            generateEphemeralKey(KeystoreManager.generalKeyAlias(ephemeralKeyId))
-
-            // Get ephemeral public key DER
-            val ephemeralPubKeyDer = keystoreManager.getPublicKeyDER(ephemeralKeyId)
+            // Generate ephemeral EC key in Keystore with PURPOSE_AGREE_KEY.
+            // Its public key is the one just generated, read from the pair
+            // itself, never through the user-key resolver, which probes
+            // every key store and refuses when one cannot be read (#255
+            // review r7).
+            val ephemeralPubKeyDer = generateEphemeralKey(ephemeralAlias)
                 ?: throw EncryptionException("Failed to get ephemeral public key", null)
 
             // Perform ECDH in hardware
-            val sharedSecret = keystoreManager.performECDH(ephemeralKeyId, recipientPublicKeyDer)
+            val sharedSecret = keyPolicyStore.withUsableKey(ephemeralKeyId, UserKeyKind.GENERAL) {
+                keystoreManager.performECDH(ephemeralKeyId, recipientPublicKeyDer)
+            }
 
             // Generate random salt
             val salt = ByteArray(SALT_SIZE)
@@ -131,10 +144,22 @@ class FileEncryptor(
                     cos.write(buffer, 0, bytesRead)
                 }
             }
-        } finally {
-            // Always delete ephemeral key, as a revoke of its ID: a share of
-            // it, however it got a row, is refused from here on.
-            SharePermissionLedger.revoking(ephemeralKeyId) { keystoreManager.deleteKey(ephemeralKeyId) }
+        } catch (e: Throwable) {
+            // The encryption failed: the ephemeral key is still deleted, and
+            // a failed delete rides along with the failure, never replacing it.
+            if (discardEphemeralKey(ephemeralKeyId, ephemeralAlias) == GeneratedKeyDiscard.FAILED) {
+                e.addSuppressed(EncryptionException("Ephemeral key $ephemeralAlias was not deleted", null))
+            }
+            throw e
+        }
+        // Always delete the ephemeral key: the exact alias generated, in the
+        // Keystore, its own backend, with no presence guard that an
+        // unreadable Ed25519 or software store could make throw before the
+        // delete (#255 review r7). An encryption whose ephemeral private key
+        // could not be deleted is never handed off as a success (#255 review
+        // r8): it fails, and its output is not to be used.
+        if (discardEphemeralKey(ephemeralKeyId, ephemeralAlias) == GeneratedKeyDiscard.FAILED) {
+            throw EncryptionException("Ephemeral key $ephemeralAlias was not deleted", null)
         }
     }
 
@@ -182,8 +207,11 @@ class FileEncryptor(
         val iv = ByteArray(IV_SIZE)
         readFully(input, iv)
 
-        // Perform ECDH with local key
-        val sharedSecret = keystoreManager.performECDH(localKeyId, ephemeralPubKeyDer)
+        // Perform ECDH with the local key inside its use gate (#255 review r4):
+        // a key whose delete was acknowledged is refused here, before any crypto.
+        val sharedSecret = keyPolicyStore.withUsableKey(localKeyId, UserKeyKind.GENERAL) {
+            keystoreManager.performECDH(localKeyId, ephemeralPubKeyDer)
+        }
 
         // HKDF derive AES key
         val aesKey = hkdfDerive(sharedSecret, salt, AES_KEY_SIZE)
@@ -202,6 +230,16 @@ class FileEncryptor(
         }
     }
 
+    /**
+     * Delete the ephemeral key [keyId] at [alias] as a revoke of its ID: a
+     * share of it, however it got a row, is refused from here on.
+     */
+    private suspend fun discardEphemeralKey(keyId: String, alias: String): GeneratedKeyDiscard =
+        SharePermissionLedger.revoking(keyId) { keystoreManager.discardGeneratedKey(alias) }
+
+    /** The Keystore alias of the ephemeral key [keyId]: the general alias [KeystoreManager.performECDH] reads. */
+    internal fun ephemeralAlias(keyId: String): String =
+        KeystoreManager.userKeyAlias(keyId, UserKeyKind.GENERAL)
 
     /**
      * Derive a key using HKDF-SHA256.
@@ -242,9 +280,10 @@ class FileEncryptor(
  * The key is created on the secp256r1 (P-256) curve without user authentication
  * requirements, as it is used only for a single ECDH operation and then deleted.
  *
- * @param alias Keystore alias of the ephemeral key.
+ * @param alias Keystore alias of the ephemeral key ([FileEncryptor.ephemeralAlias]).
+ * @return The generated key's public key, DER-encoded.
  */
-private fun generateKeystoreAgreementKey(alias: String) {
+private fun generateKeystoreAgreementKey(alias: String): ByteArray? {
     val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
 
     if (keyStore.containsAlias(alias)) {
@@ -263,5 +302,5 @@ private fun generateKeystoreAgreementKey(alias: String) {
         "AndroidKeyStore"
     )
     keyPairGenerator.initialize(specBuilder.build())
-    KeystoreManager.withAliasGate(alias) { keyPairGenerator.generateKeyPair() }
+    return KeystoreManager.withAliasGate(alias) { keyPairGenerator.generateKeyPair() }?.public?.encoded
 }

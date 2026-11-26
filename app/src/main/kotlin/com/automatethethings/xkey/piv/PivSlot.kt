@@ -14,6 +14,8 @@
  */
 package com.automatethethings.xkey.piv
 
+import com.automatethethings.xkey.crypto.MlDsaParameterSet
+
 /**
  * Represents the standard PIV (Personal Identity Verification) smart card key slots
  * as defined by NIST SP 800-73-4.
@@ -109,19 +111,117 @@ enum class PivSlot(val hexId: String, val label: String, val description: String
  * Cryptographic algorithms supported for PIV key generation.
  *
  * Maps PIV algorithm identifiers to Android Keystore parameters for
- * key generation and signing operations.
+ * key generation and signing operations. The `piv_slots` row stores the
+ * entry [name], so entries are never renamed.
+ *
+ * Ed25519 and X25519 slot keys use the Android Keystore's curve 25519
+ * support, which arrived in Android 13 (API 33) and lives in the TEE only:
+ * [PivKeyManager] refuses them below [minSdk] and in a Keystore without
+ * secure hardware, and never falls back to a software key.
  *
  * @property displayName Human-readable algorithm name for UI display.
- * @property keyAlgorithm The JCA key algorithm name (e.g., "EC", "RSA").
+ * @property keyAlgorithm The Android Keystore key algorithm name ("EC" or "RSA").
  * @property keySizeBits The key size in bits.
+ * @property pivAlgorithmId The PIV algorithm identifier a YubiKey reports
+ *   (NIST SP 800-78 for 0x07/0x11/0x14; Yubico's extension for 0xE0/0xE1).
+ * @property canSign Whether the key signs.
+ * @property canAgree Whether the key performs key agreement.
+ * @property minSdk The lowest Android API level that generates this key in the Keystore.
  */
-enum class PivAlgorithm(val displayName: String, val keyAlgorithm: String, val keySizeBits: Int) {
+enum class PivAlgorithm(
+    val displayName: String,
+    val keyAlgorithm: String,
+    val keySizeBits: Int,
+    val pivAlgorithmId: Int?,
+    val canSign: Boolean = true,
+    val canAgree: Boolean = false,
+    val minSdk: Int = 28,
+    val mlDsaSet: MlDsaParameterSet? = null
+) {
+    // Algorithm ids: NIST SP 800-78 (Table 6-2: RSA 2048 0x07, RSA 3072
+    // 0x05, ECC P-256 0x11, ECC P-384 0x14) and the YubiKey PIV extension
+    // for RSA 4096 (0x16, Yubico PIV algorithm table, firmware 5.7).
+    // SP 800-78 assigns no ML-DSA id yet, so the ML-DSA entries have none.
+
     /** ECDSA with NIST P-256 curve. */
-    ES256("ECDSA P-256", "EC", 256),
+    ES256("ECDSA P-256", "EC", 256, 0x11),
 
     /** ECDSA with NIST P-384 curve. */
-    ES384("ECDSA P-384", "EC", 384),
+    ES384("ECDSA P-384", "EC", 384, 0x14),
 
     /** RSA with 2048-bit key. */
-    RS2048("RSA 2048", "RSA", 2048);
+    RS2048("RSA 2048", "RSA", 2048, 0x07),
+
+    /** RSA with 3072-bit key. */
+    RS3072("RSA 3072", "RSA", 3072, 0x05),
+
+    /** RSA with 4096-bit key. */
+    RS4096("RSA 4096", "RSA", 4096, 0x16),
+
+    /** EdDSA over edwards25519 (RFC 8032), signing the raw message. */
+    ED25519("Ed25519", "EC", 256, 0xE0, minSdk = 33),
+
+    /** Diffie-Hellman over curve25519 (RFC 7748); agreement only, never signs. */
+    X25519("X25519", "EC", 256, 0xE1, canSign = false, canAgree = true, minSdk = 33),
+
+    /** ML-DSA-44 (FIPS 204). */
+    ML_DSA_44(MlDsaParameterSet.ML_DSA_44),
+
+    /** ML-DSA-65 (FIPS 204). */
+    ML_DSA_65(MlDsaParameterSet.ML_DSA_65),
+
+    /** ML-DSA-87 (FIPS 204). */
+    ML_DSA_87(MlDsaParameterSet.ML_DSA_87);
+
+    constructor(set: MlDsaParameterSet) :
+        this(set.wireName, "ML-DSA", set.publicKeyBytes * 8, null, mlDsaSet = set)
+
+    /**
+     * Whether API level [sdkInt] is new enough for the Keystore to generate
+     * this key. The level alone does not say the device's secure hardware
+     * makes it: [PivKeyManager.availableAlgorithms] adds that check.
+     */
+    fun isAvailableOn(sdkInt: Int): Boolean = sdkInt >= minSdk
+
+    /** Whether this is an Ed25519 or X25519 key, whose PIV public key is the raw 32 bytes. */
+    val isCurve25519: Boolean get() = this == ED25519 || this == X25519
+
+    companion object {
+        /** The algorithm with PIV algorithm identifier [id], or null if none. */
+        fun fromPivAlgorithmId(id: Int): PivAlgorithm? = entries.find { it.pivAlgorithmId == id }
+
+        /** The algorithm a `piv_slots` row names (its exact entry name), or null. */
+        fun fromStoredName(name: String?): PivAlgorithm? = entries.find { it.name == name }
+
+        /**
+         * The algorithm a peer names: an enum name, the desktop's spellings
+         * ("ECCP256", "RSA3072"), the dashed ones ("ECDSA-P256",
+         * "RSA-4096"), "Ed25519"/"EdDSA", "X25519", an ML-DSA set
+         * ("ML-DSA-65", "MLDSA65"), or a hex PIV algorithm id ("0x11").
+         * Case and `_`/`-` do not matter. Null for any other name; callers
+         * refuse it, never default it.
+         */
+        fun fromWireName(name: String): PivAlgorithm? {
+            if (name.isBlank()) return null
+            entries.firstOrNull { it.name == name }?.let { return it }
+            MlDsaParameterSet.fromWireName(name.trim())?.let { set ->
+                return entries.first { it.mlDsaSet == set }
+            }
+            val upper = name.trim().uppercase().replace("_", "-")
+            if (upper.startsWith("0X")) {
+                val id = upper.substring(2).toIntOrNull(16) ?: return null
+                return fromPivAlgorithmId(id)
+            }
+            return when (upper) {
+                "ES256", "ECDSA-P256", "EC-P256", "P256", "ECCP256", "ECC-P256" -> ES256
+                "ES384", "ECDSA-P384", "EC-P384", "P384", "ECCP384", "ECC-P384" -> ES384
+                "RS2048", "RSA-2048", "RSA2048" -> RS2048
+                "RS3072", "RSA-3072", "RSA3072" -> RS3072
+                "RS4096", "RSA-4096", "RSA4096" -> RS4096
+                "ED25519", "EDDSA" -> ED25519
+                "X25519" -> X25519
+                else -> null
+            }
+        }
+    }
 }

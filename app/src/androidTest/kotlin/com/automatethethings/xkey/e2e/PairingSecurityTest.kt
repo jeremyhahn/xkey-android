@@ -35,6 +35,7 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -188,13 +189,13 @@ class PairingSecurityTest {
                 promptShown.get()
             )
 
-            // And the session must still be unpaired.
-            val followUp = client.callExpectingError("local.listKeys", JSONObject())
-            assertEquals(
-                "session must remain unpaired after a rejected claim",
-                ErrorCodes.PAIRING_REQUIRED,
-                followUp!!.code
-            )
+            // A refused pairing.confirm ends the connection: nothing more
+            // runs on it, and the claimed device gains nothing.
+            assertThrows(
+                "the connection must close after a rejected claim",
+                Exception::class.java
+            ) { client.callExpectingError("local.listKeys", JSONObject()) }
+            assertFalse(pairedDeviceRepository.isDeviceKnown(client.publicKeyHex))
         } finally {
             client.close()
             pairedDeviceRepository.removeDevice(trustedKeyHex)
@@ -291,8 +292,12 @@ class PairingSecurityTest {
             assertNotNull("a declined pairing must return an error", error)
             assertEquals(ErrorCodes.PAIRING_REJECTED, error!!.code)
 
-            val followUp = client.callExpectingError("local.listKeys", JSONObject())
-            assertEquals(ErrorCodes.PAIRING_REQUIRED, followUp!!.code)
+            // A declined pairing.confirm ends the connection.
+            assertThrows(
+                "the connection must close after a declined pairing",
+                Exception::class.java
+            ) { client.callExpectingError("local.listKeys", JSONObject()) }
+            assertFalse(pairedDeviceRepository.isDeviceKnown(client.publicKeyHex))
         } finally {
             client.close()
             userApproves.set(true)

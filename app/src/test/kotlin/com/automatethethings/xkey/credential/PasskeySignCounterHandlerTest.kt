@@ -20,6 +20,7 @@ import android.content.Context
 import android.os.Looper
 import android.util.Log
 import androidx.credentials.GetPublicKeyCredentialOption
+import androidx.credentials.provider.CallingAppInfo
 import androidx.credentials.provider.ProviderGetCredentialRequest
 import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.auth.BiometricActivityLauncher
@@ -119,6 +120,11 @@ class PasskeySignCounterHandlerTest {
         every { XKeyDatabase.getInstance(any()) } returns mockk(relaxed = true) {
             every { credentialMetadataDao() } returns credentialDao
             every { keyDao() } returns keyDao
+            // No key has a pending deletion or a policy row: the stored policy decides.
+            every { keyPolicyDao() } returns mockk<com.automatethethings.xkey.storage.dao.KeyPolicyDao>(relaxed = true) {
+                io.mockk.coEvery { deletion(any()) } returns null
+                io.mockk.coEvery { policyRow(any()) } returns null
+            }
         }
 
         context = mockk(relaxed = true)
@@ -128,13 +134,14 @@ class PasskeySignCounterHandlerTest {
             mockk<NotificationManager>(relaxed = true)
 
         keystoreManager = mockk(relaxed = true)
-        coEvery { keystoreManager.signWithoutBiometric(ID, any()) } answers {
-            signed += secondArg<ByteArray>()
+        every { keystoreManager.soleKind(ID) } returns com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL
+        coEvery { keystoreManager.signWithoutBiometric(ID, any(), any()) } answers {
+            signed += thirdArg<ByteArray>()
             SIGNATURE
         }
         // The phone backend signs the passkey the owner approved, under the
         // alias its approval read (#177): the same faked signer records it.
-        every { keystoreManager.resolveKeystoreAlias(ID) } returns ALIAS
+        every { keystoreManager.resolveKeystoreAlias(ID, any()) } returns ALIAS
         every { keystoreManager.publicKeyDERAt(ALIAS) } returns APPROVED_DER
         coEvery { keystoreManager.signApproved(ALIAS, APPROVED_DER, any(), any()) } answers {
             signed += thirdArg<ByteArray>()
@@ -293,8 +300,14 @@ class PasskeySignCounterHandlerTest {
                 .toString()
             every { clientDataHash } returns CLIENT_DATA_HASH
         }
+        // A caller-supplied hash is taken only from a privileged browser on the RP.
+        val browser = mockk<CallingAppInfo>(relaxed = true) {
+            every { isOriginPopulated() } returns true
+            every { getOrigin(any()) } returns "https://$RP_ID"
+        }
         val request = mockk<ProviderGetCredentialRequest>(relaxed = true) {
             every { credentialOptions } returns listOf(option)
+            every { callingAppInfo } returns browser
         }
         val settings = mockk<BiometricSettingsRepository> {
             coEvery { getSettings() } returns BiometricSettingsData()

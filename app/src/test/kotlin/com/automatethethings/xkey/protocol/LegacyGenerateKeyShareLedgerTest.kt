@@ -22,6 +22,7 @@ import android.os.Looper
 import android.util.Log
 import com.automatethethings.xkey.auth.BiometricActivityLauncher
 import com.automatethethings.xkey.crypto.KeystoreManager
+import com.automatethethings.xkey.crypto.UserKeyKind
 import com.automatethethings.xkey.remote.SharePermissionLedger
 import com.automatethethings.xkey.remote.SharePermissionRevokedException
 import com.automatethethings.xkey.storage.XKeyDatabase
@@ -101,8 +102,9 @@ class LegacyGenerateKeyShareLedgerTest {
         val aliases = Collections.synchronizedSet(HashSet<String>())
         val generated = Collections.synchronizedList(ArrayList<String>())
         val keystore = mockk<KeystoreManager>(relaxed = true)
-        every { keystore.keyExists(any()) } answers { "xkey_credential_${firstArg<String>()}" in aliases }
-        every { keystore.resolveKeystoreAlias(any()) } answers {
+        every { keystore.keyExists(any(), UserKeyKind.CREDENTIAL) } answers { "xkey_credential_${firstArg<String>()}" in aliases }
+        every { keystore.userKeyIdInUse(any()) } answers { "xkey_credential_${firstArg<String>()}" in aliases }
+        every { keystore.resolveKeystoreAlias(any(), UserKeyKind.CREDENTIAL) } answers {
             "xkey_credential_${firstArg<String>()}".takeIf { it in aliases }
         }
         coEvery { keystore.generateKeyWithAuthDuration(any(), any(), any()) } answers {
@@ -111,7 +113,7 @@ class LegacyGenerateKeyShareLedgerTest {
             aliases += "xkey_credential_$id"
             byteArrayOf(generated.size.toByte())
         }
-        every { keystore.getAttestationChain(any()) } returns null
+        every { keystore.getAttestationChain(any(), any()) } returns null
         val keyDao = mockk<KeyDao>(relaxed = true)
 
         val approve = CompletableDeferred<Unit>()
@@ -138,7 +140,7 @@ class LegacyGenerateKeyShareLedgerTest {
         assertNotNull("the approved generation must succeed, got $firstResponse", firstResponse.optJSONObject("result"))
 
         assertTrue("the credential must be generated once, got $generated", generated == listOf(credentialId))
-        verify(exactly = 0) { keystore.deleteKey(credentialId) }
+        verify(exactly = 0) { keystore.deleteKey(credentialId, any()) }
         try {
             SharePermissionLedger.requireUnchanged(share.keyId, share.revision)
             fail("a share whose baseline predates the generation must be refused at admission")
@@ -155,8 +157,9 @@ class LegacyGenerateKeyShareLedgerTest {
         val credentialId = "legacy-cred-2"
         val aliases = Collections.synchronizedSet(HashSet<String>())
         val keystore = mockk<KeystoreManager>(relaxed = true)
-        every { keystore.keyExists(any()) } answers { "xkey_credential_${firstArg<String>()}" in aliases }
-        every { keystore.resolveKeystoreAlias(any()) } answers {
+        every { keystore.keyExists(any(), UserKeyKind.CREDENTIAL) } answers { "xkey_credential_${firstArg<String>()}" in aliases }
+        every { keystore.userKeyIdInUse(any()) } answers { "xkey_credential_${firstArg<String>()}" in aliases }
+        every { keystore.resolveKeystoreAlias(any(), UserKeyKind.CREDENTIAL) } answers {
             "xkey_credential_${firstArg<String>()}".takeIf { it in aliases }
         }
         val keyDao = mockk<KeyDao>(relaxed = true)
@@ -196,6 +199,11 @@ class LegacyGenerateKeyShareLedgerTest {
         every { Looper.getMainLooper() } returns mockk(relaxed = true)
         val database = mockk<XKeyDatabase>(relaxed = true)
         every { database.keyDao() } returns keyDao
+        // No earlier delete is owed under any id: the store's material
+        // writes settle no tombstone first.
+        val policyDao = mockk<com.automatethethings.xkey.storage.dao.KeyPolicyDao>(relaxed = true)
+        io.mockk.coEvery { policyDao.deletion(any()) } returns null
+        every { database.keyPolicyDao() } returns policyDao
         mockkObject(XKeyDatabase.Companion)
         every { XKeyDatabase.getInstance(any()) } returns database
         every { context.getSystemService(Context.KEYGUARD_SERVICE) } returns mockk<KeyguardManager>(relaxed = true)

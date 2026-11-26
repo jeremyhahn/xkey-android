@@ -103,7 +103,7 @@ class GetCredentialHandlerTest {
         if (!this::credentialDao.isInitialized) return
         runBlocking {
             for (credentialId in seededCredentialIds) {
-                runCatching { keystoreManager.deleteKey(credentialId) }
+                runCatching { keystoreManager.deleteKey(credentialId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) }
                 credentialDao.deleteByCredentialId(credentialId)
                 keyDao.deleteByKeyId(credentialId)
             }
@@ -216,7 +216,7 @@ class GetCredentialHandlerTest {
         val signature = CredentialRequestFixtures.decodeUrl(inner.getString("signature"))
 
         val verifier = Signature.getInstance("SHA256withECDSA")
-        verifier.initVerify(keystoreManager.getPublicKey(credential.credentialId)!!)
+        verifier.initVerify(keystoreManager.getPublicKey(credential.credentialId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL)!!)
         verifier.update(authData + clientDataHash)
 
         assertTrue(
@@ -237,7 +237,7 @@ class GetCredentialHandlerTest {
         val signature = CredentialRequestFixtures.decodeUrl(inner.getString("signature"))
 
         val verifier = Signature.getInstance("SHA256withECDSA")
-        verifier.initVerify(keystoreManager.getPublicKey(credential.credentialId)!!)
+        verifier.initVerify(keystoreManager.getPublicKey(credential.credentialId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL)!!)
         verifier.update(authData + MessageDigest.getInstance("SHA-256").digest("other".toByteArray()))
 
         assertFalse(
@@ -330,6 +330,46 @@ class GetCredentialHandlerTest {
         assertEquals(0L, storedSignCount(credential.credentialId))
     }
 
+    @Test
+    fun browserSuppliedHash_isRefusedWhenTheCallerHasNoVerifiedOrigin() {
+        val rpId = nextRpId()
+        val credential = seedCredential(rpId)
+        val request = CredentialRequestFixtures.providerGetRequest(
+            requestJson = CredentialRequestFixtures.getRequestJson(rpId),
+            callingAppInfo = CredentialRequestFixtures.appWithoutOrigin()
+        )
+
+        val failure = assertThrows(CredentialAssertionException::class.java) {
+            runBlocking { handler.handleGetCredential(request, credential.credentialId) }
+        }
+
+        assertTrue(
+            "A supplied hash fixes the origin, so it needs a verified one: ${failure.message}",
+            failure.message!!.contains("verified web origin")
+        )
+        assertEquals(0L, storedSignCount(credential.credentialId))
+    }
+
+    @Test
+    fun browserSuppliedHash_isRefusedFromABrowserOnAnotherSite() {
+        val rpId = nextRpId()
+        val credential = seedCredential(rpId)
+        val request = CredentialRequestFixtures.providerGetRequest(
+            requestJson = CredentialRequestFixtures.getRequestJson(rpId),
+            callingAppInfo = CredentialRequestFixtures.privilegedBrowserOn("other-site.example.com")
+        )
+
+        val failure = assertThrows(CredentialAssertionException::class.java) {
+            runBlocking { handler.handleGetCredential(request, credential.credentialId) }
+        }
+
+        assertTrue(
+            "The refusal should name the relying party: ${failure.message}",
+            failure.message!!.contains("not valid for the caller's origin")
+        )
+        assertEquals(0L, storedSignCount(credential.credentialId))
+    }
+
     // ---------------------------------------------------------------------
     // Authenticator data
     // ---------------------------------------------------------------------
@@ -377,7 +417,7 @@ class GetCredentialHandlerTest {
             assertEquals("UP|UV", 0x05, AuthenticatorData(authData).flags)
 
             val verifier = Signature.getInstance("SHA256withECDSA")
-            verifier.initVerify(keystoreManager.getPublicKey(credential.credentialId)!!)
+            verifier.initVerify(keystoreManager.getPublicKey(credential.credentialId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL)!!)
             verifier.update(authData + clientDataHash)
             assertTrue(
                 "The UV bit is inside the signed authenticator data, so the " +

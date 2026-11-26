@@ -15,6 +15,7 @@
 
 package com.automatethethings.xkey.tcp
 
+import com.automatethethings.xkey.ble.NoiseTestKeyStore
 import android.content.Context
 import android.util.Log
 import com.automatethethings.xkey.audit.AuditLogger
@@ -65,7 +66,7 @@ import org.junit.Test
 
 /**
  * Unpairing a desktop revokes its live TCP session, and a phone-initiated
- * send to a peer that is no longer paired is refused before encryption (#59).
+ * send to a peer that is no longer paired is refused before encryption.
  * Runs [TcpHsmServer] end to end on a loopback port against [DesktopPeer].
  */
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -88,6 +89,7 @@ class TcpHsmServerRevocationTest {
 
     @Before
     fun setUp() {
+        NoiseTestKeyStore.install()
         mockkStatic(Log::class)
         every { Log.v(any(), any<String>()) } returns 0
         every { Log.d(any(), any<String>()) } returns 0

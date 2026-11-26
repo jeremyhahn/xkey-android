@@ -154,10 +154,10 @@ class KeystoreManagerGeneralKeysTest {
     fun aKeyGeneratedWithoutTheStrongBoxPreferenceIsNeverReportedAsStrongBox() {
         val (keyId, _) = generate("ES256", "level-nopref")
 
-        val level = keystoreManager.keySecurityLevel(keyId)
+        val level = keystoreManager.keySecurityLevel(keyId, UserKeyKind.GENERAL)
         assertNotNull(level)
         assertNotEquals(KeySecurityLevel.STRONGBOX, level)
-        assertFalse(keystoreManager.isKeyStrongBoxBacked(keyId))
+        assertFalse(keystoreManager.isKeyStrongBoxBacked(keyId, UserKeyKind.GENERAL))
 
         assumeTrue("the TEE case needs a StrongBox device", keystoreManager.isStrongBoxAvailable())
         assertEquals(KeySecurityLevel.TEE, level)
@@ -174,7 +174,7 @@ class KeystoreManagerGeneralKeysTest {
         }
 
         listOf(aesId, hmacId).forEach { keyId ->
-            val level = keystoreManager.keySecurityLevel(keyId)
+            val level = keystoreManager.keySecurityLevel(keyId, UserKeyKind.GENERAL)
             assertNotNull(keyId, level)
             assertNotEquals(keyId, KeySecurityLevel.STRONGBOX, level)
             if (keystoreManager.isStrongBoxAvailable()) {
@@ -201,10 +201,10 @@ class KeystoreManagerGeneralKeysTest {
                 )
             }
 
-            val level = keystoreManager.keySecurityLevel(keyId)
+            val level = keystoreManager.keySecurityLevel(keyId, UserKeyKind.GENERAL)
             assertNotNull(algorithm, level)
             assertNotEquals(algorithm, KeySecurityLevel.STRONGBOX, level)
-            assertFalse(algorithm, keystoreManager.isKeyStrongBoxBacked(keyId))
+            assertFalse(algorithm, keystoreManager.isKeyStrongBoxBacked(keyId, UserKeyKind.GENERAL))
         }
     }
 
@@ -220,7 +220,7 @@ class KeystoreManagerGeneralKeysTest {
             keystoreManager.generateKeyForAlgorithm(keyId, "ES256", -1, preferStrongBox = true)
         }
 
-        val level = keystoreManager.keySecurityLevel(keyId)
+        val level = keystoreManager.keySecurityLevel(keyId, UserKeyKind.GENERAL)
         assertNotNull(level)
         if (!keystoreManager.isStrongBoxAvailable()) {
             assertNotEquals(KeySecurityLevel.STRONGBOX, level)
@@ -231,21 +231,21 @@ class KeystoreManagerGeneralKeysTest {
                 .getKeySpec(key, android.security.keystore.KeyInfo::class.java)
             val inStrongBox = info.securityLevel == KeyProperties.SECURITY_LEVEL_STRONGBOX
             assertEquals(inStrongBox, level == KeySecurityLevel.STRONGBOX)
-            assertEquals(inStrongBox, keystoreManager.isKeyStrongBoxBacked(keyId))
+            assertEquals(inStrongBox, keystoreManager.isKeyStrongBoxBacked(keyId, UserKeyKind.GENERAL))
         } else {
-            assertEquals(level == KeySecurityLevel.STRONGBOX, keystoreManager.isKeyStrongBoxBacked(keyId))
+            assertEquals(level == KeySecurityLevel.STRONGBOX, keystoreManager.isKeyStrongBoxBacked(keyId, UserKeyKind.GENERAL))
         }
     }
 
     @Test
     fun aMissingKeyHasNoSecurityLevel() {
-        assertNull(keystoreManager.keySecurityLevel("missing-${System.nanoTime()}"))
+        assertNull(keystoreManager.keySecurityLevel("missing-${System.nanoTime()}", UserKeyKind.GENERAL))
     }
 
     /**
      * A credential `k` (xkey_credential_k) and a general key `k` (xkey_key_k)
      * can coexist; the general key's level is read from its own alias, never
-     * from the credential that [KeystoreManager.resolveKeystoreAlias] prefers.
+     * from the credential of the same id.
      * The credential's KeyInfo read is made to fail, so a lookup that strayed
      * to the credential would throw on every device.
      */
@@ -264,7 +264,7 @@ class KeystoreManagerGeneralKeysTest {
                 keystoreManager.credentialSecurityLevel(keyId)
             }
         } finally {
-            keystoreManager.deleteKey(keyId)
+            UserKeyKind.entries.forEach { keystoreManager.deleteKey(keyId, it) }
         }
     }
 
@@ -281,10 +281,10 @@ class KeystoreManagerGeneralKeysTest {
             keystoreManager.generalKeySecurityLevel(keyId)
         }
         assertThrows(KeyInfoUnavailableException::class.java) {
-            keystoreManager.keySecurityLevel(keyId)
+            keystoreManager.keySecurityLevel(keyId, UserKeyKind.GENERAL)
         }
         assertThrows(KeyInfoUnavailableException::class.java) {
-            keystoreManager.isKeyStrongBoxBacked(keyId)
+            keystoreManager.isKeyStrongBoxBacked(keyId, UserKeyKind.GENERAL)
         }
     }
 
@@ -338,7 +338,7 @@ class KeystoreManagerGeneralKeysTest {
         }
 
         assertFalse("regeneration must mint a new key", first.contentEquals(second))
-        assertArrayEquals(second, keystoreManager.getPublicKeyDER(keyId))
+        assertArrayEquals(second, keystoreManager.getPublicKeyDER(keyId, UserKeyKind.GENERAL))
     }
 
     @Test
@@ -360,13 +360,29 @@ class KeystoreManagerGeneralKeysTest {
 
     @Test
     fun rejectsASymmetricKeySizeAesDoesNotDefine() {
-        val keyId = newKeyId("aes192")
+        val keyId = newKeyId("aes512")
 
         val failure = assertThrows(KeyGenerationException::class.java) {
-            runBlocking { keystoreManager.generateSymmetricKey(keyId, 192, -1) }
+            runBlocking { keystoreManager.generateSymmetricKey(keyId, 512, -1) }
         }
-        assertTrue(failure.message!!, failure.message!!.contains("128 or 256"))
+        assertTrue(failure.message!!, failure.message!!.contains("128, 192 or 256"))
         assertFalse(keystoreManager.generalKeyExists(keyId))
+    }
+
+    @Test
+    fun generatesAnAes192KeyThatRoundTrips() {
+        val keyId = newKeyId("aes192")
+        runBlocking { keystoreManager.generateSymmetricKey(keyId, 192, -1) }
+
+        assertTrue("AES-192", keystoreManager.generalKeyExists(keyId))
+
+        val plaintext = "aes-192 round trip".toByteArray()
+        val sealed = runBlocking { keystoreManager.symmetricEncrypt(keyId, plaintext) }
+        assertEquals(12 + plaintext.size + 16, sealed.size)
+        assertArrayEquals(
+            plaintext,
+            runBlocking { keystoreManager.symmetricDecrypt(keyId, sealed) }
+        )
     }
 
     @Test
@@ -381,6 +397,24 @@ class KeystoreManagerGeneralKeysTest {
         val data = "authenticate me".toByteArray()
         assertEquals(32, runBlocking { keystoreManager.computeHMAC(sha256, data) }.size)
         assertEquals(64, runBlocking { keystoreManager.computeHMAC(sha512, data) }.size)
+    }
+
+    @Test
+    fun generatesAnHmacSha384KeyThatMacsDeterministically() {
+        val keyId = newKeyId("hmac384")
+        runBlocking { keystoreManager.generateHMACKey(keyId, "HMAC-SHA384") }
+
+        assertTrue("HMAC-SHA384", keystoreManager.generalKeyExists(keyId))
+
+        val data = "authenticate me with sha-384".toByteArray()
+        val first = runBlocking { keystoreManager.computeHMAC(keyId, data) }
+        val second = runBlocking { keystoreManager.computeHMAC(keyId, data) }
+        assertEquals(48, first.size)
+        assertArrayEquals(first, second)
+        assertFalse(
+            "a different input gives a different MAC",
+            first.contentEquals(runBlocking { keystoreManager.computeHMAC(keyId, "other".toByteArray()) })
+        )
     }
 
     @Test

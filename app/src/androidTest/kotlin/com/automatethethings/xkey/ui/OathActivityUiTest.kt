@@ -14,7 +14,9 @@
  */
 package com.automatethethings.xkey.ui
 
+import android.content.ClipboardManager
 import android.content.Context
+import android.view.View
 import android.widget.TextView
 import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
@@ -25,11 +27,16 @@ import androidx.test.espresso.action.ViewActions.longClick
 import androidx.test.espresso.assertion.ViewAssertions.doesNotExist
 import androidx.test.espresso.assertion.ViewAssertions.matches
 import androidx.test.espresso.intent.Intents
+import androidx.test.espresso.intent.Intents.intended
+import androidx.test.espresso.intent.matcher.IntentMatchers.hasComponent
+import androidx.test.espresso.intent.matcher.IntentMatchers.hasExtra
 import androidx.test.espresso.matcher.RootMatchers.isDialog
+import androidx.test.espresso.matcher.ViewMatchers.isCompletelyDisplayed
 import androidx.test.espresso.matcher.ViewMatchers.isDisplayed
 import androidx.test.espresso.matcher.ViewMatchers.withText
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.automatethethings.xkey.R
+import com.automatethethings.xkey.audit.AuditOperationType
 import com.automatethethings.xkey.oath.OathCredentialDao
 import com.automatethethings.xkey.oath.OathRepository
 import com.automatethethings.xkey.oath.OathSecretManager
@@ -63,7 +70,9 @@ import org.junit.runner.RunWith
  * - Adapter binding: issuer, account and a formatted live OTP code
  * - Empty state hidden once a credential exists
  * - Tapping a row copies the code and confirms with a snackbar
- * - Long-press context menu: View Details opens the detail dialog
+ * - Long-press menu: Copy, Delete, Details; Copy copies, Details opens
+ *   [OathCredentialDetailActivity]
+ * - A 60+ character account leaves the code completely displayed
  * - Delete confirmation: cancel keeps the credential, confirm removes it
  * - The FAB's add-method chooser and the manual-entry dialog's cancel path
  * - Back navigation finishing the activity
@@ -81,6 +90,11 @@ class OathActivityUiTest {
     private lateinit var oathDao: OathCredentialDao
     private var testOathId: String? = null
     private var deletableOathId: String? = null
+    private var longOathId: String? = null
+
+    /** 60+ characters, RFC 2606 domain. */
+    private val longAccount =
+        "a.very.long.account.name.for.narrow.screens.$runId@subdomain.example.com"
 
     @Before
     fun setUp() {
@@ -95,6 +109,7 @@ class OathActivityUiTest {
         runBlocking {
             testOathId?.let { repository.deleteCredential(it) }
             deletableOathId?.let { repository.deleteCredential(it) }
+            longOathId?.let { repository.deleteCredential(it) }
         }
         Intents.release()
     }
@@ -168,6 +183,25 @@ class OathActivityUiTest {
         }
     }
 
+    /** Tapping a row copies a generated code, which writes one audit row. */
+    @Test
+    fun tapCopy_recordsOneOathCodeGeneratedRow() {
+        seedCredential()
+        val auditDao = XKeyDatabase.getInstance(
+            ApplicationProvider.getApplicationContext<Context>()
+        ).auditLogDao()
+
+        val scenario = ActivityScenario.launch(OathActivity::class.java)
+        awaitText(scenario, testAccount)
+
+        onView(withText(testAccount)).perform(click())
+
+        awaitCondition("A phone copy should write one OATH_CODE_GENERATED row") {
+            runBlocking { auditDao.getByKeyId(testOathId!!) }
+                .count { it.operationType == AuditOperationType.OATH_CODE_GENERATED } == 1
+        }
+    }
+
     @Test
     fun emptyState_isHiddenWhileCredentialsExist() {
         seedCredential()
@@ -192,8 +226,23 @@ class OathActivityUiTest {
     // Row interaction
     // ---------------------------------------------------------------
 
+    /** A tap copies the row's code (no group space) and confirms with a snackbar. */
     @Test
-    fun longPress_opensContextMenuWithViewDetailsAndDelete() {
+    fun tap_copiesCodeAndShowsSnackbar() {
+        seedCredential()
+
+        val scenario = ActivityScenario.launch(OathActivity::class.java)
+        awaitText(scenario, testAccount)
+
+        val before = rowCode(scenario, testAccount)
+        onView(withText(testAccount)).perform(click())
+
+        onView(withText(R.string.oath_code_copied)).check(matches(isDisplayed()))
+        assertCopiedRowCode(scenario, testAccount, before)
+    }
+
+    @Test
+    fun longPress_opensMenuWithCopyDeleteAndDetails() {
         seedCredential()
 
         val scenario = ActivityScenario.launch(OathActivity::class.java)
@@ -201,30 +250,99 @@ class OathActivityUiTest {
 
         onView(withText(testAccount)).perform(longClick())
 
-        onView(withText(R.string.oath_context_view_details))
+        onView(withText(R.string.oath_context_copy))
             .inRoot(isDialog())
             .check(matches(isDisplayed()))
         onView(withText(R.string.oath_context_delete))
             .inRoot(isDialog())
             .check(matches(isDisplayed()))
+        onView(withText(R.string.oath_context_details))
+            .inRoot(isDialog())
+            .check(matches(isDisplayed()))
     }
 
     @Test
-    fun contextMenuViewDetails_showsCredentialDetailDialog() {
+    fun menuCopy_copiesCode() {
+        seedCredential()
+
+        val scenario = ActivityScenario.launch(OathActivity::class.java)
+        awaitText(scenario, testAccount)
+
+        val before = rowCode(scenario, testAccount)
+        onView(withText(testAccount)).perform(longClick())
+        onView(withText(R.string.oath_context_copy)).inRoot(isDialog()).perform(click())
+
+        onView(withText(R.string.oath_code_copied)).check(matches(isDisplayed()))
+        assertCopiedRowCode(scenario, testAccount, before)
+    }
+
+    @Test
+    fun menuDetails_opensDetailsScreen() {
         seedCredential()
 
         val scenario = ActivityScenario.launch(OathActivity::class.java)
         awaitText(scenario, testAccount)
 
         onView(withText(testAccount)).perform(longClick())
-        onView(withText(R.string.oath_context_view_details)).inRoot(isDialog()).perform(click())
+        onView(withText(R.string.oath_context_details)).inRoot(isDialog()).perform(click())
 
-        onView(withText(R.string.oath_detail_title)).inRoot(isDialog())
-            .check(matches(isDisplayed()))
-        onView(withText(R.string.oath_detail_issuer)).inRoot(isDialog())
-            .check(matches(isDisplayed()))
-        onView(withText(R.string.oath_detail_account)).inRoot(isDialog())
-            .check(matches(isDisplayed()))
+        intended(
+            allOf(
+                hasComponent(OathCredentialDetailActivity::class.java.name),
+                hasExtra(OathCredentialDetailActivity.EXTRA_OATH_ID, testOathId)
+            )
+        )
+        onView(withText(R.string.oath_detail_code)).check(matches(isDisplayed()))
+    }
+
+    /**
+     * A 60+ character account is a small ellipsized title; the code sits on
+     * its own line below it, whole and on screen.
+     */
+    @Test
+    fun longAccount_codeIsCompletelyDisplayed() {
+        seedLongAccountCredential()
+
+        val scenario = ActivityScenario.launch(OathActivity::class.java)
+        awaitText(scenario, longAccount)
+
+        awaitCondition("The code under a long account should be on screen") {
+            var shown = false
+            scenario.onActivity { activity ->
+                shown = rowCodeView(activity.window.decorView, longAccount)?.isShown == true
+            }
+            shown
+        }
+        scenario.onActivity { activity ->
+            val code = rowCodeView(activity.window.decorView, longAccount)!!
+            assertTrue("Code must be completely displayed", isCompletelyDisplayed().matches(code))
+            assertEquals("Code must stay on one line", 1, code.lineCount)
+            assertEquals("Code must not be ellipsized", 0, code.layout.getEllipsisCount(0))
+            assertTrue(
+                "Code text must fit its view",
+                code.paint.measureText(code.text.toString()) <=
+                    code.width - code.totalPaddingLeft - code.totalPaddingRight + 1
+            )
+            val shown = code.layout.text.toString()
+            assertEquals("Code text must be shown in full", code.text.toString(), shown)
+
+            val decor = activity.window.decorView
+            val codeTop = IntArray(2).also { code.getLocationOnScreen(it) }[1]
+            for (title in listOf(rowTitleView(decor, "issuer"), rowTitleView(decor, "account"))) {
+                val titleTop = IntArray(2).also { title.getLocationOnScreen(it) }[1]
+                assertTrue(
+                    "Code (top $codeTop) must sit below the ${title.tag} (bottom ${titleTop + title.height})",
+                    codeTop >= titleTop + title.height
+                )
+            }
+        }
+    }
+
+    /** The issuer or account TextView in the row showing [longAccount]. */
+    private fun rowTitleView(decor: View, tag: String): TextView {
+        var view: View? = findTextView(decor, longAccount)
+        while (view != null && view !is OathRowLayout) view = view.parent as? View
+        return view!!.findViewWithTag(tag)
     }
 
     // ---------------------------------------------------------------
@@ -242,7 +360,7 @@ class OathActivityUiTest {
         onView(withText(R.string.oath_context_delete)).inRoot(isDialog()).perform(click())
 
         // The confirmation replaces the item list with a Delete/Cancel pair.
-        onView(withText(R.string.oath_context_view_details)).check(doesNotExist())
+        onView(withText(R.string.oath_context_details)).check(doesNotExist())
         onView(withText(CONFIRM_DELETE_BUTTON)).inRoot(isDialog()).check(matches(isDisplayed()))
         onView(withText(CANCEL_BUTTON)).inRoot(isDialog()).perform(click())
 
@@ -264,9 +382,9 @@ class OathActivityUiTest {
 
         // "Delete" is both the context-menu entry and the confirmation's
         // positive button. The context menu is the only dialog carrying
-        // "View Details", so its disappearance proves the confirmation has
+        // "Details", so its disappearance proves the confirmation has
         // replaced it before the button is clicked.
-        onView(withText(R.string.oath_context_view_details)).check(doesNotExist())
+        onView(withText(R.string.oath_context_details)).check(doesNotExist())
         onView(withText(CONFIRM_DELETE_BUTTON)).inRoot(isDialog()).perform(click())
 
         awaitCondition("Confirmed delete should remove the credential") {
@@ -336,6 +454,50 @@ class OathActivityUiTest {
                 secret = TEST_SECRET.toByteArray(Charsets.US_ASCII)
             )
         }
+    }
+
+    private fun seedLongAccountCredential() {
+        longOathId = runBlocking {
+            repository.addCredential(
+                issuer = TEST_ISSUER,
+                accountName = longAccount,
+                secret = TEST_SECRET.toByteArray(Charsets.US_ASCII)
+            )
+        }
+    }
+
+    /** The code TextView in the row showing [account], or null when not bound. */
+    private fun rowCodeView(decor: View, account: String): TextView? {
+        var view: View? = findTextView(decor, account)
+        while (view != null && view !is OathRowLayout) view = view.parent as? View
+        return view?.findViewWithTag("code")
+    }
+
+    /** The digits of the code shown in [account]'s row, group space removed. */
+    private fun rowCode(scenario: ActivityScenario<OathActivity>, account: String): String {
+        var code = ""
+        scenario.onActivity { activity ->
+            code = rowCodeView(activity.window.decorView, account)!!.text.toString().replace(" ", "")
+        }
+        return code
+    }
+
+    /**
+     * The clipboard holds the row's code: the one read before the copy, or the
+     * next period's code when the copy ran just after a rollover.
+     */
+    private fun assertCopiedRowCode(
+        scenario: ActivityScenario<OathActivity>,
+        account: String,
+        before: String
+    ) {
+        val after = rowCode(scenario, account)
+        var clip = ""
+        scenario.onActivity { activity ->
+            val clipboard = activity.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            clip = clipboard.primaryClip?.getItemAt(0)?.text?.toString().orEmpty()
+        }
+        assertTrue("Clipboard '$clip' should hold the row code ($before or $after)", clip == before || clip == after)
     }
 
     private fun seedDeletableCredential() {

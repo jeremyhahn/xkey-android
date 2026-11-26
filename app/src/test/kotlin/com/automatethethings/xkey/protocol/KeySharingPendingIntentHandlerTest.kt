@@ -1,0 +1,1093 @@
+/*
+ * Copyright (c) 2026 Jeremy Hahn
+ * Copyright (c) 2026 Automate The Things, LLC
+ *
+ * This file is part of xkey-android.
+ *
+ * xkey-android is dual-licensed:
+ *
+ * 1. GNU Affero General Public License v3.0 (AGPL-3.0)
+ *    See LICENSE file or visit https://www.gnu.org/licenses/agpl-3.0.html
+ *
+ * 2. Commercial License
+ *    Contact licensing@automatethethings.com for commercial licensing options.
+ */
+
+package com.automatethethings.xkey.protocol
+
+import com.automatethethings.xkey.storage.materialDelete
+import android.app.KeyguardManager
+import android.app.NotificationManager
+import android.content.Context
+import android.os.Looper
+import android.util.Log
+import com.automatethethings.xkey.audit.AuditLogger
+import com.automatethethings.xkey.settings.InMemorySharedPreferences
+import com.automatethethings.xkey.settings.PairedDeviceRepository
+import com.automatethethings.xkey.storage.FakeKeyPolicyTables
+import com.automatethethings.xkey.storage.KeyPolicyStore
+import com.automatethethings.xkey.storage.XKeyDatabase
+import com.automatethethings.xkey.storage.dao.KeyDao
+import com.automatethethings.xkey.storage.dao.KeySharingPolicyDao
+import com.automatethethings.xkey.storage.entity.KeyEntity
+import com.automatethethings.xkey.storage.entity.SharingPolicyType
+import com.automatethethings.xkey.ui.KeySharingPeers
+import com.automatethethings.xkey.ui.SharingPolicyType as SheetPolicy
+import io.mockk.coEvery
+import io.mockk.every
+import io.mockk.just
+import io.mockk.mockk
+import io.mockk.mockkObject
+import io.mockk.mockkStatic
+import io.mockk.runs
+import io.mockk.unmockkAll
+import kotlin.coroutines.Continuation
+import kotlin.coroutines.EmptyCoroutineContext
+import kotlin.coroutines.intrinsics.suspendCoroutineUninterceptedOrReturn
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.runCurrent
+import kotlinx.coroutines.test.runTest
+import org.junit.After
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertTrue
+import org.junit.Before
+import org.json.JSONObject
+import org.junit.Test
+
+/**
+ * A sharing edit whose write fails is refused and fails closed in the
+ * production [RequestHandler] (#174, #193): a failed narrowing's denial is
+ * kept in the key's policy row, so `canShareKeyWithPeer` refuses the peers
+ * it withdraws, after a restart too, until a later change lands. Nothing is
+ * retried in memory but a single peer's withdrawal.
+ *
+ * Each test uses its own key: pending withdrawals live in the process.
+ */
+@OptIn(ExperimentalCoroutinesApi::class)
+class KeySharingPendingIntentHandlerTest {
+
+    private companion object {
+        const val OTHER_KEY = "k-other"
+        val PEER_A = "a".repeat(64)
+        val PEER_B = "b".repeat(64)
+    }
+
+    /** The `keys`, `key_policies` and `key_sharing_policies` tables. */
+    private val tables = FakeKeyPolicyTables()
+    private val store get() = tables.store()
+    private lateinit var dao: KeySharingPolicyDao
+    private lateinit var repo: PairedDeviceRepository
+    private lateinit var prefs: InMemorySharedPreferences
+    private lateinit var keyDao: KeyDao
+    private lateinit var context: Context
+    private lateinit var handler: RequestHandler
+    private var otherInstance = 0L
+
+    /** The Android Keystore side of a key: its material. */
+    private val keystore = mockk<com.automatethethings.xkey.crypto.KeystoreManager>(relaxed = true)
+
+    @Before
+    fun setUp() {
+        mockkStatic(Log::class)
+        every { Log.e(any(), any<String>(), any()) } returns 0
+        every { Log.e(any(), any<String>()) } returns 0
+        every { Log.w(any(), any<String>()) } returns 0
+        every { Log.w(any(), any<String>(), any()) } returns 0
+        every { Log.i(any(), any<String>()) } returns 0
+        every { Log.d(any(), any<String>()) } returns 0
+        every { Log.v(any(), any<String>()) } returns 0
+        mockkObject(AuditLogger)
+        every { AuditLogger.logDeviceUnpaired(any(), any()) } just runs
+
+        otherInstance = tables.addKey(OTHER_KEY, SharingPolicyType.SELECTED_PEERS)
+        dao = mockk()
+        coEvery { dao.isPeerGranted(any(), any()) } answers { tables.isGranted(firstArg(), secondArg()) }
+        keyDao = mockk()
+        coEvery { keyDao.getByKeyId(any()) } answers { tables.key(firstArg()) }
+
+        prefs = InMemorySharedPreferences()
+        repo = PairedDeviceRepository(prefs)
+        repo.addDevice(PEER_A, "desktop-a")
+        repo.addDevice(PEER_B, "desktop-b")
+
+        mockkStatic(Looper::class)
+        every { Looper.getMainLooper() } returns mockk(relaxed = true)
+        val database = mockk<XKeyDatabase>(relaxed = true)
+        every { database.keySharingPolicyDao() } returns dao
+        every { database.keyDao() } returns keyDao
+        mockkObject(XKeyDatabase.Companion)
+        every { XKeyDatabase.getInstance(any()) } returns database
+        mockkObject(KeyPolicyStore.Companion)
+        every { KeyPolicyStore.of(any(), any()) } answers { tables.store() }
+        context = mockk(relaxed = true)
+        every { context.getSystemService(Context.KEYGUARD_SERVICE) } returns
+            mockk<KeyguardManager>(relaxed = true)
+        every { context.getSystemService(NotificationManager::class.java) } returns
+            mockk<NotificationManager>(relaxed = true)
+        // No Keystore alias unless a test gives its key one.
+        every { keystore.holdsAnyKey(any()) } returns false
+        every { keystore.holdsInternalKey(any()) } returns false
+        every { keystore.soleKind(any()) } returns null
+        // The software key store side of a key: the files under the context's.
+        every { keystore.softwareKeys() } answers { com.automatethethings.xkey.crypto.SoftwareKeyStore(context) }
+        handler = newHandler()
+    }
+
+    /** A handler as the service builds it, over [repo]. */
+    private fun newHandler() = RequestHandler(
+        context = context,
+        keystoreManager = keystore,
+        biometricLauncher = null,
+        sessionAuthManager = null,
+        pairedDeviceRepository = repo
+    )
+
+    @After
+    fun tearDown() {
+        unmockkAll()
+    }
+
+    /** Invokes the handler's private suspend [name]; the faked tables never suspend. */
+    private fun call(name: String, vararg args: Any, types: Array<Class<*>>): Any? {
+        val method = RequestHandler::class.java.getDeclaredMethod(name, *types, Continuation::class.java)
+        method.isAccessible = true
+        val noResume = Continuation<Any?>(EmptyCoroutineContext) { error("suspended") }
+        return method.invoke(handler, *args, noResume)
+    }
+
+    /**
+     * The handler's own check for [keyId]'s stored key row: the gate
+     * local.listFido2Credentials filters with and local.signFido2Assertion
+     * refuses by.
+     */
+    private fun shares(keyId: String, peer: String): Boolean =
+        call("canShareKeyWithPeer", tables.key(keyId)!!, peer, types = arrayOf(KeyEntity::class.java, String::class.java)) as Boolean
+
+    /** The authorization key export runs: the stored key when [peer] may have it, else null. */
+    private fun exports(keyId: String, peer: String): Boolean =
+        call("authorizeShare", keyId, peer, types = arrayOf(String::class.java, String::class.java)) != null
+
+    /** Runs local.setKeyPolicy through the handler, as a desktop's RPC does. */
+    private suspend fun rpcSetShareable(keyId: String, shareable: Boolean) {
+        assertEquals(null, rpcSetShareableResponse(keyId, shareable).error)
+    }
+
+    /** [rpcSetShareable]'s response, whatever it is. */
+    private suspend fun rpcSetShareableResponse(keyId: String, shareable: Boolean): Response {
+        val method = RequestHandler::class.java.getDeclaredMethod(
+            "handleLocalSetKeyPolicy", Request::class.java, Continuation::class.java
+        )
+        method.isAccessible = true
+        val request = Request(
+            id = 1,
+            method = MethodNames.LOCAL_SET_KEY_POLICY,
+            params = JSONObject().put("keyId", keyId).put("shareable", shareable)
+        )
+        // A refusal the handler throws is answered as an error, as
+        // handleRequest answers it.
+        return try {
+            suspendCoroutineUninterceptedOrReturn<Any?> { method.invoke(handler, request, it) } as Response
+        } catch (e: java.lang.reflect.InvocationTargetException) {
+            val refusal = e.cause as? ProtocolException ?: throw e
+            Response.error(request.id, refusal.errorCode, refusal.message ?: "")
+        }
+    }
+
+    /** Runs local.deleteKey through the handler, as a desktop's RPC does. */
+    private suspend fun rpcDeleteKey(keyId: String): Response {
+        val method = RequestHandler::class.java.getDeclaredMethod(
+            "handleLocalDeleteKey", Request::class.java, Continuation::class.java
+        )
+        method.isAccessible = true
+        val request = Request(id = 2, method = MethodNames.LOCAL_DELETE_KEY, params = JSONObject().put("keyId", keyId))
+        return suspendCoroutineUninterceptedOrReturn<Any?> { method.invoke(handler, request, it) } as Response
+    }
+
+    /**
+     * A process restart: [KeySharingPeers]' pending withdrawals are gone, and
+     * their retries with them; the tables stay.
+     */
+    @Suppress("UNCHECKED_CAST")
+    private fun restartProcess() {
+        val field = KeySharingPeers::class.java.getDeclaredField("pendingObligations").apply { isAccessible = true }
+        (field.get(null) as MutableStateFlow<Map<Any, Any>>).value = emptyMap()
+        repo = PairedDeviceRepository(prefs)
+        handler = newHandler()
+    }
+
+    /**
+     * Runs [edit] from a sheet dismissed while the edit waits behind another
+     * key's held grant, so nobody awaits it when it runs and fails.
+     */
+    private fun TestScope.detached(edit: suspend () -> Unit) {
+        val gate = CompletableDeferred<Unit>()
+        tables.onPutGrant = { if (it.keyId == OTHER_KEY) gate.await() }
+        val other = KeySharingPeers(OTHER_KEY, otherInstance, store, repo, UnconfinedTestDispatcher(testScheduler), editScope = this)
+        val grant = async(UnconfinedTestDispatcher(testScheduler)) { other.setAllowed(PEER_B, true, repo.pairingGeneration(PEER_B)) }
+        val sheet = CoroutineScope(Job() + UnconfinedTestDispatcher(testScheduler))
+        sheet.launch { edit() }
+        sheet.cancel()
+        gate.complete(Unit)
+        tables.onPutGrant = {}
+        runCurrent()
+        assertTrue(grant.isCompleted)
+    }
+
+    @Test
+    fun aFailedDetachedNarrowingToSelectedPeersDeniesUngrantedPeersUntilALaterChangeLands() = runTest {
+        val key = "k-narrow"
+        val instance = tables.addKey(key, SharingPolicyType.ALL_PEERS)
+        val peers = KeySharingPeers(key, instance, store, repo, UnconfinedTestDispatcher(testScheduler), editScope = this)
+        assertTrue(shares(key, PEER_A))
+        assertTrue(exports(key, PEER_A))
+
+        tables.failing += "setKeyPolicy"
+        detached { peers.setKeyPolicy(SheetPolicy.SELECTED_PEERS, instance) }
+        tables.failing.clear()
+
+        assertEquals(SharingPolicyType.ALL_PEERS, tables.keyPolicy(key))
+        // Listing and signing share canShareKeyWithPeer; export runs authorizeShare.
+        assertFalse("a failed Selected Peers left All Peers authorizing an ungranted peer", shares(key, PEER_A))
+        assertFalse("an ungranted desktop could export through stored All Peers", exports(key, PEER_A))
+        assertFalse(shares(key, PEER_B))
+
+        // A grant the user makes meanwhile stands, and authorizes only its peer.
+        assertTrue(peers.setAllowed(PEER_B, true, repo.pairingGeneration(PEER_B)))
+        assertTrue(shares(key, PEER_B))
+        assertTrue(exports(key, PEER_B))
+        assertFalse(shares(key, PEER_A))
+
+        // Nothing is retried, and the denial holds across a restart.
+        advanceUntilIdle()
+        restartProcess()
+        assertEquals("a failed Selected Peers was retried", SharingPolicyType.ALL_PEERS, tables.keyPolicy(key))
+        assertFalse(shares(key, PEER_A))
+        assertTrue(shares(key, PEER_B))
+
+        // The user's next choice lands and keeps the later grant.
+        assertTrue(peers.setKeyPolicy(SheetPolicy.SELECTED_PEERS, instance))
+        assertEquals(SharingPolicyType.SELECTED_PEERS, tables.keyPolicy(key))
+        assertFalse(exports(key, PEER_A))
+        assertTrue("the later grant was dropped", exports(key, PEER_B))
+    }
+
+    @Test
+    fun aFailedSheetPolicyNeverLandsOverALaterPrivateRpc() = runTest {
+        val key = "k-rpc-private"
+        val instance = tables.addKey(key, SharingPolicyType.SELECTED_PEERS)
+        tables.grant(key, PEER_B)
+        val peers = KeySharingPeers(key, instance, store, repo, UnconfinedTestDispatcher(testScheduler), editScope = this)
+
+        // The sheet's Selected Peers -> All Peers fails, and is refused.
+        tables.failing += "setKeyPolicy"
+        assertFalse(peers.setKeyPolicy(SheetPolicy.ALL_PEERS, instance))
+        tables.failing.clear()
+        assertEquals(SharingPolicyType.SELECTED_PEERS, tables.keyPolicy(key))
+
+        // A desktop then makes the key Private, and that write succeeds.
+        rpcSetShareable(key, shareable = false)
+        assertEquals(SharingPolicyType.PRIVATE, tables.keyPolicy(key))
+
+        advanceUntilIdle()
+
+        assertEquals("the older All Peers landed over the later Private", SharingPolicyType.PRIVATE, tables.keyPolicy(key))
+        assertFalse(exports(key, PEER_A))
+        assertFalse(exports(key, PEER_B))
+    }
+
+    @Test
+    fun aSelectedPeersAfterAFailedPrivateClearsTheOldGrantsBeforeTheDenialLifts() = runTest {
+        val key = "k-reselect"
+        val instance = tables.addKey(key, SharingPolicyType.SELECTED_PEERS)
+        tables.grant(key, PEER_A)
+        tables.grant(key, PEER_B)
+        tables.failing += "deleteGrants"
+        val peers = KeySharingPeers(key, instance, store, repo, UnconfinedTestDispatcher(testScheduler), editScope = this)
+
+        detached { peers.setKeyPolicy(SheetPolicy.PRIVATE, instance) }
+        assertFalse(shares(key, PEER_A))
+
+        // Back to Selected Peers while the old rows still cannot be cleared: refused.
+        assertFalse(peers.setKeyPolicy(SheetPolicy.SELECTED_PEERS, instance))
+        assertEquals(setOf(PEER_A, PEER_B), tables.grantsOf(key))
+        assertFalse("Selected Peers lifted the denial over the old grants", shares(key, PEER_A))
+        assertFalse(shares(key, PEER_B))
+
+        tables.failing.clear()
+        advanceUntilIdle()
+        assertFalse("the old grants authorize again with nothing landed", shares(key, PEER_A))
+
+        // The next Selected Peers clears the old grants first.
+        assertTrue(peers.setKeyPolicy(SheetPolicy.SELECTED_PEERS, instance))
+        assertTrue("the old grants were never cleared", tables.grantsOf(key).isEmpty())
+        assertEquals(SharingPolicyType.SELECTED_PEERS, tables.keyPolicy(key))
+        assertFalse("a previously granted peer regained access without approval", shares(key, PEER_A))
+        assertFalse(shares(key, PEER_B))
+
+        // A fresh approval stands.
+        assertTrue(peers.setAllowed(PEER_A, true, repo.pairingGeneration(PEER_A)))
+        advanceUntilIdle()
+        assertTrue(shares(key, PEER_A))
+    }
+
+    @Test
+    fun aFailedDetachedWithdrawalIsDeniedByTheHandlerUntilItsRetryLands() = runTest {
+        val key = "k-withdraw"
+        val instance = tables.addKey(key, SharingPolicyType.SELECTED_PEERS)
+        tables.grant(key, PEER_A)
+        tables.grant(key, PEER_B)
+        tables.failing += "deleteGrant"
+        val peers = KeySharingPeers(key, instance, store, repo, UnconfinedTestDispatcher(testScheduler), editScope = this)
+
+        detached { peers.setAllowed(PEER_A, false, repo.pairingGeneration(PEER_A)) }
+
+        assertTrue(tables.isGranted(key, PEER_A))
+        assertFalse("a failed withdrawal left its peer authorized", shares(key, PEER_A))
+        // It owes the key's grant clear (#193): every peer is denied until the next policy write.
+        assertFalse(shares(key, PEER_B))
+
+        tables.failing.clear()
+        advanceUntilIdle()
+
+        assertFalse(tables.isGranted(key, PEER_A))
+        assertFalse(shares(key, PEER_A))
+        assertFalse(shares(key, PEER_B))
+
+        assertTrue(peers.setKeyPolicy(com.automatethethings.xkey.ui.SharingPolicyType.SELECTED_PEERS, instance))
+        assertFalse("the owed clear left a grant", tables.isGranted(key, PEER_B))
+    }
+
+    @Test
+    fun aFailedPrivateWriteDeniesGrantedAndAllPeersAccessUntilALaterChangeLands() = runTest {
+        val selectedKey = "k-private-selected"
+        val allKey = "k-private-all"
+        val selectedInstance = tables.addKey(selectedKey, SharingPolicyType.SELECTED_PEERS)
+        val allInstance = tables.addKey(allKey, SharingPolicyType.ALL_PEERS)
+        tables.grant(selectedKey, PEER_A)
+        tables.failing += "setKeyPolicy"
+        val selected = KeySharingPeers(selectedKey, selectedInstance, store, repo, UnconfinedTestDispatcher(testScheduler), editScope = this)
+        val all = KeySharingPeers(allKey, allInstance, store, repo, UnconfinedTestDispatcher(testScheduler), editScope = this)
+
+        detached { selected.setKeyPolicy(SheetPolicy.PRIVATE, selectedInstance) }
+        detached { all.setKeyPolicy(SheetPolicy.PRIVATE, allInstance) }
+        tables.failing.clear()
+
+        assertFalse("a failed Private left a surviving grant authorizing", shares(selectedKey, PEER_A))
+        assertFalse("a failed Private left All Peers authorizing", shares(allKey, PEER_A))
+        assertFalse(shares(allKey, PEER_B))
+
+        advanceUntilIdle()
+        restartProcess()
+
+        assertEquals(SharingPolicyType.SELECTED_PEERS, tables.keyPolicy(selectedKey))
+        assertEquals(SharingPolicyType.ALL_PEERS, tables.keyPolicy(allKey))
+        assertFalse(shares(selectedKey, PEER_A))
+        assertFalse(shares(allKey, PEER_A))
+
+        // The next choice decides again.
+        assertTrue(all.setKeyPolicy(SheetPolicy.ALL_PEERS, allInstance))
+        assertTrue(shares(allKey, PEER_A))
+        assertTrue(shares(allKey, PEER_B))
+    }
+
+    @Test
+    fun aFailedRpcRevocationIsNotReportedAndSurvivesARestart() = runTest {
+        val key = "k-rpc-restart"
+        tables.addKey(key, SharingPolicyType.ALL_PEERS)
+        tables.grant(key, PEER_A)
+        tables.failing += "setKeyPolicy"
+
+        // A desktop makes the key private; the write fails.
+        val response = rpcSetShareableResponse(key, false)
+        assertFalse(response.result?.optBoolean("updated") == true)
+        assertNotNull(response.error)
+        tables.failing.clear()
+
+        // The process dies and starts again over the same disk.
+        restartProcess()
+
+        assertEquals(SharingPolicyType.ALL_PEERS, tables.keyPolicy(key))
+        assertFalse(shares(key, PEER_A))
+        assertFalse(exports(key, PEER_A))
+    }
+
+    @Test
+    fun aFailedRpcWideningIsNotRetriedOverAKeyDeletedAndReused() = runTest {
+        val key = "k-rpc-reuse"
+        val first = tables.addKey(key, SharingPolicyType.PRIVATE)
+        tables.failing += "setKeyPolicy"
+
+        // A desktop shares the key with all peers; the write fails and is refused.
+        assertNotNull(rpcSetShareableResponse(key, true).error)
+        tables.failing.clear()
+
+        // The key is deleted (as the key screens do) and generated again
+        // under its id, not shareable, and granted to a peer.
+        assertEquals(KeyPolicyStore.KeyDelete.DELETED, KeySharingPeers.forgetKey(key, first, store))
+        val second = tables.addKey(key, SharingPolicyType.PRIVATE)
+        tables.grant(key, PEER_A)
+        advanceUntilIdle()
+
+        assertTrue(second != first)
+        assertEquals(SharingPolicyType.PRIVATE, tables.keyPolicy(key))
+        assertTrue(tables.isGranted(key, PEER_A))
+
+        // An edit still bound to the deleted key row is refused and writes nothing.
+        assertFalse(KeySharingPeers.setKeyPolicy(key, store, SheetPolicy.ALL_PEERS, first, editScope = this))
+        assertEquals(SharingPolicyType.PRIVATE, tables.keyPolicy(key))
+        assertTrue(tables.isGranted(key, PEER_A))
+    }
+
+    /**
+     * A local.deleteKey that waits behind another edit while its key is
+     * deleted and generated again under its id deletes nothing of the new
+     * key: it is bound to the key row it read (#193).
+     */
+    @Test
+    fun aDelayedDeleteNeverRemovesAKeyGeneratedAgainUnderItsId() = runTest {
+        val key = "k-delete-reuse"
+        // A readable software key store: a delete whose material cannot be
+        // read is refused at once (#270 round 4), not queued.
+        fakeSoftwareKeyStore(java.nio.file.Files.createTempDirectory("software-keys").toFile().apply { deleteOnExit() })
+        val first = tables.addKey(key, SharingPolicyType.SELECTED_PEERS)
+        val gate = CompletableDeferred<Unit>()
+        tables.onPutGrant = { if (it.keyId == OTHER_KEY) gate.await() }
+        val other = KeySharingPeers(OTHER_KEY, otherInstance, store, repo, UnconfinedTestDispatcher(testScheduler), editScope = this)
+        val held = async(UnconfinedTestDispatcher(testScheduler)) { other.setAllowed(PEER_B, true, repo.pairingGeneration(PEER_B)) }
+        val delete = async(UnconfinedTestDispatcher(testScheduler)) { rpcDeleteKey(key) }
+        assertFalse(delete.isCompleted)
+
+        // The key is deleted elsewhere and generated again while the delete waits.
+        tables.deleteKey(key)
+        val second = tables.addKey(key, SharingPolicyType.SELECTED_PEERS)
+        tables.grant(key, PEER_A)
+        assertTrue(second != first)
+        gate.complete(Unit)
+        assertTrue(held.await())
+        delete.await()
+
+        assertEquals("the delayed delete removed the new key's metadata", second, tables.key(key)?.id)
+        assertTrue(tables.isGranted(key, PEER_A))
+    }
+
+    /**
+     * A local.deleteKey cancelled while it waits behind another edit still
+     * deletes the key's material once its queued row delete lands: the row
+     * delete outlives the caller, so the material delete is part of it, never
+     * left behind on a cancel (#193 r6, ruling 554).
+     */
+    @Test
+    fun aCancelledQueuedDeleteStillDeletesTheKeyMaterial() = runTest {
+        val key = "k-delete-cancel"
+        fakeSoftwareKeyStore(java.nio.file.Files.createTempDirectory("software-keys").toFile().apply { deleteOnExit() })
+        tables.addKey(key, SharingPolicyType.SELECTED_PEERS)
+        // The key's Keystore alias, gone once deleted.
+        val alias = "xkey_key_$key"
+        var aliasHeld = true
+        every { keystore.holdsAnyKey(key) } answers { aliasHeld }
+        every { keystore.userKeyGeneration(key) } answers { if (aliasHeld) mapOf("keystore:$alias" to "1") else emptyMap() }
+        every { keystore.deleteUserKeyGeneration(key, any()) } answers { aliasHeld = false; emptyMap() }
+        val gate = CompletableDeferred<Unit>()
+        tables.onPutGrant = { if (it.keyId == OTHER_KEY) gate.await() }
+        val other = KeySharingPeers(OTHER_KEY, otherInstance, store, repo, UnconfinedTestDispatcher(testScheduler), editScope = this)
+        val held = async(UnconfinedTestDispatcher(testScheduler)) { other.setAllowed(PEER_B, true, repo.pairingGeneration(PEER_B)) }
+        val delete = async(UnconfinedTestDispatcher(testScheduler)) { rpcDeleteKey(key) }
+        assertFalse(delete.isCompleted)
+
+        // The desktop's request is cancelled while the delete is queued.
+        delete.cancel()
+        gate.complete(Unit)
+        assertTrue(held.await())
+
+        // The queued delete lands in the edits' own scope, off the test's clock.
+        io.mockk.verify(timeout = 5_000) { keystore.deleteUserKeyGeneration(key, mapOf("keystore:$alias" to "1")) }
+        assertEquals("the queued row delete did not land", null, tables.key(key))
+    }
+
+    /**
+     * Round 11 (1): local.deleteKey of an internal key (the seal store's,
+     * listed by the key sync under its raw alias) is refused and deletes
+     * neither its rows nor its material.
+     */
+    @Test
+    fun aDeleteOfAnInternalKeyIsRefusedOnTheRpcPath() = runTest {
+        val internal = "xkey_seal_store_key"
+        every { keystore.holdsAnyKey(internal) } returns true
+        every { keystore.holdsInternalKey(internal) } returns true
+        every { keystore.deleteByAlias(any()) } returns true
+        tables.addKey(internal, SharingPolicyType.PRIVATE)
+
+        val response = rpcDeleteKey(internal)
+
+        assertEquals(ErrorCodes.OPERATION_DENIED, response.error?.code)
+        io.mockk.verify(exactly = 0) { keystore.deleteByAlias(internal) }
+        io.mockk.verify(exactly = 0) { keystore.deleteUserKeyGeneration(any(), any()) }
+        assertNotNull("the internal key's row was deleted", tables.key(internal))
+        assertFalse("a tombstone for an internal key", store.isDeletionPending(internal))
+    }
+
+    /**
+     * #255 verify r2z (1): an older build's record whose metadata can be
+     * listed but not read was taken as every requested id's, so the
+     * internal seal store key read as a user key and local.deleteKey of it
+     * deleted its rows with a success. The unreadable record is now
+     * unreadable: the delete is refused, its rows and material kept.
+     */
+    @Test
+    fun aDeleteOfAnInternalKeyBesideAnUnreadableLegacyRecordIsRefused() = runTest {
+        val internal = "xkey_seal_store_key"
+        val files = java.nio.file.Files.createTempDirectory("software-keys").toFile().apply { deleteOnExit() }
+        // A legacy record's metadata the store lists but cannot read.
+        assertTrue(java.io.File(files, "software_keys/legacy_record.meta").mkdirs())
+        val real = realKeystore(files, internal)
+        every { keystore.holdsAnyKey(internal) } returns true
+        every { keystore.holdsInternalKey(internal) } answers { real.holdsInternalKey(internal) }
+        every { keystore.userKeyIdInUse(internal) } answers { real.userKeyIdInUse(internal) }
+        every { keystore.userKeyGeneration(internal) } answers { real.userKeyGeneration(internal) }
+        every { keystore.deleteByAlias(any()) } returns true
+        tables.addKey(internal, SharingPolicyType.PRIVATE)
+
+        // The handler's own delete; the dispatch answers what it throws with an error.
+        val refused = try {
+            rpcDeleteKey(internal).error != null
+        } catch (e: java.lang.reflect.InvocationTargetException) {
+            assertTrue("${e.cause}", e.cause is com.automatethethings.xkey.crypto.KeyPresenceUnreadableException)
+            true
+        }
+
+        assertTrue("the delete of an internal key succeeded", refused)
+        io.mockk.verify(exactly = 0) { keystore.deleteByAlias(internal) }
+        io.mockk.verify(exactly = 0) { keystore.deleteUserKeyGeneration(any(), any()) }
+        assertNotNull("the internal key's row was deleted", tables.key(internal))
+        assertFalse("a tombstone for an internal key", store.isDeletionPending(internal))
+    }
+
+    /**
+     * A KeystoreManager over a real software key store under [files]: the
+     * platform keystore holds [aliases] only, and no Ed25519 key is stored.
+     */
+    private fun realKeystore(files: java.io.File, vararg aliases: String): com.automatethethings.xkey.crypto.KeystoreManager {
+        val platform = mockk<java.security.KeyStore>(relaxed = true)
+        every { platform.containsAlias(any()) } answers { firstArg<String>() in aliases }
+        mockkStatic(java.security.KeyStore::class)
+        every { java.security.KeyStore.getInstance(any<String>()) } returns platform
+        val prefs = mockk<android.content.SharedPreferences>()
+        every { prefs.contains(any()) } returns false
+        every { prefs.getString(any(), any()) } answers { secondArg() }
+        val storeContext = mockk<Context>()
+        every { storeContext.filesDir } returns files
+        val cipher = mockk<com.automatethethings.xkey.crypto.KeystoreAeadCipher>(relaxed = true)
+        val software = com.automatethethings.xkey.crypto.SoftwareKeyStore(storeContext, cipher)
+        val real = io.mockk.spyk(com.automatethethings.xkey.crypto.KeystoreManager(mockk<Context>(relaxed = true)))
+        every { real.ed25519Prefs() } returns prefs
+        every { real.softwareKeys() } returns software
+        return real
+    }
+
+    /**
+     * Round 11 (1): a tombstone for an internal key (left by an older
+     * build) is replayed without deleting the key, and is dropped.
+     */
+    @Test
+    fun aDeleteOfAnInternalKeyIsRefusedOnTheReplayPath() = runTest {
+        val internal = "xkey_seal_store_key"
+        every { keystore.holdsAnyKey(internal) } returns true
+        every { keystore.holdsInternalKey(internal) } returns true
+        every { keystore.deleteByAlias(any()) } returns true
+        val store = store
+        // A tombstone that recorded the internal alias, outside the id's
+        // user-key namespace: the replay refuses it and deletes nothing.
+        val recorded = object : com.automatethethings.xkey.storage.KeyMaterial {
+            override suspend fun generation(held: com.automatethethings.xkey.storage.KeyPolicyStore.KeyMaterialHeld, source: String?): String =
+                """{"keystore:$internal":"1"}"""
+
+            override suspend fun delete(
+                held: com.automatethethings.xkey.storage.KeyPolicyStore.KeyMaterialHeld,
+                tombstone: com.automatethethings.xkey.storage.entity.KeyDeletionEntity
+            ): Boolean = false
+        }
+        assertEquals(KeyPolicyStore.MaterialDelete.DELETED, store.deleteMaterial(internal, recorded))
+        assertTrue(store.isDeletionPending(internal))
+
+        com.automatethethings.xkey.storage.replayKeyDeletions(context, store, keystore)
+
+        io.mockk.verify(exactly = 0) { keystore.deleteByAlias(internal) }
+        io.mockk.verify(exactly = 0) { keystore.deleteUserKeyGeneration(any(), any()) }
+        assertFalse("the refused replay kept its tombstone", store.isDeletionPending(internal))
+    }
+
+    /**
+     * Round 11 (1): a user key whose id is also an internal alias loses
+     * only its user-key aliases; the internal key stays.
+     */
+    @Test
+    fun aUserKeyDeleteNeverReachesAnInternalAliasOfTheSameName() = runTest {
+        val id = "xkey_seal_store_key"
+        val userAlias = "xkey_key_$id"
+        var userHeld = true
+        every { keystore.holdsAnyKey(id) } returns true
+        every { keystore.holdsInternalKey(id) } answers { !userHeld }
+        every { keystore.userKeyGeneration(id) } answers { if (userHeld) mapOf("keystore:$userAlias" to "1") else emptyMap() }
+        every { keystore.deleteUserKeyGeneration(id, any()) } answers { userHeld = false; emptyMap() }
+        every { keystore.deleteByAlias(any()) } returns true
+        fakeSoftwareKeyStore(java.nio.file.Files.createTempDirectory("software-keys").toFile().apply { deleteOnExit() })
+        tables.addKey(id, SharingPolicyType.PRIVATE)
+
+        assertEquals(null, rpcDeleteKey(id).error)
+
+        io.mockk.verify { keystore.deleteUserKeyGeneration(id, mapOf("keystore:$userAlias" to "1")) }
+        io.mockk.verify(exactly = 0) { keystore.deleteByAlias(any()) }
+    }
+
+    /**
+     * #270 round 4: a credential and a general key share an id. The
+     * delete's target probe fails once and the next read succeeds: the
+     * failure is never read as "no material". The delete is refused, and
+     * both keys, the row and its metadata stay.
+     */
+    @Test
+    fun aDeleteWhoseTargetProbeFailsIsRefusedAndKeepsBothKeys() = runTest {
+        val id = "k-probe"
+        val both = mapOf("keystore:xkey_credential_$id" to "1", "keystore:xkey_key_$id" to "1")
+        var probes = 0
+        every { keystore.holdsInternalKey(id) } returns false
+        every { keystore.userKeyGeneration(id) } answers {
+            if (probes++ == 0) throw java.security.KeyStoreException("keystore busy") else both
+        }
+        every { keystore.deleteUserKeyGeneration(id, any()) } returns emptyMap()
+        fakeSoftwareKeyStore(java.nio.file.Files.createTempDirectory("software-keys").toFile().apply { deleteOnExit() })
+        tables.addKey(id, SharingPolicyType.PRIVATE)
+
+        assertNotNull("a failed probe let the delete through", rpcDeleteKey(id).error)
+
+        io.mockk.verify(exactly = 0) { keystore.deleteUserKeyGeneration(any(), any()) }
+        assertNotNull("the key row was deleted", tables.key(id))
+        assertFalse(store.isDeletionPending(id))
+    }
+
+/**
+     * #270 review r5: a key from the laptop's KMS daemon (`xkmsd`) is a
+     * reference with no local material. Its local.deleteKey reads the row's
+     * source before any local probe, so an unreadable Ed25519 preferences
+     * store and software-key directory never refuse it: the reference row
+     * goes, and no local backend is probed or deleted.
+     */
+    @Test
+    fun anRpcDeleteOfAnXkmsdReferenceProbesNoLocalBackend() = runTest {
+        val id = "k-xkmsd"
+        every { keystore.holdsInternalKey(id) } throws com.automatethethings.xkey.crypto.KeyPresenceUnreadableException(id, null)
+        every { keystore.userKeyGeneration(id) } throws IllegalStateException("Ed25519 preferences unreadable")
+        every { keystore.exportKind(id) } throws IllegalStateException("Ed25519 preferences unreadable")
+        val unreadable = java.nio.file.Files.createTempFile("software-keys", "").toFile().apply { deleteOnExit() }
+        fakeSoftwareKeyStore(unreadable)
+        tables.addKey(id, SharingPolicyType.PRIVATE, keyType = "signing", publicKeyDer = byteArrayOf(4, 5, 6), source = "xkmsd")
+
+        assertEquals(null, rpcDeleteKey(id).error)
+
+        assertEquals("the reference row went", null, tables.key(id))
+        io.mockk.verify(exactly = 0) { keystore.userKeyGeneration(id) }
+        io.mockk.verify(exactly = 0) { keystore.deleteUserKeyGeneration(id, any()) }
+    }
+
+    /**
+     * #270 review: a fido2 row under the general alias (as
+     * local.generateKey makes it) shares its id with a credential. The
+     * row's public key names the general key: local.deleteKey removes the
+     * general key's material and row, and the credential stays.
+     */
+    @Test
+    fun anRpcDeleteOfAGeneralFido2RowKeepsTheSameIdCredential() = runTest {
+        val id = "k-dual"
+        every { keystore.rowKeyKind(id, any(), any(), any()) } answers { callOriginal() }
+        val generalDer = byteArrayOf(1, 2, 3)
+        var held = mapOf("keystore:xkey_credential_$id" to "1", "keystore:xkey_key_$id" to "1")
+        every { keystore.holdsInternalKey(id) } returns false
+        every { keystore.userKeyGeneration(id) } answers { held }
+        every { keystore.deleteUserKeyGeneration(id, any()) } answers { held = held - secondArg<Map<String, String>>().keys; emptyMap() }
+        every { keystore.getPublicKeyDER(id, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL) } returns generalDer
+        every { keystore.getPublicKeyDER(id, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) } returns byteArrayOf(9, 9)
+        fakeSoftwareKeyStore(java.nio.file.Files.createTempDirectory("software-keys").toFile().apply { deleteOnExit() })
+        tables.addKey(id, SharingPolicyType.PRIVATE, keyType = "fido2", publicKeyDer = generalDer)
+
+        assertEquals(null, rpcDeleteKey(id).error)
+
+        io.mockk.verify(exactly = 0) { keystore.deleteUserKeyGeneration(id, match { "keystore:xkey_credential_$id" in it }) }
+        assertEquals("the general key's material stayed", mapOf("keystore:xkey_credential_$id" to "1"), held)
+        assertEquals("the general key's row stayed", null, tables.key(id))
+    }
+
+    /**
+     * #270 review of 33427e39: a software symmetric key's row holds no
+     * public key. Beside a same-id credential, local.deleteKey removes the
+     * software key and its row; the credential's material stays.
+     */
+    @Test
+    fun anRpcDeleteOfASymmetricRowKeepsTheSameIdCredential() = runTest {
+        val id = "k-sym"
+        every { keystore.rowKeyKind(id, any(), any(), any()) } answers { callOriginal() }
+        var held = mapOf("keystore:xkey_credential_$id" to "1")
+        every { keystore.holdsInternalKey(id) } returns false
+        every { keystore.userKeyGeneration(id) } answers { held }
+        every { keystore.deleteUserKeyGeneration(id, any()) } answers { held = held - secondArg<Map<String, String>>().keys; emptyMap() }
+        every { keystore.getPublicKeyDER(id, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) } returns byteArrayOf(9, 9)
+        val software = fakeSoftwareKeyStore(java.nio.file.Files.createTempDirectory("software-keys").toFile().apply { deleteOnExit() })
+        software += id
+        tables.addKey(id, SharingPolicyType.PRIVATE, keyType = "symmetric")
+
+        assertEquals(null, rpcDeleteKey(id).error)
+
+        assertFalse("the software key stayed", id in software)
+        assertEquals("the symmetric key's delete took the credential", mapOf("keystore:xkey_credential_$id" to "1"), held)
+        assertEquals("the symmetric key's row stayed", null, tables.key(id))
+    }
+
+    /**
+     * #270 verify r2 (1): a passkey's row records its public key as COSE
+     * only, as the credential provider writes it. Beside a general key of
+     * its id, local.deleteKey reads the COSE key: the credential's material
+     * and row go, the general key stays.
+     */
+    @Test
+    fun anRpcDeleteOfACoseOnlyCredentialRowKeepsTheSameIdGeneralKey() = runTest {
+        val id = "k-cose"
+        every { keystore.rowKeyKind(id, any(), any(), any()) } answers { callOriginal() }
+        val credentialCose = byteArrayOf(0xA5.toByte(), 1, 2)
+        var held = mapOf("keystore:xkey_credential_$id" to "1", "keystore:xkey_key_$id" to "1")
+        every { keystore.holdsInternalKey(id) } returns false
+        every { keystore.userKeyGeneration(id) } answers { held }
+        every { keystore.deleteUserKeyGeneration(id, any()) } answers { held = held - secondArg<Map<String, String>>().keys; emptyMap() }
+        every { keystore.getPublicKeyDER(id, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL) } returns byteArrayOf(1, 2, 3)
+        every { keystore.getPublicKeyDER(id, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) } returns byteArrayOf(9, 9)
+        every { keystore.getCOSEPublicKey(id, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL) } returns byteArrayOf(0xA5.toByte(), 7)
+        every { keystore.getCOSEPublicKey(id, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) } returns credentialCose
+        fakeSoftwareKeyStore(java.nio.file.Files.createTempDirectory("software-keys").toFile().apply { deleteOnExit() })
+        tables.addKey(id, SharingPolicyType.PRIVATE, keyType = "fido2", publicKeyDer = null, publicKeyCose = credentialCose)
+
+        assertEquals(null, rpcDeleteKey(id).error)
+
+        assertEquals("the passkey's delete took the general key", mapOf("keystore:xkey_key_$id" to "1"), held)
+        assertEquals("the passkey's row stayed", null, tables.key(id))
+    }
+
+    /**
+     * #270 verify r3 (1): an Ed25519 general key is in the Ed25519
+     * preferences, with no Keystore certificate. Beside a credential of its
+     * id, local.deleteKey reads its public half from the stored key: the
+     * Ed25519 key's material and row go, the credential stays.
+     */
+    @Test
+    fun anRpcDeleteOfAnEd25519GeneralKeyRowKeepsTheSameIdCredential() = runTest {
+        val id = "k-ed25519"
+        every { keystore.rowKeyKind(id, any(), any(), any()) } answers { callOriginal() }
+        val pair = java.security.KeyPairGenerator.getInstance("Ed25519").generateKeyPair()
+        var held = mapOf("keystore:xkey_credential_$id" to "1", "ed25519:xkey_key_$id" to "1")
+        every { keystore.holdsInternalKey(id) } returns false
+        every { keystore.userKeyGeneration(id) } answers { held }
+        every { keystore.deleteUserKeyGeneration(id, any()) } answers { held = held - secondArg<Map<String, String>>().keys; emptyMap() }
+        every { keystore.getPublicKeyDER(id, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL) } returns null
+        every { keystore.getPublicKeyDER(id, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) } returns byteArrayOf(9, 9)
+        every { keystore.getCOSEPublicKey(id, any()) } returns null
+        every { keystore.holdsEd25519Keys() } returns true
+        every { keystore.getEd25519PrivateKey("xkey_key_$id") } returns pair.private
+        every { keystore.getEd25519PrivateKey("xkey_credential_$id") } returns null
+        fakeSoftwareKeyStore(java.nio.file.Files.createTempDirectory("software-keys").toFile().apply { deleteOnExit() })
+        tables.addKey(id, SharingPolicyType.PRIVATE, keyType = "signing", publicKeyDer = pair.public.encoded)
+
+        assertEquals(null, rpcDeleteKey(id).error)
+
+        assertEquals("the Ed25519 key's delete took the credential", mapOf("keystore:xkey_credential_$id" to "1"), held)
+        assertEquals("the Ed25519 key's row stayed", null, tables.key(id))
+    }
+
+    /**
+     * #270 review: a fido2 row whose public key names neither key under a
+     * shared id cannot be placed: the delete is refused and both keys and
+     * the row stay.
+     */
+    @Test
+    fun anRpcDeleteOfARowOwnedByNeitherSharedKeyIsRefused() = runTest {
+        val id = "k-unowned"
+        every { keystore.rowKeyKind(id, any(), any(), any()) } answers { callOriginal() }
+        every { keystore.holdsInternalKey(id) } returns false
+        every { keystore.userKeyGeneration(id) } returns mapOf("keystore:xkey_credential_$id" to "1", "keystore:xkey_key_$id" to "1")
+        every { keystore.getPublicKeyDER(id, any()) } returns byteArrayOf(9, 9)
+        fakeSoftwareKeyStore(java.nio.file.Files.createTempDirectory("software-keys").toFile().apply { deleteOnExit() })
+        tables.addKey(id, SharingPolicyType.PRIVATE, keyType = "fido2", publicKeyDer = null)
+
+        assertNotNull("an unowned row's delete went through", rpcDeleteKey(id).error)
+
+        io.mockk.verify(exactly = 0) { keystore.deleteUserKeyGeneration(any(), any()) }
+        assertNotNull("the key row was deleted", tables.key(id))
+        assertFalse(store.isDeletionPending(id))
+    }
+
+    /**
+     * #270 review (P1): local.deleteKey of an ID with no key row, no
+     * material and no pending deletion deletes nothing. It answers
+     * deleted=false, as it always did, writes no tombstone and audits no
+     * delete.
+     */
+    @Test
+    fun anRpcDeleteOfAnUnknownIdAnswersNotDeletedAndWritesNoTombstone() = runTest {
+        val id = "k-unknown"
+        every { AuditLogger.logKeyDeleted(any(), any(), any()) } just runs
+        every { keystore.userKeyIdInUse(id) } returns false
+        every { keystore.userKeyGeneration(id) } returns emptyMap()
+        fakeSoftwareKeyStore(java.nio.file.Files.createTempDirectory("software-keys").toFile().apply { deleteOnExit() })
+
+        val response = rpcDeleteKey(id)
+
+        assertEquals(null, response.error)
+        assertEquals(false, response.result?.getBoolean("deleted"))
+        assertFalse("an unknown id's delete wrote a tombstone", store.isDeletionPending(id))
+        io.mockk.verify(exactly = 0) { keystore.deleteUserKeyGeneration(any(), any()) }
+        io.mockk.verify(exactly = 0) { AuditLogger.logKeyDeleted(id, any(), any()) }
+    }
+
+    /**
+     * Round 12 (4): every key delete records one key-deletion audit event:
+     * local.deleteKey of a key row, of material with no row, and the legacy
+     * deleteKey.
+     */
+    @Test
+    fun everyRpcKeyDeleteIsAuditedOnce() = runTest {
+        every { AuditLogger.logKeyDeleted(any(), any(), any()) } just runs
+        fakeSoftwareKeyStore(java.nio.file.Files.createTempDirectory("software-keys").toFile().apply { deleteOnExit() })
+        val held = mutableSetOf("k-row", "k-bare", "k-legacy")
+        for (id in held.toList()) {
+            every { keystore.holdsAnyKey(id) } answers { id in held }
+            every { keystore.userKeyIdInUse(id) } answers { id in held }
+            every { keystore.userKeyGeneration(id) } answers { if (id in held) mapOf("keystore:xkey_credential_$id" to "1") else emptyMap() }
+            every { keystore.deleteUserKeyGeneration(id, any()) } answers { held -= id; emptyMap() }
+        }
+        tables.addKey("k-row", SharingPolicyType.PRIVATE)
+
+        assertEquals(null, rpcDeleteKey("k-row").error)
+        assertEquals(null, rpcDeleteKey("k-bare").error)
+        assertEquals(null, rpcLegacyDeleteKey("k-legacy").error)
+
+        for (id in listOf("k-row", "k-bare", "k-legacy")) {
+            io.mockk.verify(exactly = 1) { AuditLogger.logKeyDeleted(id, any(), any()) }
+        }
+        assertTrue("a delete left its material", held.isEmpty())
+        // The legacy delete takes the store's path: its material is deleted
+        // by its generation, never by a raw alias outside the store.
+        io.mockk.verify(exactly = 0) { keystore.deleteKey(any(), any()) }
+    }
+
+    /**
+     * #270 review r6: a key delete is audited with the type of the key it
+     * deleted, so a credential's delete stays under the audit log's FIDO2
+     * filter: the legacy deleteKey of a credential row and of credential
+     * material with no row is "fido2", a key row keeps its own type, and a
+     * general key with no row is "general".
+     */
+    @Test
+    fun aKeyDeleteIsAuditedWithTheDeletedKeysType() = runTest {
+        every { AuditLogger.logKeyDeleted(any(), any(), any()) } just runs
+        fakeSoftwareKeyStore(java.nio.file.Files.createTempDirectory("software-keys").toFile().apply { deleteOnExit() })
+        val aliases = mapOf(
+            "k-cred" to "xkey_credential_k-cred",
+            "k-bare-cred" to "xkey_credential_k-bare-cred",
+            "k-signing" to "xkey_key_k-signing",
+            "k-bare-gen" to "xkey_key_k-bare-gen"
+        )
+        val held = aliases.keys.toMutableSet()
+        for ((id, alias) in aliases) {
+            every { keystore.rowKeyKind(id, any(), any(), any()) } answers { callOriginal() }
+            every { keystore.holdsInternalKey(id) } returns false
+            every { keystore.holdsAnyKey(id) } answers { id in held }
+            every { keystore.userKeyIdInUse(id) } answers { id in held }
+            every { keystore.userKeyGeneration(id) } answers { if (id in held) mapOf("keystore:$alias" to "1") else emptyMap() }
+            every { keystore.deleteUserKeyGeneration(id, any()) } answers { held -= id; emptyMap() }
+        }
+        tables.addKey("k-cred", SharingPolicyType.PRIVATE, keyType = "fido2", publicKeyCose = byteArrayOf(0xA5.toByte(), 1, 2))
+        tables.addKey("k-signing", SharingPolicyType.PRIVATE, keyType = "signing", publicKeyDer = byteArrayOf(1, 2, 3))
+
+        assertEquals(null, rpcLegacyDeleteKey("k-cred").error)
+        assertEquals(null, rpcLegacyDeleteKey("k-bare-cred").error)
+        assertEquals(null, rpcDeleteKey("k-signing").error)
+        assertEquals(null, rpcDeleteKey("k-bare-gen").error)
+
+        io.mockk.verify(exactly = 1) { AuditLogger.logKeyDeleted("k-cred", any(), "fido2") }
+        io.mockk.verify(exactly = 1) { AuditLogger.logKeyDeleted("k-bare-cred", any(), "fido2") }
+        io.mockk.verify(exactly = 1) { AuditLogger.logKeyDeleted("k-signing", any(), "signing") }
+        io.mockk.verify(exactly = 1) { AuditLogger.logKeyDeleted("k-bare-gen", any(), "general") }
+        assertTrue("a delete left its material", held.isEmpty())
+    }
+
+    /**
+     * Round 12 (1): a delete that reported success while its material is
+     * still owed (its tombstone pending) leaves the key unusable at once:
+     * every RPC naming it is refused as a deleted key, before it reaches
+     * the key's material.
+     */
+    @Test
+    fun aKeyWithAPendingDeletionRefusesEveryOperation() = runTest {
+        every { AuditLogger.logKeyDeleted(any(), any(), any()) } just runs
+        fakeSoftwareKeyStore(java.nio.file.Files.createTempDirectory("software-keys").toFile().apply { deleteOnExit() })
+        val id = "k-owed"
+        every { keystore.holdsAnyKey(id) } returns true
+        every { keystore.soleKind(id) } returns com.automatethethings.xkey.crypto.UserKeyKind.GENERAL
+        every { keystore.userKeyIdInUse(id) } returns true
+        every { keystore.generalKeyExists(id) } returns true
+        every { keystore.userKeyGeneration(id) } returns mapOf("keystore:xkey_key_$id" to "1")
+        val instance = tables.addKey(id, SharingPolicyType.SELECTED_PEERS)
+
+        assertEquals(KeyPolicyStore.KeyDelete.DELETED, store.deleteKey(id, instance, owedDelete()))
+        assertTrue("the delete's material is not owed", store.isDeletionPending(id))
+
+        val data = java.util.Base64.getEncoder().encodeToString(ByteArray(32))
+        val keyed = listOf(
+            "sign", "loadKey",
+            MethodNames.LOCAL_SIGN, MethodNames.LOCAL_DECRYPT, MethodNames.LOCAL_SYMMETRIC_ENCRYPT,
+            MethodNames.LOCAL_SYMMETRIC_DECRYPT, MethodNames.LOCAL_HMAC, MethodNames.LOCAL_ECDH,
+            MethodNames.LOCAL_GET_PUBLIC_KEY, MethodNames.LOCAL_GET_KEY_INFO, MethodNames.LOCAL_SET_KEY_POLICY,
+            MethodNames.LOCAL_ATTEST_KEY, MethodNames.LOCAL_SIGN_FIDO2_ASSERTION,
+            MethodNames.LOCAL_IMPORT_SHARED_KEY, MethodNames.COSIGN_REQUEST
+        )
+        for (method in keyed) {
+            val params = JSONObject()
+                .put("keyId", id).put("credentialId", id).put("key_id", id)
+                .put("data", data).put("hash", "00".repeat(32)).put("shareable", true)
+            val response = handler.handleRequest(Request(id = 9, method = method, params = params))
+            assertEquals("$method answered ${response.error?.message}", ErrorCodes.KEY_NOT_FOUND, response.error?.code)
+            assertTrue("$method was not refused as a deleted key: ${response.error?.message}", "was deleted" in response.error!!.message)
+        }
+    }
+
+    /** Runs the legacy deleteKey through the handler. */
+    private suspend fun rpcLegacyDeleteKey(credentialId: String): Response {
+        val method = RequestHandler::class.java.getDeclaredMethod("handleDeleteKey", Request::class.java, Continuation::class.java)
+        method.isAccessible = true
+        val request = Request(id = 4, method = "deleteKey", params = JSONObject().put("credentialId", credentialId))
+        return try {
+            suspendCoroutineUninterceptedOrReturn<Any?> { method.invoke(handler, request, it) } as Response
+        } catch (e: java.lang.reflect.InvocationTargetException) {
+            val refusal = e.cause as? ProtocolException ?: throw e
+            Response.error(request.id, refusal.errorCode, refusal.message ?: "")
+        }
+    }
+
+    /** The app's deleter, recording the generation, whose delete does not confirm: the tombstone is owed. */
+    private fun owedDelete(): com.automatethethings.xkey.storage.KeyMaterial =
+        object : com.automatethethings.xkey.storage.KeyMaterial by com.automatethethings.xkey.storage.keyMaterialDeleter(context, keystore, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL) {
+            override suspend fun delete(
+                held: com.automatethethings.xkey.storage.KeyPolicyStore.KeyMaterialHeld,
+                tombstone: com.automatethethings.xkey.storage.entity.KeyDeletionEntity
+            ) = false
+        }
+
+    /**
+     * The software key store as a set of key ids, its files under [files]:
+     * the platform keystore its cipher opens is a stub.
+     */
+    private fun fakeSoftwareKeyStore(files: java.io.File): MutableSet<String> {
+        mockkStatic(java.security.KeyStore::class)
+        every { java.security.KeyStore.getInstance(any<String>()) } returns mockk(relaxed = true)
+        every { context.filesDir } returns files
+        val software = mutableSetOf<String>()
+        io.mockk.mockkConstructor(com.automatethethings.xkey.crypto.SoftwareKeyStore::class)
+        every { anyConstructed<com.automatethethings.xkey.crypto.SoftwareKeyStore>().contains(any()) } answers { firstArg<String>() in software }
+        every { anyConstructed<com.automatethethings.xkey.crypto.SoftwareKeyStore>().put(any()) } answers {
+            software += firstArg<com.automatethethings.xkey.crypto.SoftwareKey>().keyId
+        }
+        every { anyConstructed<com.automatethethings.xkey.crypto.SoftwareKeyStore>().delete(any()) } answers { software -= firstArg<String>() }
+        every { anyConstructed<com.automatethethings.xkey.crypto.SoftwareKeyStore>().generation(any()) } answers {
+            firstArg<String>().takeIf { it in software }?.let { "g-$it" }
+        }
+        every { anyConstructed<com.automatethethings.xkey.crypto.SoftwareKeyStore>().deleteGeneration(any(), any()) } answers {
+            if (secondArg<String>() == "g-${firstArg<String>()}") software -= firstArg<String>()
+            true
+        }
+        return software
+    }
+
+    /**
+     * Round 11 (3): a replay whose caller is cancelled (the key screen
+     * closed) while it waits for a key's material lock still deletes the
+     * material and drops the tombstone: the replay runs out of the
+     * caller's cancellation.
+     */
+    @Test
+    fun aCancelledReplayStillSettlesItsTombstones() = runTest {
+        val key = "k-replay-cancel"
+        val files = java.nio.file.Files.createTempDirectory("software-keys").toFile()
+        val software = fakeSoftwareKeyStore(files)
+        try {
+            val store = store
+            software += key
+            assertEquals(KeyPolicyStore.MaterialDelete.DELETED, store.deleteMaterial(key, owedDelete()))
+            // A write of another key under the same id holds its lock.
+            val gate = CompletableDeferred<Unit>()
+            val holder = async(UnconfinedTestDispatcher(testScheduler)) { store.lockKeyMaterial(key) { gate.await() } }
+            val replay = async(UnconfinedTestDispatcher(testScheduler)) {
+                com.automatethethings.xkey.storage.replayKeyDeletions(context, store, keystore)
+            }
+            assertFalse(replay.isCompleted)
+
+            replay.cancel()
+            gate.complete(Unit)
+            holder.await()
+            advanceUntilIdle()
+
+            assertFalse("the cancelled replay left the material", key in software)
+            assertFalse("the cancelled replay left its tombstone", store.isDeletionPending(key))
+        } finally {
+            files.deleteRecursively()
+        }
+    }
+
+    /**
+     * Round 11 (2): a symmetric import accepted under the id of an earlier
+     * delete whose tombstone is still owed survives that tombstone's
+     * replay: the import settles the owed delete first, so the replay never
+     * deletes a later generation under the id.
+     */
+    @Test
+    fun anImportAfterATombstoneSurvivesTheReplay() = runTest {
+        val key = "k-import"
+        val files = java.nio.file.Files.createTempDirectory("software-keys").toFile()
+        val software = fakeSoftwareKeyStore(files)
+        try {
+            // An earlier delete of the id whose material delete did not
+            // confirm: its tombstone is owed. The earlier key held material:
+            // a delete of an id that holds nothing writes no tombstone.
+            val store = store
+            software += key
+            assertEquals(KeyPolicyStore.MaterialDelete.DELETED, store.deleteMaterial(key, owedDelete()))
+            assertTrue(store.isDeletionPending(key))
+
+            handler.setConnectedDevicePublicKeyHex(PEER_A)
+            val method = RequestHandler::class.java.getDeclaredMethod("handleShareSymmetric", Request::class.java, Continuation::class.java)
+            method.isAccessible = true
+            val request = Request(
+                id = 3,
+                method = MethodNames.LOCAL_SHARE_SYMMETRIC,
+                params = JSONObject().put("wrapped_key", "AAAAAAAAAAAAAAAAAAAAAA==").put("label", key)
+            )
+            val response = suspendCoroutineUninterceptedOrReturn<Any?> { method.invoke(handler, request, it) } as Response
+            assertEquals(null, response.error)
+            assertTrue("the import was not written", key in software)
+
+            com.automatethethings.xkey.storage.replayKeyDeletions(context, store, keystore)
+
+            assertTrue("the replay deleted the import accepted after the tombstone", key in software)
+            assertFalse(store.isDeletionPending(key))
+        } finally {
+            files.deleteRecursively()
+        }
+    }
+}

@@ -95,9 +95,7 @@ class CertificateManagementActivityUiTest {
 
         val now = System.currentTimeMillis()
         runBlocking {
-            // Distinct createdAt values keep the "ORDER BY created_at DESC"
-            // ordering deterministic, so adapter positions can be derived
-            // from the same DAO query the screen observes.
+            // Distinct createdAt values make the created_at DESC order, and so adapter positions, deterministic.
             dao.insert(
                 certificate(
                     serial = validSerial,
@@ -425,7 +423,7 @@ class CertificateManagementActivityUiTest {
 
         longClickRecyclerItem(scenario, position)
         onView(withText(R.string.cert_delete_title)).inRoot(isPlatformPopup()).perform(click())
-        onView(withText(R.string.cert_delete_confirm)).inRoot(isDialog()).perform(click())
+        DialogFlowSupport.clickInDialog(R.string.cert_delete_confirm)
 
         assertTrue(
             "Confirming delete must remove the certificate row",

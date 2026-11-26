@@ -73,6 +73,7 @@ import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import java.io.File
 import java.security.KeyPairGenerator
 import java.util.Base64
 
@@ -103,6 +104,8 @@ class CosignRequestHandlerTest {
 
     @Before
     fun setUp() {
+        // Main's shared ML-DSA store is per process: each test starts with none.
+        com.automatethethings.xkey.crypto.PqcSoftwareKeyStore.clearSharedForTest()
         mockkStatic(Log::class)
         every { Log.v(any(), any<String>()) } returns 0
         every { Log.d(any(), any<String>()) } returns 0
@@ -118,6 +121,10 @@ class CosignRequestHandlerTest {
         keyDao = mockk(relaxed = true)
         val database = mockk<XKeyDatabase>(relaxed = true)
         every { database.keyDao() } returns keyDao
+        // No key has a pending deletion.
+        every { database.keyPolicyDao() } returns mockk<com.automatethethings.xkey.storage.dao.KeyPolicyDao>(relaxed = true) {
+            io.mockk.coEvery { deletion(any()) } returns null
+        }
         mockkObject(XKeyDatabase.Companion)
         every { XKeyDatabase.getInstance(any()) } returns database
 
@@ -138,6 +145,10 @@ class CosignRequestHandlerTest {
         every { BiometricNotificationHelper.intentData(any()) } returns mockk(relaxed = true)
 
         keystoreManager = mockk(relaxed = true)
+        // Each key here is a general key: the use gate resolves the id's key
+        // from its row and material (#270 verify r4).
+        every { keystoreManager.exportKind(any()) } returns com.automatethethings.xkey.crypto.UserKeyKind.GENERAL
+        every { keystoreManager.rowKeyKind(any(), any(), any(), any()) } returns com.automatethethings.xkey.crypto.UserKeyKind.GENERAL
         coEvery { keystoreManager.signApproved(any(), any(), any(), any()) } returns signature
         every { keystoreManager.publicKeyDERAt(any()) } returns publicKeyDer
 
@@ -152,6 +163,7 @@ class CosignRequestHandlerTest {
 
     @After
     fun tearDown() {
+        com.automatethethings.xkey.crypto.PqcSoftwareKeyStore.clearSharedForTest()
         PromptOwnership.process.forgetSettled()
         Dispatchers.resetMain()
         unmockkAll()
@@ -472,6 +484,40 @@ class CosignRequestHandlerTest {
     }
 
     @Test
+    fun `the fallback key skips a newer ML-DSA signing key for an older EC one`() = runTest {
+        val mlDsaKey = key("cosign-ml-dsa", "signing").copy(algorithm = "ML-DSA-65", keySizeBits = 0)
+        // KeyDao.getAll lists the newest key first.
+        coEvery { keyDao.getAll() } returns listOf(mlDsaKey, signingKey)
+
+        val response = handler().handleRequest(request(keyId = null))
+
+        assertNull(response.error)
+        coVerify(exactly = 1) {
+            keystoreManager.signApproved(KeystoreManager.generalKeyAlias(signingKey.keyId), any(), any(), any())
+        }
+        coVerify(exactly = 0) {
+            keystoreManager.signApproved(KeystoreManager.generalKeyAlias(mlDsaKey.keyId), any(), any(), any())
+        }
+    }
+
+    @Test
+    fun `every co-signing key selection goes through the one JCA signing key helper`() {
+        val main = listOf(File("src/main/kotlin"), File("app/src/main/kotlin")).first { it.isDirectory }
+        val sources = listOf(
+            "com/automatethethings/xkey/protocol/Handler.kt",
+            "com/automatethethings/xkey/ui/CoSignActivity.kt"
+        ).associateWith { File(main, it).readText() }
+        for ((path, text) in sources) {
+            assertTrue("$path selects through jcaSigningKeys", text.contains("KeystoreManager.jcaSigningKeys("))
+            // A selection that reads every key and picks or filters by itself bypasses the helper.
+            assertFalse(
+                "$path picks a key from getAll() by itself",
+                Regex("""getAll\(\)\s*\.\s*(firstOrNull|first|filter|find)\b""").containsMatchIn(text)
+            )
+        }
+    }
+
+    @Test
     fun `the fallback with only a fido2 key finds no signing key`() = runTest {
         coEvery { keyDao.getAll() } returns listOf(fido2Key)
 
@@ -650,9 +696,9 @@ class CosignRequestHandlerTest {
 
         screen.answer(approved = false)
         assertNull(first.await().error)
-        assertEquals(1L, first.await().id)
+        assertEquals(RpcId.of(1L), first.await().id)
         assertError(ErrorCodes.BIOMETRIC_FAILED, second.await())
-        assertEquals(2L, second.await().id)
+        assertEquals(RpcId.of(2L), second.await().id)
         coVerify(exactly = 1) { keystoreManager.signApproved(any(), any(), any(), any()) }
     }
 
@@ -673,7 +719,7 @@ class CosignRequestHandlerTest {
 
         screen.answer(approved = true)
         assertNull(second.await().error)
-        assertEquals(2L, second.await().id)
+        assertEquals(RpcId.of(2L), second.await().id)
         coVerify(exactly = 1) { keystoreManager.signApproved(any(), any(), any(), any()) }
     }
 
@@ -733,7 +779,7 @@ class CosignRequestHandlerTest {
 
         screen.answer(approved = true)
         assertNull(second.await().error)
-        assertEquals(2L, second.await().id)
+        assertEquals(RpcId.of(2L), second.await().id)
         coVerify(exactly = 1) { keystoreManager.signApproved(any(), any(), any(), any()) }
     }
 
@@ -867,7 +913,7 @@ class CosignRequestHandlerTest {
     private fun servedByRealKeystore(entries: MutableMap<String, java.security.KeyPair>): KeystoreManager {
         val real = realKeystoreOver(entries)
         every { keystoreManager.publicKeyDERAt(any()) } answers { real.publicKeyDERAt(firstArg()) }
-        every { keystoreManager.getPublicKeyDER(any()) } answers { real.getPublicKeyDER(firstArg()) }
+        every { keystoreManager.getPublicKeyDER(any(), any()) } answers { real.getPublicKeyDER(firstArg(), secondArg()) }
         coEvery { keystoreManager.signApproved(any(), any(), any(), any()) } coAnswers {
             real.signApproved(arg(0), arg(1), arg(2), arg(3))
         }
@@ -949,7 +995,7 @@ class CosignRequestHandlerTest {
                 if (alias == signingAlias && ++signerAliasReads == 2) entries[signingAlias] = swapped
             }
         }
-        every { keystoreManager.getPublicKeyDER(any()) } answers { real.getPublicKeyDER(firstArg()) }
+        every { keystoreManager.getPublicKeyDER(any(), any()) } answers { real.getPublicKeyDER(firstArg(), secondArg()) }
         coEvery { keystoreManager.signApproved(any(), any(), any(), any()) } coAnswers {
             real.signApproved(arg(0), arg(1), arg(2), arg(3))
         }
@@ -1146,7 +1192,7 @@ class CosignRequestHandlerTest {
         assertEquals("the next co-sign's prompt is its own", secondPrompt, screen.visible)
         screen.answer(approved = true)
         assertNull(second.await().error)
-        assertEquals(2L, second.await().id)
+        assertEquals(RpcId.of(2L), second.await().id)
         coVerify(exactly = 1) { keystoreManager.signApproved(any(), any(), any(), any()) }
     }
 

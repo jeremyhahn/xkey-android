@@ -1,34 +1,5 @@
 #!/usr/bin/env bash
-# gradle-retry-test: the toolchain image's Gradle download retry, checked two
-# ways.
-#
-# The warm stage of build/docker/devcontainer/Dockerfile runs the gates once,
-# online, to fill the Gradle dependency cache. One transient repository error
-# (an artifact Gradle "Could not resolve") must not fail the image build, so
-# that run goes through /usr/local/bin/gradle-retry, a script the Dockerfile
-# writes with a COPY heredoc: a bounded retry, with gradle-quiesce between
-# attempts, that still fails closed.
-#
-# 1. Static: in the warm stage, every online RUN of the gates (assembleDebug)
-#    runs them through gradle-retry, after the COPY that writes it; no bare
-#    `gradle ... assembleDebug` online run remains, and the offline proof is
-#    never retried (there a missing dependency is a gap in the cache). Copies of the Dockerfile with the
-#    retry removed from the RUN, or with the script's COPY removed, fail.
-# 2. Behaviour: the gradle-retry script itself, extracted from the Dockerfile
-#    (the heredoc body between its COPY line and EOF, never a copy), run with
-#    a stubbed gradle, gradle-quiesce and sleep on PATH (sleep records its
-#    argument and returns at once). It passes when an attempt fails to
-#    resolve a dependency, or a repository answers HTTP 429 Too Many
-#    Requests, and a later one succeeds; fails after exactly the bound (5, or
-#    GRADLE_RETRY_ATTEMPTS) when every attempt fails, printing the log tail;
-#    waits 30, 60, 120, 240 s between the default attempts; makes no attempt
-#    after a success; and does not retry a failure that is not a download
-#    failure (a failing test, even one naming 429). Mutants of the script
-#    (the bound changed or removed, the last attempt failing open, every
-#    failure retried, 429 not retried, the backoff not doubled) are caught.
-#
-# Needs bash and coreutils; offline. `make gradle-retry-test` (make
-# lint-gates).
+# Checks the warm stage runs the gates through gradle-retry and tests gradle-retry's bound and backoff with stubs. `make gradle-retry-test`.
 set -uo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -53,10 +24,7 @@ check() {
 	fi
 }
 
-# warm_uses_retry <dockerfile>: the warm stage writes gradle-retry with a COPY
-# heredoc, and every RUN in it naming assembleDebug runs `gradle-retry`, after
-# that COPY; at least one does. Comment lines and heredoc bodies are skipped,
-# continuation lines joined.
+# warm_uses_retry <dockerfile>: every online assembleDebug RUN in the warm stage uses gradle-retry.
 warm_uses_retry() {
 	local file=$1 line logical='' words in_warm=0 heredoc='' copied=0 runs=0 bad=0
 	while IFS= read -r line || [ -n "${line}" ]; do
@@ -159,13 +127,7 @@ check "heredoc bodies are skipped and the bare offline proof passes" warm_uses_r
 
 # --- behaviour --------------------------------------------------------------
 
-# The stubs: gradle reads its outcome for attempt n from line n of
-# ${STUB_DIR}/plan (ok, resolve, throttle, test, test429; ok past the end),
-# counts its calls in ${STUB_DIR}/calls and its arguments in ${STUB_DIR}/args;
-# gradle-quiesce counts its calls in ${STUB_DIR}/quiesce; sleep writes its
-# argument to ${STUB_DIR}/sleeps and returns at once. throttle is a 429 with
-# no "Could not" line, so only the 429 pattern retries it; test429 is a
-# failing test that names 429, which is not a download failure.
+# Stub gradle reads each attempt's outcome from STUB_DIR/plan; quiesce and sleep record their calls.
 BIN=${T}/bin
 mkdir -p "${BIN}"
 cat > "${BIN}/gradle" << 'STUB'
@@ -202,6 +164,35 @@ test429)
 	echo "BUILD FAILED"
 	exit 1
 	;;
+plugin)
+	echo "* What went wrong:"
+	echo "Plugin [id: 'org.gradle.toolchains.foojay-resolver-convention', version: '1.0.0'] was not found in any of the following sources:"
+	echo "- Plugin Repositories (could not resolve plugin artifact 'org.gradle.toolchains.foojay-resolver-convention:org.gradle.toolchains.foojay-resolver-convention.gradle.plugin:1.0.0')"
+	echo "STUB-MARK attempt $n"
+	echo "BUILD FAILED"
+	exit 1
+	;;
+pluginfound)
+	echo "* What went wrong:"
+	echo "Plugin [id: 'org.gradle.toolchains.foojay-resolver-convention', version: '1.0.0'] was not found in any of the following sources:"
+	echo "- Gradle Core Plugins (plugin is not in 'org.gradle' namespace)"
+	echo "STUB-MARK attempt $n"
+	echo "BUILD FAILED"
+	exit 1
+	;;
+compile)
+	echo "e: file:///w/app/src/main/kotlin/Warm.kt:3:5 Unresolved reference: sum"
+	echo "> Compilation error. See log for more details"
+	echo "STUB-MARK attempt $n"
+	echo "BUILD FAILED"
+	exit 1
+	;;
+failtests)
+	echo "> There were failing tests. See the report at: file:///w/app/build/reports/tests/index.html"
+	echo "STUB-MARK attempt $n"
+	echo "BUILD FAILED"
+	exit 1
+	;;
 esac
 STUB
 cat > "${BIN}/gradle-quiesce" << 'STUB'
@@ -214,10 +205,7 @@ echo "$1" >> "${STUB_DIR}/sleeps"
 STUB
 chmod +x "${BIN}/gradle" "${BIN}/gradle-quiesce" "${BIN}/sleep"
 
-# run_retry <script> <plan words...>: run script with the stubs and that plan,
-# GRADLE_RETRY_DELAY unset and GRADLE_RETRY_ATTEMPTS set only from
-# RETRY_ATTEMPTS when that is non-empty; sets RC, CALLS, QUIESCE, SLEEPS (the
-# waits, space-separated) and OUT (its output), LOG (the log it was given).
+# run_retry <script> <plan words...>: sets RC, CALLS, QUIESCE, SLEEPS, OUT and LOG.
 run_retry() {
 	local script=$1
 	shift
@@ -292,9 +280,26 @@ case_test429_not_retried() {
 	[ "${RC}" != 0 ] && [ "${CALLS}" = 1 ] && [ "${QUIESCE}" = 0 ] && [ -z "${SLEEPS}" ] \
 		&& [[ ${OUT} == *"maps 429 to RateLimited FAILED"* ]]
 }
+case_plugin_retried() {
+	run_retry "$1" plugin ok
+	[ "${RC}" = 0 ] && [ "${CALLS}" = 2 ] && [ "${QUIESCE}" = 1 ]
+}
+case_plugin_not_found_retried() {
+	run_retry "$1" pluginfound pluginfound ok
+	[ "${RC}" = 0 ] && [ "${CALLS}" = 3 ] && [ "${QUIESCE}" = 2 ]
+}
+case_compile_not_retried() {
+	run_retry "$1" compile ok
+	[ "${RC}" != 0 ] && [ "${CALLS}" = 1 ] && [ "${QUIESCE}" = 0 ] && [[ ${OUT} == *"Compilation error"* ]]
+}
+case_failing_tests_not_retried() {
+	run_retry "$1" failtests ok
+	[ "${RC}" != 0 ] && [ "${CALLS}" = 1 ] && [ "${QUIESCE}" = 0 ] && [[ ${OUT} == *"There were failing tests"* ]]
+}
 CASES=(case_recovers case_recovers_last case_bounded case_no_attempt_after_success
 	case_other_failure_not_retried case_other_failure_after_resolve case_throttle_retried
-	case_backoff_doubles case_attempts_fewer case_attempts_more case_test429_not_retried)
+	case_backoff_doubles case_attempts_fewer case_attempts_more case_test429_not_retried
+	case_plugin_retried case_plugin_not_found_retried case_compile_not_retried case_failing_tests_not_retried)
 
 all_cases() {
 	local c
@@ -317,6 +322,10 @@ else
 	check "GRADLE_RETRY_ATTEMPTS=2 stops after 2 attempts" case_attempts_fewer "${S}"
 	check "GRADLE_RETRY_ATTEMPTS=7 allows a success on the 7th attempt" case_attempts_more "${S}"
 	check "a failing test naming 429 is not retried" case_test429_not_retried "${S}"
+	check "a plugin artifact resolution miss, then success, passes" case_plugin_retried "${S}"
+	check "a plugin not found in any source, then success, passes" case_plugin_not_found_retried "${S}"
+	check "a compilation error is not retried" case_compile_not_retried "${S}"
+	check "failing tests are not retried" case_failing_tests_not_retried "${S}"
 
 	# The mutants: each must fail at least one case. The patterns are the
 	# script's literal text, so they do not expand.
@@ -333,7 +342,7 @@ else
 	else
 		check "the script reads GRADLE_RETRY_ATTEMPTS" false
 	fi
-	if replace "${S}" '|status code 429|Too Many Requests' '' "${M}.no429"; then
+	if replace "${S}" '|status code 429|too many requests' '' "${M}.no429"; then
 		check "a mutant not retrying HTTP 429 is caught" not all_cases "${M}.no429"
 	else
 		check "the script retries HTTP 429 Too Many Requests" false
@@ -356,10 +365,20 @@ else
 	else
 		check "the script exits with the last attempt's status" false
 	fi
-	if replace "${S}" '! grep -Eq' 'false && ! grep -Eq' "${M}.any"; then
+	if replace "${S}" '! grep -Eiq' 'false && ! grep -Eiq' "${M}.any"; then
 		check "a mutant retrying every failure is caught" not all_cases "${M}.any"
 	else
 		check "the script retries only download failures" false
+	fi
+	if replace "${S}" '! grep -Eiq' '! grep -Eq' "${M}.case"; then
+		check "a mutant matching with case is caught" not all_cases "${M}.case"
+	else
+		check "the script matches failures without regard to case" false
+	fi
+	if replace "${S}" '|plugin \[id: [^]]*\] was not found' '' "${M}.noplugin"; then
+		check "a mutant not retrying a plugin not found is caught" not all_cases "${M}.noplugin"
+	else
+		check "the script retries a plugin not found in any source" false
 	fi
 fi
 

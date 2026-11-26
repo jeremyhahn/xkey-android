@@ -53,7 +53,7 @@ import java.util.concurrent.atomic.AtomicInteger
  * The activity path `local.verifyUser` takes when a service, not an activity,
  * owns the request: [CryptoSigningActivity] launched with a full Keystore alias
  * ([CryptoSigningActivity.EXTRA_KEY_ALIAS]), against the real
- * [KeystoreUserVerificationKey] (Codex review 7357 on PR #62).
+ * [KeystoreUserVerificationKey].
  *
  * The handler passes [KeystoreUserVerificationKey.ALIAS]; these tests mint the
  * same key under their own alias and pass that, so the user's key is never

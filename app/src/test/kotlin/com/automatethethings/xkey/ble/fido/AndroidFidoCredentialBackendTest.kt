@@ -135,6 +135,7 @@ class AndroidFidoCredentialBackendTest {
         coEvery { keystore.signApproved(any(), any(), any(), any()) } returns byteArrayOf(0x30)
         every { keystore.keyRowAlias(any(), any(), any()) } answers { aliasOf(firstArg()) }
         every { keystore.publicKeyDERAt(any()) } returns byteArrayOf(0x30, 0x01)
+        every { keystore.deleteKey(any(), any()) } returns com.automatethethings.xkey.crypto.GeneratedKeyDiscard.DELETED
     }
 
     @After
@@ -432,7 +433,7 @@ class AndroidFidoCredentialBackendTest {
         assertTrue("create must fail", thrown != null)
         assertEquals("no key row may outlive a failed create", emptySet<String>(), keyRows)
         assertEquals("no metadata row may point at a deleted key", emptySet<String>(), metadataRows)
-        io.mockk.verify(exactly = 1) { keystore.deleteKey(any()) }
+        io.mockk.verify(exactly = 1) { keystore.deleteKey(any(), com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) }
     }
 
     @Test
@@ -456,10 +457,11 @@ class AndroidFidoCredentialBackendTest {
         }
         // Storage is full: the deletion record cannot be written either.
         val unwritable = object : PendingKeyDeletions {
-            override fun add(keyIds: Collection<String>) = throw java.io.IOException("disk full")
+            override fun add(keys: Collection<PendingKey>) = throw java.io.IOException("disk full")
             override fun addRegistration(keyId: String) = Unit
             override fun remove(keyId: String) = Unit
-            override fun all(): Set<String> = emptySet()
+            override fun remove(key: PendingKey) = Unit
+            override fun all(): Set<PendingKey> = emptySet()
             override fun registrations(): Set<String> = emptySet()
         }
 
@@ -471,7 +473,7 @@ class AndroidFidoCredentialBackendTest {
         assertTrue("create must fail", thrown != null)
         assertEquals("no key row may outlive a failed create", emptySet<String>(), keyRows)
         assertEquals("no metadata row may outlive a failed create", emptySet<String>(), metadataRows)
-        io.mockk.verify(exactly = 1) { keystore.deleteKey(any()) }
+        io.mockk.verify(exactly = 1) { keystore.deleteKey(any(), com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) }
         assertTrue(
             "the failed passkey is never offered",
             backend(pending = unwritable).credentials("example.com").isEmpty()
@@ -518,7 +520,7 @@ class AndroidFidoCredentialBackendTest {
         assertEquals(setOf(b64(made.id)), keyRows)
         assertEquals(setOf(b64(made.id)), metadataRows)
         assertEquals(listOf(made.id.toList()), backend().credentials("example.com").map { it.id.toList() })
-        io.mockk.verify(exactly = 1) { keystore.deleteKey(any()) }
+        io.mockk.verify(exactly = 1) { keystore.deleteKey(any(), com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) }
     }
 
     @Test
@@ -552,8 +554,8 @@ class AndroidFidoCredentialBackendTest {
 
         assertEquals(setOf(shared.keyId, private.keyId, b64(made.id)), keyRows)
         assertEquals(setOf(shared.keyId, private.keyId, b64(made.id)), metadataRows)
-        io.mockk.verify(exactly = 1) { keystore.deleteKey(failed) }
-        io.mockk.verify(exactly = 0) { keystore.deleteKey(shared.keyId) }
+        io.mockk.verify(exactly = 1) { keystore.deleteKey(failed, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) }
+        io.mockk.verify(exactly = 0) { keystore.deleteKey(shared.keyId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) }
         assertEquals(
             listOf(byteArrayOf(1, 2).toList(), made.id.toList()).toSet(),
             backend().credentials("example.com").map { it.id.toList() }.toSet()
@@ -580,8 +582,96 @@ class AndroidFidoCredentialBackendTest {
         // Keystore. The private one, which a BLE client never sees, stays.
         assertEquals(setOf(private.keyId, b64(made.id)), keyRows)
         assertEquals(setOf(private.keyId, b64(made.id)), metadataRows)
-        io.mockk.verify(exactly = 1) { keystore.deleteKey(shared.keyId) }
-        io.mockk.verify(exactly = 0) { keystore.deleteKey(private.keyId) }
+        io.mockk.verify(exactly = 1) { keystore.deleteKey(shared.keyId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) }
+        io.mockk.verify(exactly = 0) { keystore.deleteKey(private.keyId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) }
+    }
+
+    @Test
+    fun `a replaced passkey whose Keystore delete reports a failure is deleted on a later retry`() = runTest {
+        val (keyRows, _) = storedResidents()
+        // Keystore reports the old key's delete failed, without throwing:
+        // the key is still there, so its record must stay.
+        every { keystore.deleteKey(shared.keyId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) } returns
+            com.automatethethings.xkey.crypto.GeneratedKeyDiscard.FAILED
+
+        backend().create(CredentialRequest("example.com", "Example", byteArrayOf(9), "alice", "Alice", discoverable = true))
+        assertTrue("the old passkey's rows are gone", shared.keyId !in keyRows)
+
+        // The next registration, on a fresh backend as after a restart,
+        // retries the delete the record kept.
+        backend().create(CredentialRequest("example.com", "Example", byteArrayOf(8), "bob", "Bob", discoverable = false))
+        io.mockk.verify(exactly = 2) { keystore.deleteKey(shared.keyId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) }
+    }
+
+    /**
+     * A replaced passkey's key goes from the namespace its row's key lives
+     * in, [kind]: a credential the phone registered, or a general key
+     * local.generateKey made for a fido2 row. Its first delete fails, and
+     * the next registration, as after a restart, retries it in the same
+     * namespace; the other namespace's key under the id is never touched.
+     */
+    private fun assertReplacedKeyDeletedIn(kind: com.automatethethings.xkey.crypto.UserKeyKind) = runTest {
+        val (keyRows, _) = storedResidents()
+        val other = com.automatethethings.xkey.crypto.UserKeyKind.entries.single { it != kind }
+        every { keystore.keyRowAlias(shared.keyId, any(), any()) } returns KeystoreManager.userKeyAlias(shared.keyId, kind)
+        every { keystore.deleteKey(shared.keyId, kind) } returns
+            com.automatethethings.xkey.crypto.GeneratedKeyDiscard.FAILED andThen
+            com.automatethethings.xkey.crypto.GeneratedKeyDiscard.DELETED
+
+        backend().create(CredentialRequest("example.com", "Example", byteArrayOf(9), "alice", "Alice", discoverable = true))
+        assertTrue("the old passkey's rows are gone", shared.keyId !in keyRows)
+        backend().create(CredentialRequest("example.com", "Example", byteArrayOf(8), "bob", "Bob", discoverable = false))
+
+        io.mockk.verify(exactly = 2) { keystore.deleteKey(shared.keyId, kind) }
+        io.mockk.verify(exactly = 0) { keystore.deleteKey(shared.keyId, other) }
+    }
+
+    @Test
+    fun `a replaced passkey made by local generateKey loses its general key, on a retry too`() =
+        assertReplacedKeyDeletedIn(com.automatethethings.xkey.crypto.UserKeyKind.GENERAL)
+
+    @Test
+    fun `a replaced passkey registered on the phone loses its credential key, on a retry too`() =
+        assertReplacedKeyDeletedIn(com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL)
+
+    /**
+     * A record the base version wrote: a bare line naming a replaced
+     * passkey's ID, whose key may be a general key local.generateKey made,
+     * never a credential only. Its namespace is not known, so the replay a
+     * registration runs tries both; [generalOutcome] is how deleting the
+     * general key goes, while no credential key is there.
+     */
+    private fun replayUpgradedRecord(
+        generalOutcome: com.automatethethings.xkey.crypto.GeneratedKeyDiscard
+    ): PendingKeyDeletions {
+        storedResidents()
+        val file = java.io.File.createTempFile("pending-key-deletions", "").also { it.deleteOnExit() }
+        file.writeText(java.util.Base64.getEncoder().encodeToString("legacy-key".toByteArray()) + "\n")
+        val pending = FilePendingKeyDeletions(file)
+        every { keystore.deleteKey("legacy-key", com.automatethethings.xkey.crypto.UserKeyKind.GENERAL) } returns generalOutcome
+        every { keystore.deleteKey("legacy-key", com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) } returns
+            com.automatethethings.xkey.crypto.GeneratedKeyDiscard.ABSENT
+        kotlinx.coroutines.runBlocking {
+            backend(pending = pending).create(
+                CredentialRequest("example.com", "Example", byteArrayOf(8), "bob", "Bob", discoverable = false)
+            )
+        }
+        return pending
+    }
+
+    @Test
+    fun `an upgraded record of a general key is deleted on replay`() {
+        val pending = replayUpgradedRecord(com.automatethethings.xkey.crypto.GeneratedKeyDiscard.DELETED)
+
+        io.mockk.verify(exactly = 1) { keystore.deleteKey("legacy-key", com.automatethethings.xkey.crypto.UserKeyKind.GENERAL) }
+        assertTrue("the record is forgotten", pending.all().none { it.keyId == "legacy-key" })
+    }
+
+    @Test
+    fun `an upgraded record survives a failed delete of its general key`() {
+        val pending = replayUpgradedRecord(com.automatethethings.xkey.crypto.GeneratedKeyDiscard.FAILED)
+
+        assertTrue("the record stays for a later retry", pending.all().any { it.keyId == "legacy-key" })
     }
 
     @Test
@@ -596,7 +686,7 @@ class AndroidFidoCredentialBackendTest {
         assertTrue("create must fail", thrown != null)
         assertEquals(setOf(shared.keyId, private.keyId), keyRows)
         assertEquals(setOf(shared.keyId, private.keyId), metadataRows)
-        io.mockk.verify(exactly = 0) { keystore.deleteKey(shared.keyId) }
+        io.mockk.verify(exactly = 0) { keystore.deleteKey(shared.keyId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) }
         val signed = backend().sign(backend().credentials("example.com").single(), { byteArrayOf(5) }, ByteArray(32))
         assertArrayEquals(byteArrayOf(0x30), signed.signature)
     }
@@ -612,10 +702,11 @@ class AndroidFidoCredentialBackendTest {
         coEvery { keystore.generateKeyWithAuthDuration(any(), any(), any()) } answers {
             keys += firstArg<String>(); byteArrayOf(0xA5.toByte())
         }
-        every { keystore.deleteKey(any()) } answers {
+        every { keystore.deleteKey(any(), com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) } answers {
             val id = firstArg<String>()
-            if (failsOnce(id) && failed.add(id)) throw IllegalStateException("Keystore busy")
-            keys.remove(id)
+            if (failsOnce(id) && failed.add(id)) return@answers com.automatethethings.xkey.crypto.GeneratedKeyDiscard.FAILED
+            if (keys.remove(id)) com.automatethethings.xkey.crypto.GeneratedKeyDiscard.DELETED
+            else com.automatethethings.xkey.crypto.GeneratedKeyDiscard.ABSENT
         }
         return keys
     }
@@ -646,7 +737,7 @@ class AndroidFidoCredentialBackendTest {
         val made = backend().create(CredentialRequest("example.com", "Example", byteArrayOf(8), "bob", "Bob", true))
 
         assertEquals(setOf(shared.keyId, private.keyId, b64(made.id)), keys)
-        io.mockk.verify(exactly = 2) { keystore.deleteKey(firstNewKey!!) }
+        io.mockk.verify(exactly = 2) { keystore.deleteKey(firstNewKey!!, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) }
     }
 
     @Test
@@ -664,8 +755,8 @@ class AndroidFidoCredentialBackendTest {
         val next = backend().create(CredentialRequest("example.com", "Example", byteArrayOf(8), "bob", "Bob", true))
 
         assertEquals(setOf(private.keyId, b64(made.id), b64(next.id)), keys)
-        io.mockk.verify(exactly = 2) { keystore.deleteKey(shared.keyId) }
-        io.mockk.verify(exactly = 0) { keystore.deleteKey(private.keyId) }
+        io.mockk.verify(exactly = 2) { keystore.deleteKey(shared.keyId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) }
+        io.mockk.verify(exactly = 0) { keystore.deleteKey(private.keyId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) }
     }
 
     /**
@@ -776,7 +867,7 @@ class AndroidFidoCredentialBackendTest {
         assertTrue("create must fail, got $thrown", thrown is IllegalStateException)
         assertEquals(setOf(shared.keyId, private.keyId), keyRows)
         assertEquals(setOf(shared.keyId, private.keyId), metadataRows)
-        io.mockk.verify(exactly = 0) { keystore.deleteKey(shared.keyId) }
+        io.mockk.verify(exactly = 0) { keystore.deleteKey(shared.keyId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) }
         val signed = backend().sign(backend().credentials("example.com").single(), { byteArrayOf(5) }, ByteArray(32))
         assertArrayEquals(byteArrayOf(0x30), signed.signature)
     }
@@ -796,8 +887,8 @@ class AndroidFidoCredentialBackendTest {
         assertTrue("create must fail, got $thrown", thrown is IllegalStateException)
         assertEquals(setOf(shared.keyId, private.keyId), keyRows)
         assertEquals(setOf(shared.keyId, private.keyId), metadataRows)
-        io.mockk.verify(exactly = 0) { keystore.deleteKey(shared.keyId) }
-        io.mockk.verify(exactly = 1) { keystore.deleteKey(any()) }
+        io.mockk.verify(exactly = 0) { keystore.deleteKey(shared.keyId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) }
+        io.mockk.verify(exactly = 1) { keystore.deleteKey(any(), com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) }
     }
 
     @Test
@@ -820,8 +911,8 @@ class AndroidFidoCredentialBackendTest {
         val made = (keyRows - private.keyId).single()
         assertTrue("the old passkey was replaced", made != shared.keyId)
         assertEquals(setOf(private.keyId, made), metadataRows)
-        io.mockk.verify(exactly = 1) { keystore.deleteKey(shared.keyId) }
-        io.mockk.verify(exactly = 0) { keystore.deleteKey(made) }
+        io.mockk.verify(exactly = 1) { keystore.deleteKey(shared.keyId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) }
+        io.mockk.verify(exactly = 0) { keystore.deleteKey(made, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) }
         assertTrue("a whole passkey has no record", pendingKeyDeletions.all().isEmpty())
         assertTrue("a whole passkey has no record", pendingKeyDeletions.registrations().isEmpty())
     }
@@ -836,7 +927,7 @@ class AndroidFidoCredentialBackendTest {
 
         assertEquals(setOf(shared.keyId, private.keyId, b64(made.id)), keyRows)
         assertEquals(setOf(shared.keyId, private.keyId, b64(made.id)), metadataRows)
-        io.mockk.verify(exactly = 0) { keystore.deleteKey(shared.keyId) }
+        io.mockk.verify(exactly = 0) { keystore.deleteKey(shared.keyId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) }
     }
 
     @Test
@@ -857,8 +948,8 @@ class AndroidFidoCredentialBackendTest {
         val made = backend().create(CredentialRequest("example.com", "Example", handle, "alice", "Alice", true))
 
         assertEquals(setOf(otherUser.keyId, b64(made.id)), keyRows)
-        io.mockk.verify(exactly = 1) { keystore.deleteKey(sameUser.keyId) }
-        io.mockk.verify(exactly = 0) { keystore.deleteKey(otherUser.keyId) }
+        io.mockk.verify(exactly = 1) { keystore.deleteKey(sameUser.keyId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) }
+        io.mockk.verify(exactly = 0) { keystore.deleteKey(otherUser.keyId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) }
     }
 
     @Test
@@ -965,7 +1056,7 @@ class AndroidFidoCredentialBackendTest {
         val launcher = mockk<BiometricActivityLauncher>(relaxed = true)
         val aliases = mutableListOf<String?>()
         coEvery {
-            launcher.requestCryptoSignatureOnTurn(any(), any(), any(), any(), any(), captureNullable(aliases), any())
+            launcher.requestCryptoSignatureOnTurn(any(), any(), any(), any(), any(), captureNullable(aliases), any(), any())
         } returns byteArrayOf(0x36)
         val unlocked = object : FidoLockScreen {
             override val locked = false

@@ -17,6 +17,7 @@ package com.automatethethings.xkey.remote
 import android.util.Log
 import com.automatethethings.xkey.protocol.Request
 import com.automatethethings.xkey.protocol.RequestHandler
+import com.automatethethings.xkey.protocol.RpcId
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.spyk
@@ -329,7 +330,7 @@ class RemoteBackupClientTest {
 
         expect<RemoteBackupException.TimedOut> { client.listBackups() }
 
-        val id = sender.lastRequest.id
+        val id = sender.lastRequest.id.longValueOrNull()!!
         verify { router.removePendingResponse(id) }
     }
 
@@ -396,7 +397,7 @@ class RemoteBackupClientTest {
 
         val request = Request.fromJson(body)
 
-        assertEquals(42L, request.id)
+        assertEquals(RpcId.of(42L), request.id)
         assertEquals("remote.restoreBackup", request.method)
         assertEquals(tricky, request.params!!.getString("password"))
         assertEquals("AA==", request.params!!.getString("backup_data"))
@@ -420,7 +421,7 @@ class RemoteBackupClientTest {
 
         expect<RemoteBackupException.TimedOut> { client.restoreBackup(envelope, pw) }
 
-        val id = sender.lastRequest.id
+        val id = sender.lastRequest.id.longValueOrNull()!!
         verify { router.removePendingResponse(id) }
         assertZeroed(pw)
         assertBodiesZeroed()
@@ -436,7 +437,7 @@ class RemoteBackupClientTest {
         job.cancel()
         job.join()
 
-        val id = sender.lastRequest.id
+        val id = sender.lastRequest.id.longValueOrNull()!!
         verify { router.removePendingResponse(id) }
         assertZeroed(pw)
         assertBodiesZeroed()
@@ -451,7 +452,7 @@ class RemoteBackupClientTest {
         other.restoreBackup(envelope, password())
         client.restoreBackup(envelope, password())
 
-        val ids = sender.sent.map { it.id }
+        val ids = sender.sent.map { it.id.longValueOrNull()!! }
         assertEquals("no id is reused", ids.size, ids.toSet().size)
         assertTrue(ids.all { it >= RemoteBackupClient.BASE_REQUEST_ID })
         assertEquals("ids only grow", ids.sorted(), ids)
