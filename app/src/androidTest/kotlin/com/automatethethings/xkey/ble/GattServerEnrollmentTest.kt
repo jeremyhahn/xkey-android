@@ -477,18 +477,15 @@ class GattServerEnrollmentTest {
      * negotiates [PEER_MTU] and writes the CCCD enable, and the open handle is replaced by an
      * [AcceptingServerHandle]: [device] never really connected, so the stack
      * would refuse its notifications, and a refused frame abandons the
-     * session. The connect adopts [device] on a fresh link, so the session
-     * [establishSession] installed is put back the way `handleHandshakeMessage`
-     * leaves it. Replies still come in through [router].
+     * session. The connect adopts [device] on a fresh link and ends the
+     * session [setUp] installed, so a new one is established on it and its
+     * key becomes [peerKeyHex]. Replies still come in through [router].
      */
-    private fun connectAndSubscribe(deviceName: String) {
+    private suspend fun connectAndSubscribe(deviceName: String) {
         assumeTrue(
             "mocking the final server handle needs API 28",
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.P
         )
-        val session = probe.noiseSession
-        val authenticated = probe.authenticatedPeerKeyHex
-
         assumeTrue("the local stack would not open a GATT server", server.start())
         probe.gattCallback.onConnectionStateChange(
             device, BluetoothGatt.GATT_SUCCESS, BluetoothProfile.STATE_CONNECTED
@@ -500,7 +497,7 @@ class GattServerEnrollmentTest {
             if (System.currentTimeMillis() > deadline) {
                 throw AssertionError("the device was never adopted")
             }
-            Thread.sleep(POLL_MS)
+            delay(POLL_MS)
         }
         // The default MTU leaves no room for a fragment, so negotiate one the
         // way a desktop does; the change is queued behind the connect.
@@ -509,7 +506,7 @@ class GattServerEnrollmentTest {
             if (System.currentTimeMillis() > deadline) {
                 throw AssertionError("the MTU never became $PEER_MTU")
             }
-            Thread.sleep(POLL_MS)
+            delay(POLL_MS)
         }
         probe.gattCallback.onDescriptorWriteRequest(
             device, 1,
@@ -527,10 +524,8 @@ class GattServerEnrollmentTest {
         )
         probe.bluetoothGattServer = handle.server
 
-        probe.noiseSession = session
-        probe.identityExchangeComplete = true
-        probe.pairingConfirmed = true
-        probe.authenticatedPeerKeyHex = authenticated
+        establishSession(probe)
+        peerKeyHex = probe.authenticatedPeerKeyHex!!
         pairedDevices.addDevice(peerKeyHex, deviceName, device.address)
     }
 
