@@ -166,6 +166,62 @@ class KeystoreManagerEd25519Test {
         assertNull(manager.resolveKeystoreAlias("ed", UserKeyKind.GENERAL))
     }
 
+    /**
+     * A manager on API 34 whose Keystore holds a credential under "ed" with
+     * [credentialDer] and whose software store holds the legacy general key
+     * [legacy] under the same id, as the PKCS#8 entry older builds wrote.
+     */
+    private fun sharedIdManager(prefs: InMemorySharedPreferences, legacy: java.security.KeyPair, credentialDer: ByteArray): KeystoreManager {
+        mockkStatic(android.util.Base64::class)
+        every { android.util.Base64.decode(any<String>(), any()) } answers { java.util.Base64.getDecoder().decode(firstArg<String>()) }
+        prefs.edit().putString("xkey_key_ed", java.util.Base64.getEncoder().encodeToString(legacy.private.encoded)).commit()
+        val manager = manager(34, prefs)
+        every { manager.getPublicKeyDER("ed", UserKeyKind.CREDENTIAL) } returns credentialDer
+        every { manager.getPublicKeyDER("ed", UserKeyKind.GENERAL) } returns null
+        every { manager.getCOSEPublicKey("ed", any()) } returns null
+        return manager
+    }
+
+    private val sharedIdGeneration = setOf("keystore:xkey_credential_ed", "ed25519:xkey_key_ed")
+
+    /**
+     * PR #400 review (P1): a stale row, a replacement credential and an
+     * unrelated legacy Ed25519 key share an id, and the row's key is
+     * neither's. The row is no key's: the delete is refused, and the legacy
+     * key is not taken for the row's because the credential's key differs.
+     */
+    @Test
+    fun `a row matching neither the credential nor the legacy Ed25519 key under its id is refused`() {
+        val prefs = InMemorySharedPreferences()
+        val legacy = KeyPairGenerator.getInstance("Ed25519").generateKeyPair()
+        val credential = KeyPairGenerator.getInstance("Ed25519").generateKeyPair()
+        val stale = KeyPairGenerator.getInstance("Ed25519").generateKeyPair()
+        val manager = sharedIdManager(prefs, legacy, credential.public.encoded)
+
+        assertThrows(KeyOwnershipUnknownException::class.java) {
+            manager.rowKeyKind("ed", "signing", { RowPublicKey(stale.public.encoded, null) }, sharedIdGeneration)
+        }
+        assertTrue("the unrelated legacy key is gone", prefs.contains("xkey_key_ed"))
+    }
+
+    /** The same shared id: a row whose key is the legacy Ed25519 key's is that key's, read from its stored public half. */
+    @Test
+    fun `a row matching the legacy Ed25519 key under a shared id is the general key's`() {
+        val prefs = InMemorySharedPreferences()
+        val legacy = KeyPairGenerator.getInstance("Ed25519").generateKeyPair()
+        val credential = KeyPairGenerator.getInstance("Ed25519").generateKeyPair()
+        val manager = sharedIdManager(prefs, legacy, credential.public.encoded)
+
+        assertEquals(
+            UserKeyKind.GENERAL,
+            manager.rowKeyKind("ed", "signing", { RowPublicKey(legacy.public.encoded, null) }, sharedIdGeneration)
+        )
+        assertEquals(
+            UserKeyKind.CREDENTIAL,
+            manager.rowKeyKind("ed", "fido2", { RowPublicKey(credential.public.encoded, null) }, sharedIdGeneration)
+        )
+    }
+
     @Test
     fun `EdDSA and Ed25519 sign with the JCA Ed25519 signature`() {
         assertEquals("Ed25519", KeystoreManager.jcaSignatureAlgorithm("EdDSA"))
