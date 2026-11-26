@@ -468,6 +468,25 @@ class CosignRequestHandlerTest {
         assertNothingSigned()
     }
 
+    /**
+     * PR #400 review (P1, left open in round 1): a co-signature is a media
+     * signature, which SignatureVerifier cannot verify under EdDSA; a
+     * signing key named by id goes through the same offersSigning check the
+     * auto-select uses, so a named Ed25519 key is refused and signs nothing.
+     */
+    @Test
+    fun `a named Ed25519 signing key answers OPERATION_DENIED and signs nothing`() = runTest {
+        for (algorithm in listOf("EdDSA", "Ed25519")) {
+            val ed = key("cosign-ed-$algorithm", "signing").copy(algorithm = algorithm)
+            coEvery { keyDao.getByKeyId(ed.keyId) } returns ed
+            assertError(
+                ErrorCodes.OPERATION_DENIED,
+                handler(withLauncher = false).handleRequest(request(keyId = ed.keyId))
+            )
+        }
+        assertNothingSigned()
+    }
+
     @Test
     fun `the fallback key skips a fido2 key`() = runTest {
         coEvery { keyDao.getAll() } returns listOf(fido2Key, signingKey)
