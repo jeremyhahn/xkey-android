@@ -143,7 +143,8 @@ class BleSyncLoopbackTest {
         assertEquals("sync-user@example.com", mine.getString("username"))
         assertTrue("entries must carry an updated_at for conflict resolution", mine.getString("updated_at").isNotEmpty())
 
-        val updated = pushPassword(id, "second-secret")
+        // An update replaces the entry only when its updated_at is strictly newer.
+        val updated = pushPassword(id, "second-secret", updatedAt = "2026-01-02T00:00:00Z")
         assertEquals(0, updated.getInt("added"))
         assertEquals(1, updated.getInt("updated"))
         assertEquals(
@@ -387,7 +388,11 @@ class BleSyncLoopbackTest {
 
     private fun passwordId(suffix: String) = "ble-sync-$suffix-$runId"
 
-    private suspend fun pushPassword(id: String, password: String): JSONObject {
+    private suspend fun pushPassword(
+        id: String,
+        password: String,
+        updatedAt: String = "2026-01-01T00:00:00Z"
+    ): JSONObject {
         if (!passwordIds.contains(id)) passwordIds += id
         return harness.call(
             "local.syncPasswords",
@@ -399,7 +404,7 @@ class BleSyncLoopbackTest {
                         .put("name", "BLE Sync $id")
                         .put("username", "sync-user@example.com")
                         .put("password", password)
-                        .put("updated_at", "2026-01-01T00:00:00Z")
+                        .put("updated_at", updatedAt)
                 )
             )
         )

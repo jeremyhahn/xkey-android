@@ -307,19 +307,38 @@ class XmpMetadataHelperInstrumentedTest {
     }
 
     @Test
-    fun readSignatureFromUri_ignoresANonJpegMimeType() {
+    fun readSignatureFromUri_readsJpegBytesWhateverTheMimeTypeSays() {
         val file = jpeg()
-        XmpMetadataHelper.writeSignature(file.path, sampleData())
+        val data = sampleData()
+        XmpMetadataHelper.writeSignature(file.path, data)
 
-        // The URI reader only knows how to read EXIF, so anything else is a miss
-        // even when the underlying bytes do carry a signature.
+        // The content is a JPEG when its MIME type or its first bytes say so
+        // (#371), so a mislabelled JPEG still yields its EXIF signature.
         val read = XmpMetadataHelper.readSignatureFromUri(
             context.contentResolver,
             Uri.fromFile(file),
             "video/mp4"
         )
 
-        assertNull(read)
+        assertNotNull("JPEG bytes are read as a JPEG under any MIME type", read)
+        assertEquals(data.contentHash, read!!.contentHash)
+    }
+
+    @Test
+    fun readSignatureFromUri_missesNonJpegBytesUnderANonJpegMimeType() {
+        val file = File(context.cacheDir, "not-a-jpeg-${System.nanoTime()}.mp4")
+        file.writeBytes(ByteArray(64) { 0x41 })
+        try {
+            val read = XmpMetadataHelper.readSignatureFromUri(
+                context.contentResolver,
+                Uri.fromFile(file),
+                "video/mp4"
+            )
+
+            assertNull(read)
+        } finally {
+            file.delete()
+        }
     }
 
     @Test
