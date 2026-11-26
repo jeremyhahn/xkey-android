@@ -557,6 +557,12 @@ interface KeyDao {
  * the moment any of the key is removed, never admitted between the material
  * going and the row going. Every delete of a key's material goes through here.
  *
+ * The row goes only once [removeMaterial] has returned, having removed the
+ * material or found none. A removal that fails must throw (as
+ * [com.automatethethings.xkey.crypto.KeyDeletionException] does): the throw
+ * leaves the row, so a key whose material is still on disk still lists and
+ * its delete can be retried, never reported done.
+ *
  * @param keyId The unique key identifier.
  * @param removeMaterial Removes the key's material (Keystore entry, software
  *   store file); runs inside the revoke.

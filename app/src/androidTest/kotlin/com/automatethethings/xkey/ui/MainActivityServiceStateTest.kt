@@ -15,14 +15,18 @@
 package com.automatethethings.xkey.ui
 
 import android.content.Context
+import android.content.Intent
+import android.os.SystemClock
 import android.view.View
 import android.widget.TextView
 import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
 import com.automatethethings.xkey.R
 import com.automatethethings.xkey.audit.AuditLogDao
 import com.automatethethings.xkey.ble.ServiceState
+import com.automatethethings.xkey.ble.XKeyGattService
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.google.android.material.bottomnavigation.BottomNavigationView
 import kotlinx.coroutines.runBlocking
@@ -77,7 +81,9 @@ class MainActivityServiceStateTest {
     fun setUp() {
         context = ApplicationProvider.getApplicationContext()
         auditLogDao = XKeyDatabase.getInstance(context).auditLogDao()
-        scenario = ActivityScenario.launch(MainActivity::class.java)
+        // The suite owns the state it asserts: a live service (a phone with
+        // Bluetooth on) is quieted to READY before any state is dispatched.
+        scenario = launchMainActivityAtRest()
         awaitStatusLarge(context.getString(R.string.status_disconnected))
     }
 
@@ -332,4 +338,89 @@ class MainActivityServiceStateTest {
     private companion object {
         const val POLL_INTERVAL_MS = 50L
     }
+}
+
+/** How long the real service must hold READY before the screen counts as at rest. */
+private const val SERVICE_QUIET_WINDOW_MS = 1_000L
+
+/** Upper bound on binding the real service and quieting it. */
+private const val SERVICE_QUIET_TIMEOUT_MS = 10_000L
+
+/**
+ * Launches [MainActivity] and returns it with the hero at rest (Disconnected,
+ * BLE off), on an emulator and on a phone alike.
+ *
+ * On a device with Bluetooth on and the BLE permissions granted, `onCreate`
+ * starts and binds the real `XKeyGattService`, which starts advertising and
+ * pushes ADVERTISING into the screen. A test that asserts the rest state, or
+ * that drives the state itself through `handleServiceStateChange`, then reads
+ * the live service instead of what it set up. Without those permissions (a
+ * stock emulator) nothing is bound and this is a plain launch.
+ */
+internal fun launchMainActivityAtRest(intent: Intent? = null): ActivityScenario<MainActivity> {
+    val scenario = if (intent == null) {
+        ActivityScenario.launch(MainActivity::class.java)
+    } else {
+        ActivityScenario.launch<MainActivity>(intent)
+    }
+    quietLiveGattService(scenario)
+    return scenario
+}
+
+/**
+ * Stops the bound service's advertising and waits for the screen to show it.
+ *
+ * `stopAdvertising` advances the service's advertising generation, so a start
+ * still in flight publishes nothing; an advertiser callback that lands anyway
+ * flips the state back, so the stop repeats until READY holds for
+ * [SERVICE_QUIET_WINDOW_MS]. The service stays started (READY), so the next
+ * launch rebinds it and quiets it again.
+ */
+internal fun quietLiveGattService(scenario: ActivityScenario<MainActivity>) {
+    val hasPermissions = MainActivity::class.java
+        .getDeclaredMethod("hasRequiredPermissions")
+        .apply { isAccessible = true }
+    val serviceField = MainActivity::class.java
+        .getDeclaredField("gattService")
+        .apply { isAccessible = true }
+
+    var permitted = false
+    scenario.onActivity { permitted = hasPermissions.invoke(it) as Boolean }
+    if (!permitted) return
+
+    val deadline = SystemClock.uptimeMillis() + SERVICE_QUIET_TIMEOUT_MS
+    var service: XKeyGattService? = null
+    while (service == null && SystemClock.uptimeMillis() < deadline) {
+        scenario.onActivity { service = serviceField.get(it) as XKeyGattService? }
+        if (service == null) SystemClock.sleep(50)
+    }
+    val bound = checkNotNull(service) {
+        "MainActivity holds the BLE permissions but never bound XKeyGattService"
+    }
+
+    val instrumentation = InstrumentationRegistry.getInstrumentation()
+    var readySince = -1L
+    while (SystemClock.uptimeMillis() < deadline) {
+        if (bound.serviceState.value is ServiceState.Ready) {
+            if (readySince < 0) readySince = SystemClock.uptimeMillis()
+            if (SystemClock.uptimeMillis() - readySince >= SERVICE_QUIET_WINDOW_MS) break
+        } else {
+            readySince = -1L
+            instrumentation.runOnMainSync { bound.stopAdvertising() }
+        }
+        SystemClock.sleep(50)
+    }
+    check(bound.serviceState.value is ServiceState.Ready) {
+        "XKeyGattService did not settle in READY: ${bound.serviceState.value}"
+    }
+
+    val context = instrumentation.targetContext
+    val disconnected = context.getString(R.string.status_disconnected)
+    val bleOff = context.getString(R.string.ble_switch_off)
+    check(
+        awaitActivity(scenario) {
+            it.findViewById<TextView>(R.id.textStatusLarge).text?.toString() == disconnected &&
+                it.findViewById<TextView>(R.id.textBleStatus).text?.toString() == bleOff
+        }
+    ) { "The hero did not return to rest after the service was quieted" }
 }

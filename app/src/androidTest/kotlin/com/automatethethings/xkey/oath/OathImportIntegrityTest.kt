@@ -43,7 +43,7 @@ import org.junit.runner.RunWith
  * counter 0 and only then advanced by an `UPDATE`. Anything failing between the
  * two left the credential permanently behind the server, which for HOTP means it
  * never authenticates again. The decisive check here uses a DAO that refuses
- * `updateCounter` outright, so the counter can only be correct if it was part of
+ * `updateCounter` and `claimCounter` outright, so the counter can only be correct if it was part of
  * the insert.
  *
  * The database is in-memory, so nothing touches the on-device credential table.
@@ -126,11 +126,11 @@ class OathImportIntegrityTest {
     fun importFromUri_doesNotTurnAMistypedSecretIntoTheLetterSpelling() {
         // Under the old fold these two produced byte-identical credentials, so a
         // typo was indistinguishable from the secret the service issued.
-        val spelled = runBlocking { repository.importFromUri("otpauth://totp/spelled?secret=OLBL3333") }
+        val spelled = runBlocking { repository.importFromUri("otpauth://totp/spelled?secret=OLBL3333OLBL3333") }
 
-        assertTrue(importFailure("otpauth://totp/typo?secret=01813333") is IllegalArgumentException)
+        assertTrue(importFailure("otpauth://totp/typo?secret=0181333301813333") is IllegalArgumentException)
         assertEquals("only the valid spelling may be stored", 1, runBlocking { dao.count() })
-        assertEquals("eight Base32 characters carry five whole bytes", 5, storedSecret(spelled).size)
+        assertEquals("sixteen Base32 characters carry ten whole bytes", 10, storedSecret(spelled).size)
     }
 
     @Test
@@ -145,9 +145,7 @@ class OathImportIntegrityTest {
         assertTrue(storedSecret(plain).contentEquals(storedSecret(decorated)))
     }
 
-    // -------------------------------------------------------------------------
     // The HOTP counter is part of the credential
-    // -------------------------------------------------------------------------
 
     @Test
     fun importFromUri_storesTheHotpCounterInTheSameWriteAsTheCredential() = runBlocking {
@@ -210,6 +208,13 @@ class OathImportIntegrityTest {
             throw AssertionError(
                 "importFromUri must not need a second write to set the counter " +
                     "(oathId=$oathId, counter=$counter)"
+            )
+        }
+
+        override suspend fun claimCounter(oathId: String, expected: Long): Int {
+            throw AssertionError(
+                "importFromUri must not need a second write to set the counter " +
+                    "(oathId=$oathId, counter=$expected)"
             )
         }
     }

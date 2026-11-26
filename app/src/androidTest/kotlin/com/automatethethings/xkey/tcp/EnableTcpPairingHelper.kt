@@ -52,25 +52,12 @@ class EnableTcpPairingHelper {
             assertTrue("TCP pairing must be enabled", settings.tcpHsmEnabled)
         }
 
-        // Stand the biometric gate down for an unattended run, when asked.
-        //
-        // The gate itself has its own instrumented coverage; what the host
-        // probe exercises is the enrollment protocol, and an emulator has no
-        // fingerprint to answer a prompt with -- every gated method fails with
-        // "No fingerprints enrolled" before reaching the code under test.
-        //
-        // Off by default, so an ordinary run still requires user presence.
+        // Disable the biometric gate for an unattended run when asked (emulators have no fingerprint); off by default.
         if (InstrumentationRegistry.getArguments().getString("disableUv") == "true") {
             runBlocking { BiometricSettingsRepository(context).setBiometricEnabled(false) }
         }
 
-        // Pre-trust the probe's Noise static key, when one was supplied.
-        //
-        // Approving an unknown peer is a human decision by design -- the
-        // service answers pairing.confirm with PAIRING_REJECTED when no
-        // approval UI can be reached. Registering the key here is the same
-        // trust the user would grant once by tapping approve, which is what
-        // lets an unattended run proceed without weakening that gate.
+        // Pre-trust the probe's Noise static key when supplied: the trust the user would grant by approving once.
         InstrumentationRegistry.getArguments()
             .getString("probePublicKeyHex")
             ?.trim()
@@ -79,30 +66,13 @@ class EnableTcpPairingHelper {
                 PairedDeviceRepository(context).addDevice(publicKeyHex, "e2eprobe")
             }
 
-        // The TCP listener lives inside XKeyGattService, so the setting alone
-        // opens nothing. Started from here rather than over adb because the
-        // service is not exported: `am start-foreground-service` is refused
-        // with "not exported from uid", and instrumentation runs as the app.
-        //
-        // A foreground service outlives the instrumentation process, which is
-        // what lets the host-side probe connect after this returns.
+        // Start the service from here: it is not exported, and a foreground service outlives instrumentation.
         val intent = Intent(context, XKeyGattService::class.java).apply {
             action = XKeyGattService.ACTION_START_ADVERTISING
         }
         context.startForegroundService(intent)
 
-        // Hold the process open while the host-side probe runs.
-        //
-        // The service was started from the instrumentation process, and when
-        // instrumentation returns that process is killed -- taking the
-        // listener with it before anything can connect. Blocking here keeps it
-        // alive for the length of one probe run. The duration is read from an
-        // instrumentation argument so the caller sets it:
-        //
-        //   adb shell am instrument -w \
-        //     -e class com.automatethethings.xkey.tcp.EnableTcpPairingHelper \
-        //     -e holdSeconds 180 \
-        //     com.automatethethings.xkey.debug.test/androidx.test.runner.AndroidJUnitRunner
+        // Keep the process alive for the probe run, for the holdSeconds instrumentation argument.
         val holdSeconds = InstrumentationRegistry.getArguments()
             .getString("holdSeconds")?.toLongOrNull() ?: DEFAULT_HOLD_SECONDS
         Thread.sleep(holdSeconds * 1000L)

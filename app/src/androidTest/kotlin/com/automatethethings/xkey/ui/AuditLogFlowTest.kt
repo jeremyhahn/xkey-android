@@ -14,15 +14,21 @@
  */
 package com.automatethethings.xkey.ui
 
+import android.app.Activity
+import android.app.Instrumentation
 import android.content.Context
+import android.content.Intent
 import android.view.View
 import android.widget.EditText
 import android.widget.HorizontalScrollView
 import android.widget.ImageView
 import android.widget.TextView
+import androidx.appcompat.widget.Toolbar
 import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.espresso.Espresso.pressBack
+import androidx.test.espresso.intent.Intents
+import androidx.test.espresso.intent.matcher.IntentMatchers.hasAction
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.automatethethings.xkey.R
 import com.automatethethings.xkey.audit.AuditLogDao
@@ -37,6 +43,7 @@ import org.junit.Assert.fail
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
+import java.io.File
 
 /**
  * End-to-end filter, search and detail flows for [AuditLogActivity].
@@ -63,8 +70,8 @@ import org.junit.runner.RunWith
  * matcher is ambiguous by construction. The two chip rows are the only
  * [HorizontalScrollView]s on the screen and are built operation-first.
  *
- * The toolbar's overflow actions (export JSON/CSV, clear filters, clear all,
- * delete older) are *not* covered, and cannot be: see the suite's report notes.
+ * The toolbar's overflow actions are covered by `AuditLogMenuTest`; this suite
+ * only drives the two exports under an applied date range.
  *
  * Every seeded row is deleted by key id in @After.
  */
@@ -410,6 +417,76 @@ class AuditLogFlowTest {
         awaitFilteredCount(scenario, CORE_FIXTURE_SIZE)
     }
 
+    /**
+     * An applied date range keeps only the rows inside it, on screen and in
+     * both exports (which re-query the DAO with the range).
+     *
+     * The range is applied through the same `applyDateRange` the picker's
+     * positive button calls, so the test does not drive the calendar widget.
+     */
+    @Test
+    fun dateRange_limitsTheListAndBothExports() {
+        val now = System.currentTimeMillis()
+        val beforeLabel = "$token-range-before"
+        val insideLabel = "$token-range-inside"
+        val afterLabel = "$token-range-after"
+        seed(beforeLabel, AuditOperationType.KEY_USED, "signing", timestamp = now - 10 * DAY_MS)
+        seed(insideLabel, AuditOperationType.KEY_USED, "signing", timestamp = now - 5 * DAY_MS)
+        seed(afterLabel, AuditOperationType.KEY_USED, "signing", timestamp = now - 2 * DAY_MS)
+        val preExisting = exportFiles().map { it.name }.toSet()
+        val scenario = launch()
+        search(scenario, token)
+        awaitFilteredCount(scenario, CORE_FIXTURE_SIZE + 3)
+
+        scenario.onActivity { it.applyDateRange(now - 6 * DAY_MS, now - 4 * DAY_MS) }
+        waitForIdle()
+
+        awaitFilteredCount(scenario, 1)
+        assertTrue(
+            "The row inside the range should be shown",
+            withActivity(scenario) {
+                findShownTextViewContaining(findFirstRecyclerView(it.window.decorView), insideLabel) != null
+            }
+        )
+
+        Intents.init()
+        try {
+            Intents.intending(hasAction(Intent.ACTION_CHOOSER))
+                .respondWith(Instrumentation.ActivityResult(Activity.RESULT_OK, null))
+            fun toolbarOf(activity: AuditLogActivity) =
+                collectViews(activity.window.decorView) { it is Toolbar }.first() as Toolbar
+            awaitCondition("The toolbar's options menu should be populated") {
+                withActivity(scenario) { toolbarOf(it).menu.size() > 0 }
+            }
+            listOf(R.id.menu_export_json to ".json", R.id.menu_export_csv to ".csv").forEach { (item, ext) ->
+                scenario.onActivity { toolbarOf(it).menu.performIdentifierAction(item, 0) }
+                waitForIdle()
+                var file: File? = null
+                awaitCondition("An export ending in '$ext' should be written") {
+                    file = exportFiles().firstOrNull {
+                        it.name.endsWith(ext) && it.name !in preExisting && it.length() > 0
+                    }
+                    file != null
+                }
+                val text = file!!.readText()
+                assertTrue("$ext export should hold the row inside the range", text.contains(insideLabel))
+                listOf(beforeLabel, afterLabel, createdLabel).forEach {
+                    assertTrue("$ext export should drop $it, outside the range", !text.contains(it))
+                }
+            }
+        } finally {
+            Intents.release()
+            exportFiles().filterNot { it.name in preExisting }.forEach { it.delete() }
+            scenario.close()
+        }
+    }
+
+    /** Every audit-log export currently sitting in the app's cache directory. */
+    private fun exportFiles(): List<File> =
+        context.cacheDir.listFiles()
+            ?.filter { it.name.startsWith(EXPORT_FILE_PREFIX) }
+            ?: emptyList()
+
     // ---------------------------------------------------------------
     // Operation-type sweep
     // ---------------------------------------------------------------
@@ -669,13 +746,14 @@ class AuditLogFlowTest {
         success: Boolean = true,
         errorMessage: String? = null,
         details: String? = null,
-        durationMs: Long? = null
+        durationMs: Long? = null,
+        timestamp: Long = System.currentTimeMillis()
     ) {
         seededKeyIds.add(keyId)
         runBlocking {
             auditLogDao.insert(
                 AuditLogEntity(
-                    timestamp = System.currentTimeMillis(),
+                    timestamp = timestamp,
                     operationType = operationType,
                     keyId = keyId,
                     keyLabel = label,
@@ -712,5 +790,10 @@ class AuditLogFlowTest {
 
         /** Fragment tag the activity uses for the Material date-range picker. */
         const val DATE_PICKER_TAG = "date_picker"
+
+        /** Prefix the activity gives every export it writes to `cacheDir`. */
+        const val EXPORT_FILE_PREFIX = "xkey_audit_log_"
+
+        const val DAY_MS = 24L * 60 * 60 * 1000
     }
 }

@@ -93,7 +93,7 @@ class XKeyGattServiceProbe(context: Context) {
         get() = read("tcpHsmServer") as TcpHsmServer?
         set(value) = write("tcpHsmServer", value)
 
-    /** The service's USB server slot, which holds the server and its router (#134). */
+    /** The service's USB server slot, which holds the server and its router. */
     val usbServerSlot: UsbAccessoryServerSlot
         get() = read("usbServerSlot") as UsbAccessoryServerSlot
 

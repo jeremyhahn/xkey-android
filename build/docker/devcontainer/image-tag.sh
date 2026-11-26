@@ -1,32 +1,6 @@
 #!/bin/sh
-# Prints a devcontainer image tag named by the content hash of the files that
-# build the image, for `make toolchain-image` and `make it-image`.
-#
-#   usage: image-tag.sh toolchain|it [trusted|pr]
-#
-# toolchain: the Dockerfile, its fetch.sh, the pin file and the Gradle build files, the
-#            analogue of a Go module's go.mod and go.sum. They are every file
-#            the image is built from: the Dockerfile's warm stage copies in
-#            these and no other (keep its COPY lines equal to this list) and
-#            runs the gates on a stub app the Dockerfile writes itself, never
-#            on the checkout's sources or tests. A build script is code too:
-#            one a pull request changes is hashed, so it names another image.
-# it:        the whole build context: the commit's tree, and on a dirty
-#            checkout the diff and every untracked file .gitignore keeps.
-#            Also APK_INDEX_SUM, the Alpine package
-#            index checksum (scripts/apk-index-sum.sh) CI passes; `none` here,
-#            whose base is Debian. CUSTOMIZE (xkey-android): also
-#            APT_INDEX_SUM, the Debian package index checksum
-#            (scripts/apt-index-sum.sh). Each sum, unset or empty, leaves the
-#            tag alone; both unset, the tag is the tree's alone.
-#            scripts/image-tag-test.sh (make lint-gates) checks this.
-#
-# The namespace is the run's class, as a name. trusted,
-# the default, is a developer's own make and CI's push or dispatch
-# on main; ci.yml passes pr for every other run, from the event, and a pr tag
-# is pr-<hash>. It protects nothing: a pull request's run
-# can write any tag on a daemon it shares with main, so a trusted run never
-# looks a tag up. It builds fresh and runs by image ID (Makefile IMAGE_FRESH).
+# Prints a devcontainer image tag from the content hash of its inputs. Usage: image-tag.sh toolchain|it [trusted|pr]
+# toolchain hashes the Dockerfile, fetch.sh, the pins and the Gradle build files; it hashes the tree plus APK_INDEX_SUM/APT_INDEX_SUM.
 set -eu
 
 cd "$(dirname -- "$0")/../../.."

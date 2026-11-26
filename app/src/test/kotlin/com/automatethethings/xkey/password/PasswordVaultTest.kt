@@ -14,6 +14,7 @@
  */
 package com.automatethethings.xkey.password
 
+import com.automatethethings.xkey.pin.LockoutClock
 import com.automatethethings.xkey.settings.PinSettingsData
 import com.automatethethings.xkey.settings.VaultUnlockAttempts
 import kotlinx.coroutines.test.runTest
@@ -82,7 +83,14 @@ class PasswordVaultTest {
     private fun vault(
         store: PasswordVaultFactorStore = InMemoryFactorStore(),
         attempts: VaultUnlockAttemptStore = InMemoryAttemptStore()
-    ) = PasswordVault(store, attempts, countingHasher, clock = { now })
+    ) = PasswordVault(store, attempts, countingHasher, clock = nowClock)
+
+    /** [now] as both the monotonic and the wall clock, on one boot. */
+    private val nowClock = object : LockoutClock {
+        override fun elapsedRealtime(): Long = now
+        override fun bootId(): String = "boot"
+        override fun currentTimeMillis(): Long = now
+    }
 
     private val wrong = PasswordVaultCredential.Passphrase(fixtureSecret(2))
     private val right = PasswordVaultCredential.Passphrase(fixtureSecret(1))
@@ -321,10 +329,19 @@ class PasswordVaultTest {
         now += 59_999L
         assertTrue(rejection(vault, wrong) is VaultUnlockLockedOutException)
 
-        // The PIN rule is a fixed duration: no doubling, so no cap to reach.
+        // Without the PIN's backoff the rule is a fixed duration: no doubling.
         now += 1L
         failTimes(vault, 1)
-        assertEquals(VaultUnlockAttempts(4, now + 60_000L), attempts.counter)
+        assertEquals(
+            VaultUnlockAttempts(
+                failedAttempts = 4,
+                lockedUntil = now + 60_000L,
+                remainingMs = 60_000L,
+                anchorElapsedMs = now,
+                anchorBootId = "boot"
+            ),
+            attempts.counter
+        )
         assertTrue(rejection(vault, right) is VaultUnlockLockedOutException)
     }
 

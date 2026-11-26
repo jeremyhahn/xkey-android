@@ -1,159 +1,56 @@
-# Media Auto-Signing
+# Media auto-signing
 
-> **Status: REFERENCE** · Last verified: 2026-10-09
-> As-built description of `MediaSigningService`.
+> **Status: REFERENCE** · Last verified: 2026-11-23
+> Engineering reference for `MediaSigningService`: lifecycle, hashing, storage format, settings, manifest entries and limits.
 
-This document describes the `MediaSigningService`, which automatically signs
-photos and videos as they are captured, embedding cryptographic signatures in
-the file metadata for later verification.
+The flow is in [architecture.md](architecture.md).
 
-## Service Lifecycle
+## Lifecycle
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Stopped: Service not running
-
-    Stopped --> Starting: Settings toggle ON
-    Starting --> Observing: onStartCommand()
-    Note right of Observing: ContentObservers registered<br/>Wake lock acquired<br/>Foreground notification shown
-
-    Observing --> Signing: New media detected
-    Signing --> Observing: Signature embedded
-    Signing --> Observing: Error (logged, continues)
-
-    Observing --> Stopped: Settings toggle OFF / onDestroy()
-    Note right of Stopped: Observers unregistered<br/>Wake lock released
+    [*] --> Stopped
+    Stopped --> Observing: Auto-Sign Media switched on (startForegroundService)
+    Observing --> Signing: MediaStore change for an unsigned URI
+    Signing --> Observing: Signed, skipped, or failed (logged)
+    Observing --> Stopped: Switched off (stopService) or onDestroy
 ```
 
-## Architecture
+The service uses `CoroutineScope(SupervisorJob() + Dispatchers.IO)`. Each
+change event starts its own job, so several captures in a burst are hashed
+and signed at the same time. `onDestroy` cancels all of them.
 
-`MediaSigningService` is a foreground service that follows the same pattern as
-`XKeyGattService`: foreground notification, wake lock, `START_STICKY` restart
-policy, and `CoroutineScope(SupervisorJob() + Dispatchers.IO)` for async work.
+## Change events
 
-### Components
+| Detail | Value |
+|--------|-------|
+| Observed URIs | `MediaStore.Images.Media.EXTERNAL_CONTENT_URI`, `MediaStore.Video.Media.EXTERNAL_CONTENT_URI`, with descendants |
+| Wait before hashing | 500 ms (`SIGN_DELAY_MS`), so the camera can finish writing |
+| Duplicate guard | `AutoSignQueue` claims a URI when its first event arrives, before the wait, so a burst of events for one capture starts one signing job; a skipped attempt releases the claim |
+| Set size | When it passes 1000 entries, 500 are removed in iteration order. The set is hash-based, so these are not the oldest |
 
-| Component | Role |
+The set lives in memory only. A restarted service can sign a URI again if
+`MediaStore` reports a change for it.
+
+## Hashing
+
+`AutoSignHash.contentHashUri` takes the MIME type from the content resolver:
+
+| MIME type | Hash |
 |-----------|------|
-| `MediaSigningService` | Foreground service lifecycle, ContentObserver registration |
-| `ContentObserver` (image) | Observes `MediaStore.Images.Media.EXTERNAL_CONTENT_URI` |
-| `ContentObserver` (video) | Observes `MediaStore.Video.Media.EXTERNAL_CONTENT_URI` |
-| `MediaHasher` | Streaming SHA-256 hash of media content |
-| `KeystoreManager` | Hardware-backed signing via `signWithAlgorithm()` |
-| `XmpMetadataHelper` | Signature embedding in EXIF/XMP or sidecar file |
-| `MediaSigningSettingsRepository` | DataStore-backed settings |
-| `AuditLogger` | Logs `MEDIA_AUTO_SIGNED` events |
+| `image/jpeg` or `image/jpg` | `MediaHasher.hashCanonical`: SHA-256 with the `APPn` and `COM` segments left out. The file is read into memory, up to 32 MiB (`MAX_CANONICAL_JPEG_BYTES`); a larger one throws `TooLargeException` |
+| Anything else | `MediaHasher.hashUri`: SHA-256 of the whole file, streamed |
 
-## ContentObserver Flow
+The service turns the hex hash into bytes and signs those bytes with the JCA
+algorithm for the key (`KeystoreManager.jcaSignatureAlgorithm`). That
+algorithm hashes the content-hash bytes again with its own digest before
+signing: SHA-256 for ES256 and RS256, SHA-384 for ES384 and RS384, SHA-512 for
+ES512 and RS512. No other algorithm signs; an Ed25519 key is refused.
+Verification in the app (`SignatureVerifier`) uses the same mapping.
 
-```mermaid
-sequenceDiagram
-    participant Camera as Camera App
-    participant MS as MediaStore
-    participant Obs as ContentObserver
-    participant Svc as MediaSigningService
-    participant MH as MediaHasher
-    participant KM as KeystoreManager
-    participant XMP as XmpMetadataHelper
-    participant AL as AuditLogger
+## Signature block
 
-    Camera->>MS: Write new photo/video
-    MS->>Obs: onChange(selfChange, uri)
-    Obs->>Svc: handleNewMedia(uri, mediaType)
-
-    Note over Svc: Check if URI already processed
-
-    Svc->>Svc: delay(500ms)
-    Note over Svc: Wait for file to be fully written
-
-    Svc->>Svc: Check settings (autoSignEnabled, signPhotos/Videos)
-    Svc->>Svc: Get signing key ID from settings
-
-    Svc->>MH: hashUri(contentResolver, uri)
-    Note over MH: Streaming SHA-256 via DigestInputStream<br/>Handles large files without loading to memory
-    MH-->>Svc: Hex hash string
-
-    Svc->>KM: signWithAlgorithm(keyId, hashBytes, algorithm)
-    Note over KM: Sign in Keystore hardware (TEE/StrongBox)
-    KM-->>Svc: Signature bytes
-
-    Svc->>KM: getPublicKeyDER(keyId)
-    KM-->>Svc: Public key DER bytes
-    Note over Svc: Compute key fingerprint = SHA-256(publicKeyDER)
-
-    Svc->>Svc: Build SignatureEntry (role=CREATOR)
-    Svc->>Svc: Build ContentAuthenticityData
-
-    Svc->>Svc: getFilePathFromUri(uri)
-    alt File path available
-        Svc->>XMP: writeSignature(filePath, data)
-    end
-
-    Svc->>Svc: Add URI to processedUris set
-
-    Svc->>AL: logMediaAutoSigned(keyId, label, uri)
-```
-
-### Deduplication
-
-The service maintains an in-memory `Set<String>` of processed URIs to prevent
-re-signing when `ContentObserver` fires multiple times for the same file.
-The set is bounded to 1000 entries; when full, the oldest 500 are evicted.
-
-### Debounce
-
-A 500ms delay is applied after receiving a `ContentObserver` callback to ensure
-the media file is fully written to disk before hashing. Without this delay,
-the hash could be computed on an incomplete file.
-
-## EXIF/XMP Embedding Strategy
-
-Signature data is stored differently depending on the media format:
-
-### JPEG
-
-```
-Method:  ExifInterface.setAttribute(TAG_USER_COMMENT, jsonString)
-Format:  "XKEY_SIG:" + JSON-encoded ContentAuthenticityData
-API:     ExifInterface (API 28+, reliable for TAG_USER_COMMENT)
-```
-
-The `TAG_USER_COMMENT` field supports arbitrary string data. A compact JSON
-signature is approximately 500 bytes for a single signer and 5KB for 10
-co-signers, well within EXIF limits.
-
-The `XKEY_SIG:` prefix allows xKey to identify its own metadata and distinguish
-it from other applications that may use the same EXIF field.
-
-### PNG / WebP
-
-```
-Method:  Sidecar file (.xkeysig)
-Format:  JSON file alongside the media file
-Path:    <original_path>.xkeysig
-```
-
-The `ExifInterface` on Android does not reliably write to PNG or WebP metadata.
-A sidecar JSON file is used instead.
-
-### Video (MP4, MKV, MOV)
-
-```
-Method:  Sidecar file (.xkeysig)
-Format:  JSON file alongside the video file
-Path:    <original_path>.xkeysig
-```
-
-Video containers do not support EXIF metadata. A sidecar file is always used.
-
-### Read Priority
-
-When reading signatures, `XmpMetadataHelper.readSignature()` checks in order:
-
-1. EXIF `TAG_USER_COMMENT` (for JPEG)
-2. Sidecar `.xkeysig` file (fallback for all formats)
-
-## ContentAuthenticityData Schema
+The service writes one `ContentAuthenticityData` with one entry:
 
 ```json
 {
@@ -163,78 +60,72 @@ When reading signatures, `XmpMetadataHelper.readSignature()` checks in order:
     "signatures": [
         {
             "keyFingerprint": "a1b2c3d4e5f67890abcdef1234567890abcdef1234567890abcdef1234567890",
-            "signerName": "My Photo Signing Key",
+            "signerName": "Camera key",
             "algorithm": "ES256",
             "value": "MEUCIQDxE9vVU3r7KnYm+B8r8r5w...",
-            "timestamp": "2025-07-15T14:30:00.000Z",
+            "timestamp": "2026-11-23T14:30:00Z",
             "role": "CREATOR"
         }
     ]
 }
 ```
 
-### Example: Multi-Signer (after co-signing)
+| Field | Value from the service |
+|-------|------------------------|
+| `contentHash` | The hash above, in hex |
+| `keyFingerprint` | SHA-256 of the public key DER under the general key alias |
+| `signerName` | The key's label |
+| `algorithm` | The key's algorithm from its `KeyDao` row |
+| `value` | Base64 signature, no line wrap |
+| `timestamp` | `Instant.now()` in ISO 8601 |
+| `role` | `CREATOR` |
 
-```json
-{
-    "version": 1,
-    "contentHash": "e3b0c44298fc1c149afbf4c8996fb924...",
-    "hashAlgorithm": "SHA-256",
-    "signatures": [
-        {
-            "keyFingerprint": "a1b2c3d4...",
-            "signerName": "Alice (Camera Owner)",
-            "algorithm": "ES256",
-            "value": "MEUCIQD...",
-            "timestamp": "2025-07-15T14:30:00.000Z",
-            "role": "CREATOR"
-        },
-        {
-            "keyFingerprint": "f5e6d7c8...",
-            "signerName": "Bob",
-            "algorithm": "ES384",
-            "value": "MGQCMAE...",
-            "timestamp": "2025-07-15T14:31:15.000Z",
-            "role": "WITNESS"
-        },
-        {
-            "keyFingerprint": "1a2b3c4d...",
-            "signerName": null,
-            "algorithm": "ES256",
-            "value": "MEUCIBn...",
-            "timestamp": "2025-07-15T15:00:00.000Z",
-            "role": "ATTESTOR"
-        }
-    ]
-}
-```
+The full field list is in
+[file operations](../file-operations/engineering.md#xkeysig-json-format).
+Co-signatures added later go in the same `signatures` array; see
+[co-signing](../co-signing/engineering.md).
 
-## Settings Integration
+## Storage
 
-`MediaSigningSettings` is managed via a DataStore repository following the
-same pattern as `UsbHsmSettingsRepository`.
+`XmpMetadataHelper` decides by the file path's extension, not by MIME type.
 
-```kotlin
-data class MediaSigningSettingsData(
-    val autoSignEnabled: Boolean = false,
-    val signingKeyId: String? = null,
-    val signPhotos: Boolean = true,
-    val signVideos: Boolean = true
-)
-```
+| Extension | Write | Read (`readSignature`) |
+|-----------|-------|------------------------|
+| `.jpg`, `.jpeg` | `ExifInterface` `TAG_USER_COMMENT` = `XKEY_SIG:` + JSON, then `saveAttributes()` | EXIF first, then the sidecar |
+| Anything else | `<path>.xkeysig`, the JSON alone | Sidecar only |
 
-### SettingsActivity Integration
+`readSignatureFromUri` reads only the EXIF block of a JPEG. It never looks
+for a sidecar, because a content URI has no path to put `.xkeysig` after.
+The [viewer](../verified-media-viewer/architecture.md#finding-the-signature-block)
+looks for the sidecar itself, which works only for a `file://` URI or a
+document URI. File operations ask the user to pick the `.xkeysig` file.
 
-The media signing section is built programmatically in `buildMediaSigningSection()`
-within `SettingsActivity`, positioned between the Device Trust and Connectivity
-sections. It includes:
+The `XKEY_SIG:` prefix marks the comment as xKey's. A comment without it is
+ignored, and writing a signature replaces whatever comment the photo had.
 
-- **Auto-sign toggle** (MaterialSwitch): Starts/stops `MediaSigningService`
-- **Signing key selector** (Spinner): Populated from `KeyDao`, filtered to signing keys
-- **Sign photos toggle**: Enable/disable photo auto-signing
-- **Sign videos toggle**: Enable/disable video auto-signing
+## Settings
 
-## Permissions
+`MediaSigningSettingsRepository` stores these in the DataStore file
+`media_signing_settings`:
+
+| Setting | Key | Default |
+|---------|-----|---------|
+| `autoSignEnabled` | `auto_sign_enabled` | `false` |
+| `signingKeyId` | `signing_key_id` | none |
+| `signPhotos` | `sign_photos` | `true` |
+| `signVideos` | `sign_videos` | `true` |
+
+Turning `autoSignEnabled` on or off writes a settings-changed audit entry
+(`mediaAutoSign`). The other three are saved without one.
+
+The settings screen section, built in `SettingsActivity`, has the Auto-Sign
+Media switch, a Signing Key spinner, and Sign Photos and Sign Videos
+switches. The spinner and the two switches show only while auto-sign is on.
+The spinner lists keys whose type is `signing` or `fido2`. A FIDO2 credential
+is stored under its credential alias, not the general key alias the service
+signs with, so choosing one leaves every new item unsigned.
+
+## Manifest entries
 
 ```xml
 <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
@@ -242,25 +133,33 @@ sections. It includes:
 <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
     android:maxSdkVersion="32" />
 <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
-```
 
-## Service Declaration
-
-```xml
-<service android:name=".media.MediaSigningService"
+<service
+    android:name=".media.MediaSigningService"
     android:foregroundServiceType="dataSync"
     android:exported="false" />
 ```
 
-## Notification
+The app declares the media permissions but has no code that asks the user for
+them at run time.
 
-The service shows a persistent low-priority notification:
+## Notification
 
 | Property | Value |
 |----------|-------|
+| Notification ID | 2002 |
 | Channel ID | `media_signing_channel` |
 | Channel name | "xKey Media Signing" |
-| Title | "xKey Media Signing" |
-| Text | "Auto-signing active" |
-| Priority | Low |
+| Channel importance | Low |
+| Title | "Media Signing Active" |
+| Text | "Auto-signing new photos and videos" |
 | Ongoing | Yes |
+| Tap | Opens the app's launcher activity |
+
+## Audit events
+
+| Event | When |
+|-------|------|
+| `MEDIA_AUTO_SIGNED` (`logMediaAutoSigned(keyId, label, uri)`) | After the signature is written |
+| Failed key use, operation `media_auto_sign` (`logKeyUsed`) | A JPEG is over 32 MiB |
+| Settings changed, `mediaAutoSign` | The Auto-Sign Media switch changes |

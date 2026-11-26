@@ -15,6 +15,7 @@
 package com.automatethethings.xkey.ui
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
@@ -67,5 +68,19 @@ class QrScannerChokePointTest {
         // ContactManagementActivity runs an inline scanner with its own CAMERA request.
         val direct = filesContaining("QrCodeScannerHelper(") - "QrCodeScannerHelper.kt"
         assertEquals(setOf("QrScannerActivity.kt", "ContactManagementActivity.kt"), direct)
+    }
+
+    @Test
+    fun theHelperCreatesOneScannerClientAndClosesIt() {
+        // A client made per bind leaks one per rejected-code restart.
+        val helper = sources.single { it.name == "QrCodeScannerHelper.kt" }.readText()
+        assertEquals(1, Regex(Regex.escape("BarcodeScanning.getClient")).findAll(helper).count())
+        val bindCamera = helper.substringAfter("fun bindCamera(", missingDelimiterValue = "")
+        assertTrue("bindCamera not found", bindCamera.isNotEmpty())
+        assertFalse(
+            "bindCamera must reuse the helper's client",
+            bindCamera.contains("BarcodeScanning.getClient")
+        )
+        assertTrue("the helper must close its client", helper.contains("scanner.close()"))
     }
 }

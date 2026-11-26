@@ -15,6 +15,7 @@
 package com.automatethethings.xkey.password
 
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
+import com.automatethethings.xkey.pin.LockoutClock
 import com.automatethethings.xkey.settings.PinSettingsData
 import com.automatethethings.xkey.settings.PinSettingsRepository
 import com.automatethethings.xkey.settings.VaultUnlockAttempts
@@ -87,7 +88,14 @@ class PinSettingsVaultUnlockAttemptStoreTest {
     }
 
     private fun vault(factorDir: File, attempts: VaultUnlockAttemptStore) =
-        PasswordVault(FilePasswordVaultFactorStore(factorDir), attempts, countingHasher, clock = { now })
+        PasswordVault(FilePasswordVaultFactorStore(factorDir), attempts, countingHasher, clock = nowClock)
+
+    /** [now] as both the monotonic and the wall clock, on one boot. */
+    private val nowClock = object : LockoutClock {
+        override fun elapsedRealtime(): Long = now
+        override fun bootId(): String = "boot"
+        override fun currentTimeMillis(): Long = now
+    }
 
     private suspend fun rejection(vault: PasswordVault, credential: PasswordVaultCredential): Exception =
         try {
@@ -134,7 +142,10 @@ class PinSettingsVaultUnlockAttemptStoreTest {
 
         val lockedOut = VaultUnlockAttempts(
             failedAttempts = limits.maxAttempts,
-            lockedUntil = now + limits.lockoutDurationSeconds * 1000L
+            lockedUntil = now + limits.lockoutDurationSeconds * 1000L,
+            remainingMs = limits.lockoutDurationSeconds * 1000L,
+            anchorElapsedMs = now,
+            anchorBootId = "boot"
         )
         opened(settings) { third ->
             assertEquals("both counter fields come back from disk", lockedOut, third.repository.getVaultUnlockAttempts())

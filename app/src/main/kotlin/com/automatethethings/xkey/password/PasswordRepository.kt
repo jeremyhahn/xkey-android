@@ -105,6 +105,32 @@ class PasswordUpdateConflictException :
     Exception("the entry changed while it was being updated; nothing was written")
 
 /**
+ * An update refused, nothing written, because the stored entry is the same
+ * age as or newer than the incoming copy ([PasswordRepository.updateFields]
+ * with `onlyIfOlderThan`): under last-writer-wins the local entry is kept.
+ * The message names no content.
+ */
+class PasswordNotNewerException :
+    Exception("the stored entry is not older than the incoming one; nothing was written")
+
+/**
+ * An update refused, nothing written, because the stored entry has a policy
+ * sync does not carry ([PasswordRepository.updateFields] with
+ * `onlyIfSyncable`): another tenant, shared, or an expiry. The message names
+ * no content.
+ */
+class PasswordNotSyncableException :
+    Exception("the stored entry is not one sync carries; nothing was written")
+
+/**
+ * Whether an entry with this policy is one password sync carries: in the
+ * default tenant, personal, with no expiry. `SyncPassword` has no field for
+ * any of them, so sync sends only such entries and writes only such entries.
+ */
+internal fun hasSyncablePolicy(tenantId: String, shared: Boolean, expiresAt: String?): Boolean =
+    tenantId == PasswordEntity.DEFAULT_TENANT && !shared && expiresAt.isNullOrEmpty()
+
+/**
  * Repository for the encrypted password store. Encrypts each password value with
  * the Android Keystore via [KeystoreAeadCipher] before persisting through
  * [PasswordDao], and decrypts on read.
@@ -116,10 +142,18 @@ class PasswordUpdateConflictException :
  */
 class PasswordRepository(
     private val dao: PasswordDao,
-    private val cipher: KeystoreAeadCipher = KeystoreAeadCipher(KEY_ALIAS)
+    private val cipher: KeystoreAeadCipher = KeystoreAeadCipher(KEY_ALIAS),
+    private val clock: () -> Long = System::currentTimeMillis
 ) {
     companion object {
-        private const val KEY_ALIAS = "xkey_password_encryption_key"
+        private const val KEY_ALIAS = KeystoreAeadCipher.PASSWORD_ALIAS
+
+        /**
+         * How long a deletion record ([PasswordDeletionEntity]) is kept: 180
+         * days. A peer that still holds a deleted entry after that can add it
+         * back.
+         */
+        const val DELETION_RETENTION_MS = 180L * 24 * 60 * 60 * 1000
 
         /** Reads of an entry [updateFields] makes before refusing one that keeps moving. */
         private const val UPDATE_ATTEMPTS = 2
@@ -217,31 +251,63 @@ class PasswordRepository(
      * that lands between the caller's read and this one, such as a
      * `PasswordUpdate` setting the entry's expiry.
      */
-    suspend fun insertIfAbsent(record: PasswordRecord): Boolean {
+    suspend fun insertIfAbsent(record: PasswordRecord): Boolean = dao.insertIfAbsent(newEntity(record)) != -1L
+
+    /** What [insertIfAbsentUnlessDeleted] did with a synced entry. */
+    enum class SyncInsert {
+        /** Added as a new entry. */
+        ADDED,
+
+        /** Not written: an entry with that id is there. */
+        PRESENT,
+
+        /** Not written: deleted on this phone since the copy, so it stays deleted. */
+        DELETED
+    }
+
+    /**
+     * Add a synced [record] like [insertIfAbsent], unless this phone deleted
+     * it at or after [sentUpdatedAt], the time the peer sent for the copy
+     * (null when unknown: none, blank, or clamped; any deletion record then
+     * holds it back). The comparison runs in one transaction with the
+     * deletion check ([PasswordDao.insertIfAbsentUnlessDeleted]), so a
+     * delete landing meanwhile cannot let a copy that predates it back in,
+     * and it never reads the phone's time [newEntity] stores for a copy
+     * sent without one.
+     */
+    suspend fun insertIfAbsentUnlessDeleted(record: PasswordRecord, sentUpdatedAt: Long?): SyncInsert =
+        when (dao.insertIfAbsentUnlessDeleted(newEntity(record), sentUpdatedAt)) {
+            KEPT_DELETED -> SyncInsert.DELETED
+            -1L -> SyncInsert.PRESENT
+            else -> SyncInsert.ADDED
+        }
+
+    /**
+     * [record] as a new row, its value encrypted: encrypted and measured
+     * before any transaction, so no Keystore call runs inside one.
+     */
+    private fun newEntity(record: PasswordRecord): PasswordEntity {
         val now = System.currentTimeMillis()
         val createdAt = if (record.createdAt > 0) record.createdAt else now
         val updatedAt = if (record.updatedAt > 0) record.updatedAt else now
         // Measured as PasswordGet answers it, with the timestamps it is stored under.
         PasswordEntryLimit.requireFits(record.copy(createdAt = createdAt, updatedAt = updatedAt))
-        val rowId = dao.insertIfAbsent(
-            PasswordEntity(
-                passwordId = record.passwordId,
-                name = record.name,
-                title = record.title,
-                username = record.username,
-                passwordEncrypted = cipher.encrypt(record.password.toByteArray(Charsets.UTF_8)),
-                url = record.url,
-                notes = record.notes,
-                folderPath = record.folderPath,
-                source = record.source,
-                createdAt = createdAt,
-                updatedAt = updatedAt,
-                expiresAt = record.expiresAt,
-                shared = record.shared,
-                tenantId = record.tenantId
-            )
+        return PasswordEntity(
+            passwordId = record.passwordId,
+            name = record.name,
+            title = record.title,
+            username = record.username,
+            passwordEncrypted = cipher.encrypt(record.password.toByteArray(Charsets.UTF_8)),
+            url = record.url,
+            notes = record.notes,
+            folderPath = record.folderPath,
+            source = record.source,
+            createdAt = createdAt,
+            updatedAt = updatedAt,
+            expiresAt = record.expiresAt,
+            shared = record.shared,
+            tenantId = record.tenantId
         )
-        return rowId != -1L
     }
 
     /**
@@ -268,12 +334,36 @@ class PasswordRepository(
      * gets the patch on top of its current fields. An entry that changes again
      * before the second write is refused with [PasswordUpdateConflictException],
      * nothing written.
+     *
+     * With [onlyIfOlderThan] (a sync's last-writer-wins check), the patch is
+     * applied only while the stored entry's `updatedAt` is strictly older than
+     * it; the check is made on each read, inside the compare-and-set, so a
+     * newer local write between the reads still wins. An entry the same age
+     * or newer is refused with [PasswordNotNewerException], nothing written;
+     * so is any existing entry when [onlyIfOlderThan] is 0 (no timestamp).
+     *
+     * With [onlyIfSyncable] (a sync's write), the patch is applied only to an
+     * entry sync carries ([hasSyncablePolicy]), checked on each read like
+     * [onlyIfOlderThan]; any other is refused with
+     * [PasswordNotSyncableException], nothing written.
      */
-    suspend fun updateFields(passwordId: String, patch: PasswordPatch, tenantId: String? = null): Boolean {
+    suspend fun updateFields(
+        passwordId: String,
+        patch: PasswordPatch,
+        tenantId: String? = null,
+        onlyIfOlderThan: Long? = null,
+        onlyIfSyncable: Boolean = false
+    ): Boolean {
         val updatedAt = if (patch.updatedAt > 0) patch.updatedAt else System.currentTimeMillis()
         var newCiphertext: ByteArray? = null
         repeat(UPDATE_ATTEMPTS) {
             val existing = find(passwordId, tenantId) ?: return false
+            if (onlyIfSyncable && !hasSyncablePolicy(existing.tenantId, existing.shared, existing.expiresAt)) {
+                throw PasswordNotSyncableException()
+            }
+            if (onlyIfOlderThan != null && existing.updatedAt >= onlyIfOlderThan) {
+                throw PasswordNotNewerException()
+            }
             val patched = patch.applyTo(existing.toRecord(decrypt = false)).copy(updatedAt = updatedAt)
             requireFits(patched, patch.password, existing.passwordEncrypted)
             val passwordEncrypted = when (val password = patch.password) {
@@ -332,13 +422,22 @@ class PasswordRepository(
     /**
      * Delete a password by ID, in any tenant or, with a [tenantId], only if it
      * belongs to that tenant. Returns whether an entry was deleted.
+     *
+     * A deleted entry gets a deletion record ([PasswordDeletionEntity]) at
+     * the current time, so that a sync with a peer which still holds it does
+     * not add it back ([PasswordDao.getDeletedAt]). The delete and its record are one
+     * transaction ([PasswordDao.deleteAndRecordDeletion]), so a sync never
+     * sees the entry gone and its record not yet written.
      */
     suspend fun delete(passwordId: String, tenantId: String? = null): Boolean =
-        if (tenantId == null) {
-            dao.deleteByPasswordId(passwordId) > 0
-        } else {
-            dao.deleteByPasswordIdInTenant(passwordId, tenantId) > 0
-        }
+        dao.deleteAndRecordDeletion(passwordId, tenantId, clock())
+
+    /**
+     * Drop the deletion records older than [DELETION_RETENTION_MS] at [now],
+     * so the table stays bounded. Returns how many were dropped.
+     */
+    suspend fun pruneDeletions(now: Long = clock()): Int =
+        dao.pruneDeletionsBefore(now - DELETION_RETENTION_MS)
 
     /** Number of stored passwords. */
     suspend fun count(): Int = dao.count()

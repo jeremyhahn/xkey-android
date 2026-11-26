@@ -94,16 +94,18 @@ class XKeyCredentialService : CredentialProviderService() {
         Log.i(TAG, "=== onBeginCreateCredentialRequest INVOKED ===")
         Log.d(TAG, "Request type: ${request::class.simpleName}")
         serviceScope.launch {
-            try {
-                val response = enableGate.beginCreate(request) {
+            val response = try {
+                enableGate.beginCreate(request) {
                     createHandler.handleBeginCreateCredential(it)
                 }
-                Log.i(TAG, "onBeginCreateCredentialRequest SUCCESS - ${response.createEntries.size} CreateEntry")
-                callback.onResult(response)
             } catch (e: Exception) {
                 Log.e(TAG, "Error in onBeginCreateCredentialRequest", e)
                 callback.onError(CreateCredentialUnknownException(e.message))
+                return@launch
             }
+            Log.i(TAG, "onBeginCreateCredentialRequest SUCCESS - ${response.createEntries.size} CreateEntry")
+            // Answered once: a receiver that throws is not answered again.
+            answerOnce("onBeginCreateCredentialRequest") { callback.onResult(response) }
         }
     }
 
@@ -120,16 +122,31 @@ class XKeyCredentialService : CredentialProviderService() {
     ) {
         Log.i(TAG, "=== onBeginGetCredentialRequest INVOKED ===")
         serviceScope.launch {
-            try {
-                val response = enableGate.beginGet(request) {
+            val response = try {
+                enableGate.beginGet(request) {
                     getHandler.handleBeginGetCredential(it)
                 }
-                Log.i(TAG, "onBeginGetCredentialRequest SUCCESS")
-                callback.onResult(response)
             } catch (e: Exception) {
                 Log.e(TAG, "Error in onBeginGetCredentialRequest", e)
                 callback.onError(GetCredentialUnknownException(e.message))
+                return@launch
             }
+            Log.i(TAG, "onBeginGetCredentialRequest SUCCESS")
+            // Answered once: a receiver that throws is not answered again.
+            answerOnce("onBeginGetCredentialRequest") { callback.onResult(response) }
+        }
+    }
+
+    /**
+     * Hands a request its answer. The request is answered even when the
+     * receiver throws (its caller may have gone), so the failure is logged
+     * and kept off the service's threads rather than answered again.
+     */
+    private inline fun answerOnce(request: String, answer: () -> Unit) {
+        try {
+            answer()
+        } catch (e: Exception) {
+            Log.w(TAG, "$request: the receiver threw while taking its answer", e)
         }
     }
 

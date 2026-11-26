@@ -53,9 +53,7 @@ class CoseAlgorithmsTest {
         CoseAlgorithms.HMAC_512 to "HMAC-SHA512"
     )
 
-    // -------------------------------------------------------------------------
-    // COSE identifier values (IANA registry - must not drift)
-    // -------------------------------------------------------------------------
+    // COSE identifier values (IANA registry)
 
     @Test
     fun `signature algorithm identifiers match the IANA COSE registry`() {

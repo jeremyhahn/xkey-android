@@ -29,7 +29,7 @@ import java.util.concurrent.atomic.AtomicReference
  * - **PER_OPERATION**: Biometric required for every operation
  * - **TIME_WINDOW**: Biometric valid for a configurable duration after authentication
  * - **PER_SESSION**: Biometric required once per connection; each live
- *   connection (USB, BLE, TCP) keeps its own approval (#134)
+ *   connection (USB, BLE, TCP) keeps its own approval
  *
  * Clock:
  * - The TIME_WINDOW window is measured on [clock], by default
@@ -116,7 +116,7 @@ class SessionAuthManager(
                 // recorded reading cannot vouch for the window, so it has
                 val authTime = lastAuthTime.get() ?: return true
                 val now = clock()
-                val windowMs = settings.timeWindowSeconds * MILLIS_PER_SECOND
+                val windowMs = settings.effectiveTimeWindowSeconds * MILLIS_PER_SECOND
                 now < authTime || now - authTime >= windowMs
             }
 

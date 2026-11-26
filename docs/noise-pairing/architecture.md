@@ -1,21 +1,44 @@
 # Noise pairing architecture
 
-> **Status: REFERENCE** · Last verified: 2026-10-09
-> As-built description of xKey's Noise_XX pairing, its JSON-RPC message surface and the pairing flow. The wire contract is `go-xkms/xkey/pkg/pairing`.
+> **Status: REFERENCE** · Last verified: 2026-11-23
+> How xKey runs the Noise_XX handshake, frames its JSON-RPC messages and pairs with a desktop. The wire contract lives in `go-xkms/xkey/pkg/pairing`.
 
-## Noise_XX Handshake
+The same responder code runs on every transport. BLE drives it from
+`ble/GattServer.kt`; USB and TCP drive it from
+`transport/StreamPairingSession.kt`. Both use `ble/NoiseSession.kt` for the
+cryptography and `protocol/Handler.kt` (`RequestHandler`) for the methods.
+Paths in this document are relative to
+`app/src/main/kotlin/com/automatethethings/xkey/`.
 
-xKey acts as the Noise **responder** (the desktop client is the initiator).
-The handshake establishes mutual authentication and derives transport keys.
+## Identity exchange
 
-### Protocol: `Noise_XX_25519_ChaChaPoly_SHA256`
+Before the handshake the desktop sends a 33-byte identity message: a version
+byte `0x01` followed by its 32-byte X25519 static public key. The phone looks
+the key up in `PairedDeviceRepository`.
 
-- **Key exchange**: X25519 (Curve25519 ECDH)
-- **Symmetric cipher**: ChaCha20-Poly1305 (AEAD)
-- **Hash**: SHA-256
-- **Pattern**: XX (both sides transmit static keys, encrypted)
+- If the desktop is paired and the record holds a 32-byte `deviceFingerprint`
+  (the SHA-256 of the phone's own attested leaf SPKI, captured at pairing),
+  the phone answers `0x01` followed by that fingerprint. Both sides then set
+  the Noise prologue to
+  `SHA256(desktop_public_key || fingerprint || "xkey-v1")`.
+- Otherwise the phone answers the single byte `0x00` and the prologue stays
+  empty.
 
-### Handshake Sequence
+A first message that is not 33 bytes, or does not start with `0x01`, is
+treated as handshake message 1 with an empty prologue. Older desktops that
+skip the identity step still connect.
+
+## Handshake
+
+xKey is the Noise responder; the desktop is the initiator. The protocol name
+is `Noise_XX_25519_ChaChaPoly_SHA256`:
+
+| Component | Algorithm |
+|-----------|-----------|
+| Key exchange | X25519 |
+| AEAD | ChaCha20-Poly1305 |
+| Hash | SHA-256 |
+| Pattern | XX (both static keys travel encrypted) |
 
 ```mermaid
 sequenceDiagram
@@ -42,32 +65,86 @@ sequenceDiagram
     Note over I,R: Handshake complete<br/>Responder: sendKey = k2, recvKey = k1<br/>Initiator: sendKey = k1, recvKey = k2
 ```
 
-### Static Key Storage
+### Static key storage
 
-Both sides persist their X25519 static key pair across sessions:
+The phone generates its X25519 static key pair once and keeps it in the
+`EncryptedSharedPreferences` file `xkey_noise_keys` (values AES-256-GCM,
+names AES-256-SIV, under an Android Keystore master key). The private and
+public keys are stored as base64 of the raw 32 bytes. `NoiseSession` also
+reads an older PKCS#8 / X.509 encoding and strips it to the raw key. The
+desktop keeps its own static key; go-xkms decides where.
 
-- **xKey (Android)**: Stored in `EncryptedSharedPreferences` (AES-256-GCM encrypted
-  by Android Keystore master key). Raw 32-byte format.
-- **Desktop**: Stored by go-xkms in the local keychain.
+### Transport encryption
 
-### Prologue Binding
+After message 3 every frame is ChaCha20-Poly1305 under the split keys. The
+responder sends with `k2` and receives with `k1`.
 
-The prologue is mixed into the handshake hash before any messages are exchanged.
-It must match on both sides for the handshake to succeed. xKey uses the prologue
-to bind the handshake to expected device fingerprints for trusted device pairing.
+Each direction has its own 64-bit counter starting at 0. The 96-bit nonce is
+four zero bytes followed by the counter in little-endian:
 
-### Noise Protocol
+```
+[4 bytes: 0x00000000] [8 bytes: little-endian counter]
+```
 
-| Component | Algorithm |
-|-----------|-----------|
-| Key exchange | X25519 (Curve25519) |
-| Symmetric cipher | ChaCha20-Poly1305 |
-| Hash | SHA-256 |
-| Pattern | Noise_XX |
+As in the Noise framework's DecryptWithAd, the receive counter moves only
+when a frame decrypts. A frame that fails authentication is dropped and the
+next genuine frame still decrypts. The counter value 2^64-1 is reserved: a
+session whose send or receive counter reaches it throws `NoiseException`
+instead of encrypting or decrypting.
 
-## Message Types
+## Pairing confirmation
 
-All application messages use a JSON-RPC style format:
+A completed handshake proves the desktop holds its static key. It does not
+make the desktop trusted. That is the job of `pairing.confirm`.
+
+```mermaid
+sequenceDiagram
+    participant D as Desktop
+    participant S as GattServer / StreamPairingSession
+    participant UI as Pairing dialog
+    participant PR as PairedDeviceRepository
+
+    D->>S: Identity message, then Noise_XX messages 1-3
+    alt Desktop already paired
+        Note over S: Session confirmed at once
+    else New desktop
+        D->>S: pairing.confirm {deviceName, publicKeyHex}
+        S->>S: publicKeyHex must equal the handshake's static key
+        S->>UI: onPairingConfirmationRequired(name, fingerprint, SAS)
+        UI-->>S: approve / deny
+        alt Approved
+            S->>PR: addDevice(publicKeyHex, deviceName)
+            S-->>D: {confirmed: true, deviceName: <phone model>}
+            Note over S: AuditLogger.logPairingApproved()
+        else Denied
+            S-->>D: error -32017 PAIRING_REJECTED
+            Note over S: AuditLogger.logPairingDenied(), then disconnect
+        end
+    end
+```
+
+The rules the code enforces:
+
+- The peer's identity comes from the Noise transcript, never from the
+  request. A `pairing.confirm` whose `publicKeyHex` differs from the
+  handshake's static key is refused with `-32017` and logged as
+  `public_key_mismatch`.
+- The dialog shows the short authentication string, the `NNNN-NNNN-NNNN`
+  code the desktop prints during `xkey device pair`
+  (`AttestTranscript.shortAuthString` over the session's channel binding).
+  The user approves only when the two codes match. With no session to derive
+  the code from, or no dialog to ask, pairing is refused.
+- Until the session is confirmed, every request is answered with `-32025`
+  `PAIRING_REQUIRED` ("send pairing.confirm first").
+- An approval that arrives after the session was revoked or replaced is
+  ignored and records nothing.
+
+Paired desktops are listed in `ui/PairedDevicesActivity.kt`; one desktop's
+details, including unpairing, are in `ui/DeviceDetailActivity.kt`.
+
+## Message format
+
+Requests and responses are JSON-RPC 2.0 style objects:
 
 ```json
 {
@@ -78,138 +155,82 @@ All application messages use a JSON-RPC style format:
 }
 ```
 
-`generation` is the initiator's uint64 request generation (go-xkms#128). The
-phone never computes or checks it; it copies it verbatim into the response.
+```json
+{ "id": 1, "generation": 7, "result": { ... } }
+```
 
-### Local Methods (handled by xKey)
+```json
+{ "id": 1, "generation": 7, "error": { "code": -32001, "message": "Key not found" } }
+```
 
-Messages prefixed with `local.*` are processed by the phone's `RequestHandler`.
+`generation` is the desktop's uint64 request generation. The phone copies it
+into the response and never interprets it; see
+[request-generation-echo](../request-generation-echo/architecture.md).
 
-| Method | Description | Key Parameters |
-|--------|-------------|----------------|
-| `local.generateKey` | Generate a key (Keystore, or software when `exportable`) | `keyId`, `keyType`, `algorithm`, `requireUserVerification`, `preferStrongBox`, `exportable` |
-| `local.sign` | Sign data with a key | `keyId`, `data` (base64), `algorithm` (optional override) |
-| `local.getPublicKey` | Get public key (DER/PEM/SSH) | `keyId`, `format` |
+### Methods
+
+`RequestHandler` holds the method table. The base, unprefixed methods are
+`ping`, `getInfo`, `generateKey`, `sign`, `loadKey`, `deleteKey` and
+`listKeys`. The `local.*` key methods are:
+
+| Method | Description | Main parameters |
+|--------|-------------|-----------------|
+| `local.generateKey` | Generate a key (Keystore, or software when `exportable`) | `keyId`, `algorithm`, `keyType` (derived from `algorithm` when absent), `requireUserVerification`, `preferStrongBox`, `shareable`, `exportable` |
+| `local.sign` | Sign data | `keyId`, `data` (base64), optional `algorithm` |
+| `local.getPublicKey` | Public key as DER, PEM or SSH | `keyId`, `format` |
+| `local.getKeyInfo` | Metadata for one key | `keyId` |
 | `local.deleteKey` | Delete a key | `keyId` |
-| `local.listKeys` | List all managed keys | (none) |
+| `local.listKeys` | List managed keys | none |
+| `local.setKeyPolicy` | Change a key's sharing policy; widening to all peers needs approval on the phone | `keyId`, `shareable` |
 | `local.symmetricEncrypt` | AES-GCM encrypt | `keyId`, `data`, `aad` |
 | `local.symmetricDecrypt` | AES-GCM decrypt | `keyId`, `data`, `aad` |
 | `local.ecdh` | ECDH key agreement | `keyId`, `peerPublicKey` |
-| `local.hmac` | HMAC computation | `keyId`, `data` |
+| `local.hmac` | HMAC | `keyId`, `data` |
 | `local.decrypt` | RSA-OAEP decrypt | `keyId`, `ciphertext` |
-| `local.getCapabilities` | Device capabilities | (none) |
+| `local.getCapabilities` | Device capabilities | none |
 | `local.attestKey` | Key attestation | `keyId`, `nonce` |
 | `local.attestDevice` | Device attestation | `nonce` |
+| `local.verifyUser` | Ask the user to verify on the phone | see [user-verification](../user-verification/) |
 
-`local.generateKey` returns `keyId`, `publicKeyDer` (omitted for symmetric and
-software keys), optional `publicKeyCose`, `algorithm`, `keySizeBits`, and a
-`securityLevel` of `software`, `strongbox`, or `tee`.
+`local.generateKey` returns `keyId`, `publicKeyDer` (omitted for symmetric
+and software keys), optional `publicKeyCose`, `algorithm`, `keySizeBits` and
+a `securityLevel` of `software`, `strongbox` or `tee`.
 
-> Note: This document covers the original BLE method set. The full, authoritative
-> wire contract — including the `local.*`/`remote.*` OATH, PIV, sync, backup, and
-> key-sharing families, transports (BLE / USB-AOA / TCP), and framing — is in
-> `go-xkms/xkey/pkg/pairing` and the platform contract doc
-> `automatethethings/software/docs/03-sdk-integration-contracts.md`.
+The table also routes the OATH, PIN, PIV, FIDO2, sync, backup, key-sharing,
+co-signing and device-enrollment families. Their own docs cover them. The
+four TCG TPM methods (`local.getTCGCSRIDevID`, `local.activateCredential`,
+`local.getAttestationQuote`, `local.getIAKPublicKey`) are answered with a
+plain refusal, because a phone has no TPM. An unknown method gets `-32601`.
 
-## Response Format
+### Error codes
 
-```json
-{
-    "id": 1,
-    "generation": 7,
-    "result": { ... }
-}
-```
+`ErrorCodes` in `protocol/Messages.kt` holds the codes. The JSON-RPC ones are
+`-32700` parse error, `-32600` invalid request, `-32601` method not found,
+`-32602` invalid params and `-32603` internal error. The xKey ones used most
+on this path:
 
-Error response:
+| Code | Name |
+|------|------|
+| -32001 | `KEY_NOT_FOUND` |
+| -32002 | `USER_CANCELLED` |
+| -32003 | `BIOMETRIC_FAILED` |
+| -32005 | `BIOMETRIC_LOCKOUT` |
+| -32006 | `KEY_GENERATION_FAILED` |
+| -32007 | `SIGNING_FAILED` |
+| -32011 | `STRONGBOX_UNAVAILABLE` |
+| -32017 | `PAIRING_REJECTED` |
+| -32025 | `PAIRING_REQUIRED` |
+| -32035 | `FEATURE_UNAVAILABLE` |
 
-```json
-{
-    "id": 1,
-    "generation": 7,
-    "error": {
-        "code": -32000,
-        "message": "Key not found"
-    }
-}
-```
+## Components
 
-Every response to a request, success or error, carries that request's
-`generation` beside `id`, written as the same JSON number digit for digit,
-including values above 2^63 − 1. A request without `generation` gets a
-response without it. A request that does not parse is answered with `id` 0
-and still echoes its `generation` when the top-level member can be read
-before the parse fails.
-
-## Pairing Flow
-
-```mermaid
-sequenceDiagram
-    participant D as Desktop Client
-    participant G as GattServer
-    participant NS as NoiseSession
-    participant UI as Pairing Dialog
-    participant PR as PairedDeviceRepository
-
-    D->>G: BLE scan and connect to xKey GATT service
-    D->>G: Write to handshake characteristic (Message 1)
-    G->>NS: processHandshakeMessage(msg1)
-    NS-->>G: msg2 (response)
-    G->>D: Notify handshake characteristic (Message 2)
-    D->>G: Write to handshake characteristic (Message 3)
-    G->>NS: processHandshakeMessage(msg3)
-    NS-->>G: null (handshake complete)
-
-    Note over G: Extract remote static public key
-
-    G->>PR: Check if device is already paired
-    alt Device already paired
-        G-->>D: Connection established (resume session)
-    else New device
-        G->>UI: onPairingConfirmationRequired(deviceName, fingerprint)
-        UI-->>G: User approves / denies
-
-        alt Approved
-            G->>PR: Store device (name, public key hex, trust level)
-            G-->>D: Connection established
-            Note over G: AuditLogger.logPairingApproved()
-        else Denied
-            G->>D: Disconnect
-            Note over G: AuditLogger.logPairingDenied()
-        end
-    end
-```
-
-## Transport Encryption
-
-After the Noise_XX handshake completes, all messages are encrypted with
-ChaCha20-Poly1305 using the derived transport keys:
-
-- **Responder (xKey)**: sends with `k2`, receives with `k1`
-- **Initiator (Desktop)**: sends with `k1`, receives with `k2`
-
-Each direction maintains an independent 64-bit nonce counter, starting at 0
-and incrementing with each message. As in the Noise framework's
-DecryptWithAd, the receive counter advances only when a frame decrypts: a
-frame that fails authentication is dropped and leaves the counter where it
-was, so the next genuine frame still decrypts. The counter value 2^64-1 is
-reserved: a session whose send or receive counter reaches it refuses to
-encrypt or decrypt with a `NoiseException`.
-The 96-bit ChaCha20 nonce is formed as:
-
-```
-[4 bytes: 0x00000000] [8 bytes: little-endian counter]
-```
-
-## Protocol Layer
-
-The protocol layer implements the communication stack between xKey and
-desktop clients.
-
-| Component | Responsibility |
-|-----------|---------------|
-| `RequestHandler` | Dispatches JSON-RPC requests to appropriate handlers |
-| `Messages` | Request/Response data classes with JSON serialization |
-| `NoiseSession` | Noise_XX_25519_ChaChaPoly_SHA256 encrypted channel |
-| `FragmentReassembler` | Splits and reassembles messages for BLE MTU limits |
-| `BidirectionalMessageRouter` | Routes `remote.*` requests to desktop, `local.*` to phone |
+| Component | File | Responsibility |
+|-----------|------|----------------|
+| `NoiseSession` | `ble/NoiseSession.kt` | Noise_XX handshake, static key storage, transport encryption |
+| `GattServer` | `ble/GattServer.kt` | BLE responder: identity exchange, handshake, `pairing.confirm` |
+| `StreamPairingSession` | `transport/StreamPairingSession.kt` | The same responder for USB and TCP |
+| `RequestHandler` | `protocol/Handler.kt` | Method table and error mapping |
+| `MethodNames`, `ErrorCodes` | `protocol/Messages.kt` | Method names, request and response types, error codes |
+| `FragmentReassembler` | `ble/FragmentReassembler.kt` | Splits and rebuilds messages for the BLE MTU |
+| `BidirectionalMessageRouter` | `remote/BidirectionalMessageRouter.kt` | Sends `remote.*` requests to the desktop and matches their responses |
+| `PairedDeviceRepository` | `settings/PairedDeviceRepository.kt` | Paired desktops and their fingerprints |

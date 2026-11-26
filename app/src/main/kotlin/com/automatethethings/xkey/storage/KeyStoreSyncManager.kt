@@ -17,6 +17,8 @@ package com.automatethethings.xkey.storage
 import android.util.Log
 import androidx.annotation.VisibleForTesting
 import com.automatethethings.xkey.crypto.FileEncryptor
+import com.automatethethings.xkey.crypto.KeyDeletionException
+import com.automatethethings.xkey.crypto.KeystoreAeadCipher
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.crypto.SoftwareKeyStore
 import com.automatethethings.xkey.piv.PIV_KEYSTORE_ALIAS_PREFIX
@@ -169,6 +171,7 @@ class KeyStoreSyncManager(
         for (alias in keyStore.aliases()) {
             if (alias.startsWith(PIV_KEYSTORE_ALIAS_PREFIX)) continue
             if (alias.startsWith(EPHEMERAL_ALIAS_PREFIX)) continue
+            if (KeystoreAeadCipher.isInternalAlias(alias)) continue
             val (keyId, isFido2, isCA) = when {
                 alias in CA_ALIASES -> {
                     Triple(alias, false, true)
@@ -200,30 +203,46 @@ class KeyStoreSyncManager(
     }
 
     /**
-     * Removes keys table entries for local keys whose Keystore entries no longer exist.
+     * Removes keys table entries for local keys whose key material no longer
+     * exists ([KeystoreManager.keyMaterialExists]).
      *
      * Only removes entries with local sources (not "xkmsd" remote references).
      * A PIV slot alias listed by an earlier sync is removed as well, because
      * [KeystoreManager.resolveKeystoreAlias] never resolves a raw PIV alias.
+     *
+     * A row goes only when its key is definitely absent: while the software
+     * key store cannot be read the key may still be in it, so the row stays
+     * (the key keeps listing and can be deleted later) and the failure is
+     * logged as an error.
      *
      * @return Number of stale entries removed.
      */
     private suspend fun removeStaleEntries(): Int {
         val localKeys = keyDao.getAll().filter { it.source != "xkmsd" }
         var removed = 0
+        var unknown = 0
 
         for (key in localKeys) {
             // Classify by the resolved alias, never the logical id: a general
             // key "xkey_piv_x" lives at xkey_key_xkey_piv_x and resolves, while
             // a raw PIV slot alias row never resolves and so is removed here.
-            if (keystoreManager.resolveKeystoreAlias(key.keyId) == null) {
+            // A software ML-DSA key has no Keystore alias; its record counts
+            // (keyMaterialAbsent resolves it through resolveKeystoreAlias).
+            val absent = try {
+                keystoreManager.keyMaterialAbsent(key.keyId)
+            } catch (e: KeyDeletionException) {
+                unknown++
+                Log.e(TAG, "Kept key entry ${key.keyId}: its key store could not be read", e)
+                false
+            }
+            if (absent) {
                 SharePermissionLedger.revoking(key.keyId) { keyDao.deleteByKeyId(key.keyId) }
                 removed++
                 Log.d(TAG, "Removed stale key entry: ${key.keyId}")
             }
         }
 
-        Log.d(TAG, "Removed $removed stale entries")
+        Log.d(TAG, "Removed $removed stale entries, kept $unknown whose key store could not be read")
         return removed
     }
 
@@ -365,7 +384,9 @@ class KeyStoreSyncManager(
  * [SharePermissionLedger] revoke of the row's key ID ([deleteKeyAndMaterial]).
  *
  * The row's ID names exactly one key, and only its material is removed: the
- * software key of that ID if [softwareKeys] holds one, else the Keystore
+ * software ML-DSA record of that ID if one is live
+ * ([KeystoreManager.pqcSoftwareKeyExists]), else the software key of that ID
+ * if [softwareKeys] holds one, else the Keystore
  * entry [KeyStoreSyncManager] discovers under that ID. Never
  * [KeystoreManager.resolveKeystoreAlias], which reads `xkey_key_a` as the
  * alias of hardware key `a`: software key `xkey_key_a` and hardware key `a`
@@ -379,7 +400,10 @@ suspend fun KeyDao.deleteKeyRow(
     softwareKeys: SoftwareKeyStore
 ): Int = deleteKeyAndMaterial(key.keyId) {
     if (key.source == "xkmsd") return@deleteKeyAndMaterial
-    if (softwareKeys.contains(key.keyId)) {
+    if (keystoreManager.pqcSoftwareKeyExists(key.keyId)) {
+        // A software ML-DSA key: its sealed record, which no Keystore alias holds.
+        keystoreManager.deleteGeneralKey(key.keyId)
+    } else if (softwareKeys.contains(key.keyId)) {
         softwareKeys.delete(key.keyId)
     } else {
         KeyStoreSyncManager.keystoreAliasesOf(key.keyId).firstOrNull { keystoreManager.deleteByAlias(it) }

@@ -154,21 +154,7 @@ class RequestHandlerAttestationParsingTest {
         assertIsFallback(parseExtension(certWith(mistyped)).first)
     }
 
-    // ------------------------------------------------------------------
-    // RootOfTrust
-    //
-    // This suite found the reader unreachable: `parseRootOfTrust` matched a
-    // context-specific constructed tag with `(tag and 0xC0) == 0xA0`, but
-    // masking with 0xC0 clears the constructed bit 0x20, so the expression
-    // yields one of 0x00/0x40/0x80/0xC0 and can never equal 0xA0. The mask is
-    // now 0xE0.
-    //
-    // The consequence was not cosmetic: `local.attestDevice` reports
-    // `bootState`, `deviceLocked`, `verifiedBootKey` and `verifiedBootHash` to
-    // the desktop, and with the reader unreachable they were always the
-    // hardcoded defaults — in particular `deviceLocked = true`, so an unlocked
-    // bootloader attested as locked. These tests are the regression guard.
-    // ------------------------------------------------------------------
+    // RootOfTrust: parseRootOfTrust masks context tags with 0xE0, so bootState, deviceLocked and the boot measurements are read, not defaulted.
 
     /**
      * A well-formed RootOfTrust — locked device, green boot state, both boot key

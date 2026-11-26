@@ -46,6 +46,7 @@ import com.automatethethings.xkey.storage.XKeyDatabase
 import kotlinx.coroutines.runBlocking
 import org.hamcrest.Matchers.allOf
 import org.json.JSONArray
+import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -73,9 +74,12 @@ import java.io.File
  * - export honouring the active chip filters (the export re-queries the DAO
  *   rather than reusing the on-screen list)
  * - `clearAllFilters` resetting chips, search text and the hero summary together
- * - both destructive confirmations, driven to their CANCEL branch only -- their
- *   positive branches delete rows this test does not own, so they are asserted
- *   as *not* having run
+ * - both destructive confirmations: cancelled at the dialog; confirmed with the
+ *   authentication step refused (nothing deleted); and confirmed and
+ *   authenticated (rows deleted, exactly one AUDIT_LOG_CLEARED/_PRUNED entry
+ *   written). The authentication step is swapped through
+ *   `AuditLogActivity.deleteConfirmation`; the approved clear-all empties the
+ *   device's table by design
  * - the `android.R.id.home` branch of `onOptionsItemSelected`
  *
  * Menu items are invoked through [Menu.performIdentifierAction] on the toolbar's
@@ -114,6 +118,15 @@ class AuditLogMenuTest {
     private val quotedDeviceName = "$token-quoted-devicename"
     private val quotedError = "$token-boom"
 
+    /** A row old enough for "Delete Older Than 30 Days". */
+    private val oldKeyId = "$token-old"
+
+    /** Wall time before anything this run seeds or records. */
+    private val testStart = System.currentTimeMillis()
+
+    /** The activity's authentication step as it was before this test swapped it. */
+    private val originalConfirmation = AuditLogActivity.deleteConfirmation
+
     private lateinit var context: Context
     private lateinit var auditLogDao: AuditLogDao
     private lateinit var scenario: ActivityScenario<AuditLogActivity>
@@ -141,6 +154,7 @@ class AuditLogMenuTest {
 
     @After
     fun tearDown() {
+        AuditLogActivity.deleteConfirmation = originalConfirmation
         Intents.release()
         scenario.close()
         exportFiles()
@@ -255,9 +269,9 @@ class AuditLogMenuTest {
         val lines = file.readLines()
 
         assertEquals(
-            "CSV export should lead with the documented header row",
-            "ID,Timestamp,Operation,Key ID,Key Label,Key Type,Device ID,Device Name," +
-                "Success,Error,Details,Duration (ms)",
+            "CSV export should lead with the documented header row, every name quoted",
+            "\"ID\",\"Timestamp\",\"Operation\",\"Key ID\",\"Key Label\",\"Key Type\"," +
+                "\"Device ID\",\"Device Name\",\"Success\",\"Error\",\"Details\",\"Duration (ms)\"",
             lines.first()
         )
 
@@ -270,7 +284,14 @@ class AuditLogMenuTest {
         assertTrue(row.contains(AuditOperationType.HMAC_REQUEST.name))
         assertTrue(row.contains(quotedDeviceName))
         assertTrue(row.contains(quotedError))
-        assertTrue(row.endsWith(DURATION_MS.toString()))
+        assertTrue(
+            "Numeric columns are quoted like any other, was: $row",
+            row.startsWith(QUOTE) && row.endsWith("$QUOTE$DURATION_MS$QUOTE")
+        )
+        assertTrue(
+            "The key id column is quoted too, was: $row",
+            row.contains(",$QUOTE$quotedKeyId$QUOTE,")
+        )
 
         Intents.intended(
             allOf(hasAction(Intent.ACTION_CHOOSER), hasExtraWithKey(Intent.EXTRA_INTENT))
@@ -394,6 +415,113 @@ class AuditLogMenuTest {
             before,
             runBlocking { auditLogDao.getCount() }
         )
+    }
+
+    // ---------------------------------------------------------------
+    // Destructive actions -- confirmed, behind the authentication step
+    // ---------------------------------------------------------------
+
+    /**
+     * "Clear All Logs", confirmed and authenticated, empties the table and then
+     * records itself: exactly one AUDIT_LOG_CLEARED entry naming the count.
+     *
+     * This wipes every row on the device by design; the audit trail it leaves
+     * is the behaviour under test.
+     */
+    @Test
+    fun clearAllLogs_approved_deletesEveryRowAndRecordsOneEntry() {
+        val prompts = useConfirmation(approve = true)
+
+        selectMenuItem(R.id.menu_clear_all_logs)
+        onView(withId(android.R.id.button1)).inRoot(isDialog()).perform(click())
+
+        awaitCondition("The clear-all should record one AUDIT_LOG_CLEARED entry") {
+            entriesOf(AuditOperationType.AUDIT_LOG_CLEARED).isNotEmpty()
+        }
+        assertEquals("The authentication step should run once", 1, prompts.size)
+        assertTrue(
+            "The seeded rows should be gone",
+            runBlocking { auditLogDao.getByKeyId(quotedKeyId) }.isEmpty()
+        )
+        val cleared = entriesOf(AuditOperationType.AUDIT_LOG_CLEARED)
+        assertEquals("Exactly one clear-all entry should be written", 1, cleared.size)
+        assertTrue(
+            "The entry should count at least the three seeded rows",
+            JSONObject(cleared.single().details!!).getInt("deleted") >= 3
+        )
+        assertTrue(cleared.single().success)
+        assertEquals(
+            "Nothing but the clear-all entry should be left from before",
+            emptyList<AuditLogEntity>(),
+            runBlocking { auditLogDao.getAll() }.filter {
+                it.operationType != AuditOperationType.AUDIT_LOG_CLEARED &&
+                    it.timestamp < testStart
+            }
+        )
+    }
+
+    /** A refused or cancelled authentication deletes nothing and records nothing. */
+    @Test
+    fun clearAllLogs_denied_deletesNothing() {
+        val prompts = useConfirmation(approve = false)
+        val before = runBlocking { auditLogDao.getCount() }
+        val clearedBefore = entriesOf(AuditOperationType.AUDIT_LOG_CLEARED).size
+
+        selectMenuItem(R.id.menu_clear_all_logs)
+        onView(withId(android.R.id.button1)).inRoot(isDialog()).perform(click())
+        awaitCondition("The authentication step should run") { prompts.isNotEmpty() }
+        waitForIdle()
+
+        assertEquals(before, runBlocking { auditLogDao.getCount() })
+        assertTrue(runBlocking { auditLogDao.getByKeyId(quotedKeyId) }.isNotEmpty())
+        assertEquals(clearedBefore, entriesOf(AuditOperationType.AUDIT_LOG_CLEARED).size)
+        assertTextNotInTree(scenario, context.getString(R.string.audit_logs_cleared))
+    }
+
+    /**
+     * "Delete Older Than 30 Days", confirmed and authenticated, removes the old
+     * row only and records exactly one AUDIT_LOG_PRUNED entry with the count.
+     */
+    @Test
+    fun deleteOlderLogs_approved_prunesOldRowsAndRecordsOneEntry() {
+        seedOldRow()
+        val prompts = useConfirmation(approve = true)
+
+        selectMenuItem(R.id.menu_delete_older)
+        onView(withId(android.R.id.button1)).inRoot(isDialog()).perform(click())
+
+        awaitCondition("The prune should record an AUDIT_LOG_PRUNED entry") {
+            prunedSinceStart().isNotEmpty()
+        }
+        assertEquals(1, prompts.size)
+        assertTrue(
+            "The row older than 30 days should be gone",
+            runBlocking { auditLogDao.getByKeyId(oldKeyId) }.isEmpty()
+        )
+        assertTrue(
+            "Recent rows should stay",
+            runBlocking { auditLogDao.getByKeyId(quotedKeyId) }.isNotEmpty()
+        )
+        val pruned = prunedSinceStart()
+        assertEquals("Exactly one prune entry should be written", 1, pruned.size)
+        assertTrue(JSONObject(pruned.single().details!!).getInt("deleted") >= 1)
+    }
+
+    /** A refused or cancelled authentication prunes nothing and records nothing. */
+    @Test
+    fun deleteOlderLogs_denied_deletesNothing() {
+        seedOldRow()
+        val prompts = useConfirmation(approve = false)
+        val before = runBlocking { auditLogDao.getCount() }
+
+        selectMenuItem(R.id.menu_delete_older)
+        onView(withId(android.R.id.button1)).inRoot(isDialog()).perform(click())
+        awaitCondition("The authentication step should run") { prompts.isNotEmpty() }
+        waitForIdle()
+
+        assertEquals(before, runBlocking { auditLogDao.getCount() })
+        assertTrue(runBlocking { auditLogDao.getByKeyId(oldKeyId) }.isNotEmpty())
+        assertTrue(prunedSinceStart().isEmpty())
     }
 
     // ---------------------------------------------------------------
@@ -602,6 +730,46 @@ class AuditLogMenuTest {
             )
         }
     }
+
+    /** Inserts a row 31 days old, recorded for teardown. */
+    private fun seedOldRow() {
+        seededKeyIds.add(oldKeyId)
+        runBlocking {
+            auditLogDao.insert(
+                AuditLogEntity(
+                    timestamp = System.currentTimeMillis() - 31L * 24 * 60 * 60 * 1000,
+                    operationType = AuditOperationType.KEY_USED,
+                    keyId = oldKeyId,
+                    keyLabel = oldKeyId
+                )
+            )
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Helpers: the authentication step
+    // ---------------------------------------------------------------
+
+    /**
+     * Replaces the biometric/device-credential step with one that answers
+     * [approve]; returns the titles it was asked with, one per prompt.
+     */
+    private fun useConfirmation(approve: Boolean): List<String> {
+        val prompts = java.util.Collections.synchronizedList(mutableListOf<String>())
+        AuditLogActivity.deleteConfirmation = object : AuditLogActivity.DeleteConfirmation {
+            override suspend fun confirm(activity: AuditLogActivity, title: String): Boolean {
+                prompts.add(title)
+                return approve
+            }
+        }
+        return prompts
+    }
+
+    private fun entriesOf(type: AuditOperationType): List<AuditLogEntity> =
+        runBlocking { auditLogDao.getByOperationType(type) }
+
+    private fun prunedSinceStart(): List<AuditLogEntity> =
+        entriesOf(AuditOperationType.AUDIT_LOG_PRUNED).filter { it.timestamp >= testStart }
 
     private companion object {
 
