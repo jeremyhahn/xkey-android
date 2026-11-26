@@ -473,8 +473,8 @@ class GattServerEnrollmentTest {
      * [deviceName].
      *
      * The server refuses a send that no subscribed peer receives, so the
-     * server is started, [device] is connected through the callback and
-     * writes the CCCD enable, and the open handle is replaced by an
+     * server is started, [device] is connected through the callback,
+     * negotiates [PEER_MTU] and writes the CCCD enable, and the open handle is replaced by an
      * [AcceptingServerHandle]: [device] never really connected, so the stack
      * would refuse its notifications, and a refused frame abandons the
      * session. The connect adopts [device] on a fresh link, so the session
@@ -499,6 +499,15 @@ class GattServerEnrollmentTest {
         ) {
             if (System.currentTimeMillis() > deadline) {
                 throw AssertionError("the device was never adopted")
+            }
+            Thread.sleep(POLL_MS)
+        }
+        // The default MTU leaves no room for a fragment, so negotiate one the
+        // way a desktop does; the change is queued behind the connect.
+        probe.gattCallback.onMtuChanged(device, PEER_MTU)
+        while (probe.deviceMtu[device.address] != PEER_MTU) {
+            if (System.currentTimeMillis() > deadline) {
+                throw AssertionError("the MTU never became $PEER_MTU")
             }
             Thread.sleep(POLL_MS)
         }
@@ -617,6 +626,9 @@ class GattServerEnrollmentTest {
 
         private const val REPLY_TIMEOUT_MS = 20_000L
         private const val POLL_MS = 20L
+
+        /** The MTU the subscribed peer negotiates, as a desktop does. */
+        private const val PEER_MTU = 517
 
         private val ROOT_SUBJECT = CASubject(
             cn = "xKey Enrollment Test Root CA",
