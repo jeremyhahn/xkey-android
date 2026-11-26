@@ -231,4 +231,33 @@ class KeystoreManagerEd25519Test {
         assertEquals("Ed25519", KeystoreManager.jcaSignatureAlgorithm("EdDSA"))
         assertEquals("Ed25519", KeystoreManager.jcaSignatureAlgorithm("Ed25519"))
     }
+
+    /**
+     * PR #400 review 2 (P1): a Keystore Ed25519 private key names its
+     * algorithm "EdDSA", for which AndroidKeyStore has no KeyFactory; its
+     * KeyInfo is read through the EC factory, as PivKeyManager reads it. A
+     * failed read would make generation drop the key and the sign skip its
+     * CryptoObject.
+     */
+    @Test
+    fun `a Keystore Ed25519 key's KeyInfo is read through the EC KeyFactory`() {
+        val alias = "xkey_key_ed"
+        val key = mockk<java.security.PrivateKey>(relaxed = true)
+        every { key.algorithm } returns "EdDSA"
+        every { keyStore.containsAlias(alias) } returns true
+        every { keyStore.getKey(alias, null) } returns key
+        val info = mockk<android.security.keystore.KeyInfo>(relaxed = true)
+        every { info.isUserAuthenticationRequired } returns true
+        every { info.userAuthenticationValidityDurationSeconds } returns 0
+        every { info.isInsideSecureHardware } returns true
+        val ecFactory = mockk<KeyFactory>(relaxed = true)
+        every { ecFactory.getKeySpec(key, android.security.keystore.KeyInfo::class.java) } returns info
+        mockkStatic(KeyFactory::class)
+        every { KeyFactory.getInstance("EdDSA", "AndroidKeyStore") } throws java.security.NoSuchAlgorithmException("EdDSA")
+        every { KeyFactory.getInstance(KeyProperties.KEY_ALGORITHM_EC, "AndroidKeyStore") } returns ecFactory
+        val manager = manager(34)
+
+        assertTrue("an Ed25519 key's KeyInfo is unread", manager.isPerOperationKey(alias))
+        org.junit.Assert.assertNotNull(manager.generalKeySecurityLevel("ed"))
+    }
 }
