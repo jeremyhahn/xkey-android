@@ -15,6 +15,7 @@
 
 package com.automatethethings.xkey.transport
 
+import com.automatethethings.xkey.ble.NoiseTestKeyStore
 import android.app.KeyguardManager
 import android.app.NotificationManager
 import android.bluetooth.BluetoothDevice
@@ -136,6 +137,7 @@ class VerifyUserPerConnectionTest {
 
     @Before
     fun setUp() {
+        NoiseTestKeyStore.install()
         mockkStatic(Log::class)
         every { Log.v(any(), any<String>()) } returns 0
         every { Log.d(any(), any<String>()) } returns 0
@@ -362,7 +364,7 @@ class VerifyUserPerConnectionTest {
     /**
      * Sends [frames] pings on [desktop] and, if [thenClose], ends its stream.
      *
-     * The frame past [FRAME_BUFFER] ends the connection (#69): the phone
+     * The frame past [FRAME_BUFFER] ends the connection: the phone
      * closes its socket with the later frames unread, which resets the
      * connection, so a send or the close after that frame may fail. That is
      * the overflow at work, and the desktop stops there. A failure before

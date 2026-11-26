@@ -106,6 +106,7 @@ class HmacEcdhAuditTest {
         mockkStatic(Looper::class)
         every { Looper.getMainLooper() } returns mockk(relaxed = true)
 
+
         // Stored key types: ECDH runs on an EC key stored as signing, and the
         // Keystore HMAC key is stored as "secret"; neither matches the
         // operation, so a hardcoded keyType shows up as a mismatch.
@@ -120,6 +121,11 @@ class HmacEcdhAuditTest {
             KeyEntity(keyId = "hw-hmac", keyType = "secret", algorithm = "HMAC-SHA512", label = "hmac", keySizeBits = 256, source = "local")
         val database = mockk<XKeyDatabase>(relaxed = true)
         every { database.keyDao() } returns keyDao
+        // No key here is deleted or carries a stored policy (#193 store).
+        every { database.keyPolicyDao() } returns mockk<com.automatethethings.xkey.storage.dao.KeyPolicyDao>(relaxed = true) {
+            coEvery { deletion(any()) } returns null
+            coEvery { policyRow(any()) } returns null
+        }
         mockkObject(XKeyDatabase.Companion)
         every { XKeyDatabase.getInstance(any()) } returns database
 
@@ -144,25 +150,30 @@ class HmacEcdhAuditTest {
         every { KeyStore.getInstance("AndroidKeyStore") } returns mockk(relaxed = true)
         mockkConstructor(SoftwareKeyStore::class)
         every { anyConstructed<SoftwareKeyStore>().get(any()) } returns null
-        every { anyConstructed<SoftwareKeyStore>().get("sw-hmac") } returns SoftwareKey(
-            keyId = "sw-hmac",
-            algorithm = "HMAC-SHA256",
-            keyType = "symmetric",
-            keySize = 256,
-            exportable = true,
-            shareable = true,
-            material = swMaterial
-        )
-        // Unvalidated stored name: SoftwareKeyOps runs SHA-256 for it.
-        every { anyConstructed<SoftwareKeyStore>().get("sw-odd") } returns SoftwareKey(
-            keyId = "sw-odd",
-            algorithm = "HMAC-SHA384",
-            keyType = "symmetric",
-            keySize = 256,
-            exportable = true,
-            shareable = true,
-            material = swMaterial
-        )
+        every { anyConstructed<SoftwareKeyStore>().get("sw-hmac") } answers {
+            // A fresh copy per call, as SoftwareKeyStore decrypts one each time.
+            SoftwareKey(
+                keyId = "sw-hmac",
+                algorithm = "HMAC-SHA256",
+                keyType = "symmetric",
+                keySize = 256,
+                exportable = true,
+                shareable = true,
+                material = swMaterial.copyOf()
+            )
+        }
+        // A stored alias: SoftwareKeyOps runs HMAC-SHA256 for it.
+        every { anyConstructed<SoftwareKeyStore>().get("sw-odd") } answers {
+            SoftwareKey(
+                keyId = "sw-odd",
+                algorithm = "HS256",
+                keyType = "symmetric",
+                keySize = 256,
+                exportable = true,
+                shareable = true,
+                material = swMaterial.copyOf()
+            )
+        }
 
         val context = mockk<Context>(relaxed = true)
         every { context.filesDir } returns tmp.root
@@ -179,6 +190,10 @@ class HmacEcdhAuditTest {
         every { pairedDevices.lookupDevice(PEER_B) } returns DeviceLookup.Paired(device("Desktop B"))
 
         keystore = mockk(relaxed = true)
+        // Each key here is a general key: the use gate resolves the id's key
+        // from its row and material (#270 verify r4).
+        every { keystore.exportKind(any()) } returns com.automatethethings.xkey.crypto.UserKeyKind.GENERAL
+        every { keystore.rowKeyKind(any(), any(), any(), any()) } returns com.automatethethings.xkey.crypto.UserKeyKind.GENERAL
         coEvery { keystore.computeHMAC("hw-hmac", any()) } returns keystoreMac
         coEvery { keystore.computeHMACWithAlgorithm("hw-hmac", any()) } returns
             HmacResult(keystoreMac, "HMAC-SHA256")
@@ -433,7 +448,12 @@ class HmacEcdhAuditTest {
         entry.details?.let { JSONObject(it).optString("algorithm", "").ifEmpty { null } }
 
     private suspend fun <T> servedBy(peer: String, block: suspend () -> T): T =
-        withContext(RequestHandler.servedConnection(binding, peer, "test:connection")) { block() }
+        withContext(RequestHandler.servedConnection(binding, peer, "served:$peer") + Served()) { block() }
+
+    /** Marks a coroutine that runs inside [servedBy], so [call] keeps its peer. */
+    private class Served : kotlin.coroutines.AbstractCoroutineContextElement(Key) {
+        companion object Key : kotlin.coroutines.CoroutineContext.Key<Served>
+    }
 
     private fun device(name: String): PairedDeviceData = mockk(relaxed = true) {
         every { deviceName } returns name
@@ -462,7 +482,12 @@ class HmacEcdhAuditTest {
         }
     }
 
-    private suspend fun call(method: String, params: String): JSONObject {
+    /** Sends [method] from the paired [PEER_A] unless a [servedBy] block names another peer. */
+    private suspend fun call(method: String, params: String): JSONObject =
+        if (kotlinx.coroutines.currentCoroutineContext()[Served] != null) rawCall(method, params)
+        else servedBy(PEER_A) { rawCall(method, params) }
+
+    private suspend fun rawCall(method: String, params: String): JSONObject {
         val request = """{"id":1,"method":"$method","params":$params}"""
         return JSONObject(String(handler.handleRawRequest(request.toByteArray(Charsets.UTF_8)), Charsets.UTF_8))
     }

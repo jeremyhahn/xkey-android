@@ -179,9 +179,7 @@ class UsbAccessoryServer(
             val fd = usbManager.openAccessory(accessory)
             when {
                 this.accessory !== accessory -> {
-                    // Detached on this thread during the open, which has
-                    // already told the owner: the descriptor is for a gone
-                    // accessory.
+                    // Detached during the open: the descriptor is for a gone accessory.
                     Log.w(TAG, "USB accessory detached while opening")
                     closeQuietly(fd)
                     return
@@ -214,10 +212,7 @@ class UsbAccessoryServer(
     internal fun open(context: Context, fd: ParcelFileDescriptor, accessoryInfo: String) {
         synchronized(lock) {
             fileDescriptor = fd
-            // Each connection is its own session, so a PER_SESSION
-            // approval given before a detach does not carry over to
-            // the next attach (#134). The id rides with every request
-            // on this connection; nothing handler-wide is set.
+            // Each connection is its own session: a PER_SESSION approval does not carry across a reattach.
             val connectionId = "usb:${UUID.randomUUID()}"
             lastConnectionId = connectionId
             inputStream = FileInputStream(fd.fileDescriptor)
@@ -341,12 +336,13 @@ class UsbAccessoryServer(
     }
 
     /**
-     * Answers one decrypted request [plaintext] exactly as the USB message loop
-     * does, or returns null for a message that needs no answer. The wire-contract
-     * tests use it to reach the USB dispatch without a Noise session.
+     * Test seam: answers one decrypted request [plaintext] as the USB message
+     * loop does for a paired desktop, or returns null for a message that needs
+     * no answer. The wire-contract tests use it to reach the USB dispatch
+     * without a Noise session; the pairing gate is tested on its own.
      */
     internal suspend fun handlePlaintext(plaintext: ByteArray): ByteArray? =
-        pairingSession.interceptOrRoute(plaintext)
+        pairingSession.routeConfirmedForTest(plaintext)
 
     /**
      * The desktop on this accessory for outbound `remote.*` clients, or null

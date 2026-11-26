@@ -17,13 +17,12 @@ package com.automatethethings.xkey.storage
 import android.util.Log
 import androidx.annotation.VisibleForTesting
 import com.automatethethings.xkey.crypto.FileEncryptor
+import com.automatethethings.xkey.crypto.KeystoreAeadCipher
 import com.automatethethings.xkey.crypto.KeystoreManager
-import com.automatethethings.xkey.crypto.SoftwareKeyStore
 import com.automatethethings.xkey.piv.PIV_KEYSTORE_ALIAS_PREFIX
 import com.automatethethings.xkey.remote.SharePermissionLedger
 import com.automatethethings.xkey.storage.dao.CredentialMetadataDao
 import com.automatethethings.xkey.storage.dao.KeyDao
-import com.automatethethings.xkey.storage.dao.deleteKeyAndMaterial
 import com.automatethethings.xkey.storage.entity.CredentialMetadataEntity
 import com.automatethethings.xkey.storage.entity.KeyEntity
 import java.security.KeyStore
@@ -49,11 +48,15 @@ import javax.crypto.SecretKey
  * @param keystoreManager Manager for Android Keystore operations.
  * @param credentialDao DAO for the credential_metadata table.
  * @param keyDao DAO for the unified keys table.
+ * @param keyPolicyStore The store whose deletion tombstones the sync
+ *   honours ([KeyPolicyStore.insertDiscovered]): material whose delete is
+ *   still owed is not discovered.
  */
 class KeyStoreSyncManager(
     private val keystoreManager: KeystoreManager,
     private val credentialDao: CredentialMetadataDao,
-    private val keyDao: KeyDao
+    private val keyDao: KeyDao,
+    private val keyPolicyStore: KeyPolicyStore
 ) {
     companion object {
         private const val TAG = "KeyStoreSyncManager"
@@ -89,6 +92,24 @@ class KeyStoreSyncManager(
             "_androidx_",       // AndroidX Security Crypto (master key for EncryptedSharedPreferences)
             "AndroidKeyStore",  // Android platform internal keys
         )
+
+        /**
+         * Whether the Keystore entry [alias] is protected from a user delete:
+         * every alias but a user key's (KeystoreManager.userKeyAliases), so
+         * the app's own keys (xkey_seal_store_key,
+         * xkey_password_encryption_key, the CA keys) and framework keys are
+         * listed as system keys. A delete of one is refused
+         * ([InternalKeyException]) with nothing deleted (#255 review).
+         */
+        fun isProtectedAlias(alias: String): Boolean {
+            val userKey = when {
+                alias.startsWith(KEY_ALIAS_PREFIX) -> alias.removePrefix(KEY_ALIAS_PREFIX)
+                alias.startsWith(KEY_ALIAS_PREFIX_GENERAL) -> alias.removePrefix(KEY_ALIAS_PREFIX_GENERAL)
+                else -> return true
+            }
+            return alias !in com.automatethethings.xkey.crypto.KeystoreManager.userKeyAliases(userKey) ||
+                SYSTEM_KEY_PREFIXES.any { alias.startsWith(it) }
+        }
     }
 
     /**
@@ -135,13 +156,16 @@ class KeyStoreSyncManager(
         for (cred in credentials) {
             if (keyDao.exists(cred.credentialId)) continue
 
-            if (keystoreManager.resolveKeystoreAlias(cred.credentialId) == null) {
+            if (!keystoreManager.holdsAnyKey(cred.credentialId)) {
                 skipped++
                 Log.d(TAG, "Skipped credential with no Keystore key: ${cred.credentialId}")
                 continue
             }
 
-            keyDao.insert(mapCredentialToKeyEntity(cred))
+            if (!track(mapCredentialToKeyEntity(cred))) {
+                skipped++
+                continue
+            }
             synced++
             Log.d(TAG, "Synced credential to keys: ${cred.credentialId} (${cred.rpId})")
         }
@@ -150,6 +174,18 @@ class KeyStoreSyncManager(
                 "$skipped skipped with no Keystore key")
         return synced
     }
+
+    /**
+     * The sync's one key row insert (#193 r9, r10, r11): a key id whose row
+     * was deleted while its material delete is still owed (a tombstone) is
+     * never listed again, from a credential or from the Keystore, with
+     * default metadata; the replay deletes its material. The tombstone
+     * check and the insert are one step under the key's material lock
+     * ([KeyPolicyStore.insertDiscovered]), so a delete running meanwhile
+     * is never undone. Returns whether [entity] was inserted.
+     */
+    private suspend fun track(entity: KeyEntity): Boolean =
+        keyPolicyStore.insertDiscovered(entity.keyId) { keyDao.insert(entity) }
 
     /**
      * Discovers keys in Android Keystore that are not tracked in the keys table.
@@ -169,6 +205,8 @@ class KeyStoreSyncManager(
         for (alias in keyStore.aliases()) {
             if (alias.startsWith(PIV_KEYSTORE_ALIAS_PREFIX)) continue
             if (alias.startsWith(EPHEMERAL_ALIAS_PREFIX)) continue
+            // An internal wrap key is never listed as a key; a row an earlier sync listed is still marked protected.
+            val internal = KeystoreAeadCipher.isInternalAlias(alias)
             val (keyId, isFido2, isCA) = when {
                 alias in CA_ALIASES -> {
                     Triple(alias, false, true)
@@ -185,12 +223,27 @@ class KeyStoreSyncManager(
                 }
             }
 
+            // A raw alias (an internal key's, a CA's or a foreign one) shares
+            // its key ID with a user key named like it: `xkey_key_<alias>` is
+            // key `<alias>` too. The row is the user key's when the Keystore
+            // holds that user alias, so the raw alias neither creates the row
+            // nor marks it protected; the internal entry itself stays
+            // protected by its alias (isProtectedAlias), never by the row.
+            // The user key may hold its material in any backend, so its
+            // owners are read from every one, not the Keystore alone.
+            if (keyId == alias && ownedByUserKey(keyId)) continue
+
             if (!keyDao.exists(keyId)) {
+                if (internal) continue
                 val entity = buildKeyEntityFromKeystore(keyStore, alias, keyId, isFido2, isCA)
-                if (entity != null) {
-                    keyDao.insert(entity)
+                if (entity != null && track(entity)) {
                     discovered++
                     Log.d(TAG, "Discovered key in keystore: $keyId (alias=$alias)")
+                }
+            } else if (isProtectedAlias(alias)) {
+                // A row an earlier sync listed as a deletable user key.
+                keyDao.getByKeyId(keyId)?.takeIf { !it.isSystemKey }?.let {
+                    keyDao.update(it.copy(isSystemKey = true))
                 }
             }
         }
@@ -200,30 +253,62 @@ class KeyStoreSyncManager(
     }
 
     /**
-     * Removes keys table entries for local keys whose Keystore entries no longer exist.
+     * Whether a user key (credential or general) owns key ID [keyId], read
+     * from its material in every backend ([KeystoreManager.userKeyOwners]):
+     * the Keystore, the Ed25519 preferences and the software key store
+     * (#270 verify). A backend that cannot be read leaves the row as it is
+     * (true): it is neither created nor flipped to a system key on a read
+     * failure, and the internal alias stays protected by its alias.
+     */
+    private fun ownedByUserKey(keyId: String): Boolean =
+        try {
+            keystoreManager.userKeyOwners(keyId).isNotEmpty()
+        } catch (e: Exception) {
+            Log.w(TAG, "Owners of $keyId could not be read; its row is left as it is", e)
+            true
+        }
+
+    /**
+     * Removes keys table entries for local keys whose key material no longer
+     * exists in any backend ([KeystoreManager.holdsAnyKey]).
      *
      * Only removes entries with local sources (not "xkmsd" remote references).
      * A PIV slot alias listed by an earlier sync is removed as well, because
-     * [KeystoreManager.resolveKeystoreAlias] never resolves a raw PIV alias.
+     * [KeystoreManager.holdsAnyKey] never finds a raw PIV alias.
+     *
+     * A row goes only when its key is definitely absent: while the software
+     * key store cannot be read the key may still be in it, so the row stays
+     * (the key keeps listing and can be deleted later) and the failure is
+     * logged as an error.
      *
      * @return Number of stale entries removed.
      */
     private suspend fun removeStaleEntries(): Int {
         val localKeys = keyDao.getAll().filter { it.source != "xkmsd" }
         var removed = 0
+        var unknown = 0
 
         for (key in localKeys) {
             // Classify by the resolved alias, never the logical id: a general
             // key "xkey_piv_x" lives at xkey_key_xkey_piv_x and resolves, while
             // a raw PIV slot alias row never resolves and so is removed here.
-            if (keystoreManager.resolveKeystoreAlias(key.keyId) == null) {
+            // A software ML-DSA key has no Keystore alias; its record counts.
+            // A backend that cannot be read keeps the row: the key may still be there.
+            val absent = try {
+                !keystoreManager.holdsAnyKey(key.keyId)
+            } catch (e: com.automatethethings.xkey.crypto.KeyPresenceUnreadableException) {
+                unknown++
+                Log.e(TAG, "Kept key entry ${key.keyId}: its key store could not be read", e)
+                false
+            }
+            if (absent) {
                 SharePermissionLedger.revoking(key.keyId) { keyDao.deleteByKeyId(key.keyId) }
                 removed++
                 Log.d(TAG, "Removed stale key entry: ${key.keyId}")
             }
         }
 
-        Log.d(TAG, "Removed $removed stale entries")
+        Log.d(TAG, "Removed $removed stale entries, kept $unknown whose key store could not be read")
         return removed
     }
 
@@ -292,10 +377,7 @@ class KeyStoreSyncManager(
                 else -> "signing"
             }
 
-            // Detect system/framework keys by alias pattern
-            val isSystemKey = isCA || SYSTEM_KEY_PREFIXES.any { prefix ->
-                alias.startsWith(prefix)
-            }
+            val isSystemKey = isCA || isProtectedAlias(alias)
 
             // Generate a user-friendly label
             val label = when {
@@ -356,32 +438,5 @@ class KeyStoreSyncManager(
             isDiscoverable = cred.isDiscoverable,
             signCount = cred.signCount
         )
-    }
-}
-
-/**
- * Deletes the key behind one key row [key], as the key list and the key
- * detail screen do: its material, then its row, inside one
- * [SharePermissionLedger] revoke of the row's key ID ([deleteKeyAndMaterial]).
- *
- * The row's ID names exactly one key, and only its material is removed: the
- * software key of that ID if [softwareKeys] holds one, else the Keystore
- * entry [KeyStoreSyncManager] discovers under that ID. Never
- * [KeystoreManager.resolveKeystoreAlias], which reads `xkey_key_a` as the
- * alias of hardware key `a`: software key `xkey_key_a` and hardware key `a`
- * can both exist, and deleting the first must leave the second.
- *
- * @return Number of rows deleted.
- */
-suspend fun KeyDao.deleteKeyRow(
-    key: KeyEntity,
-    keystoreManager: KeystoreManager,
-    softwareKeys: SoftwareKeyStore
-): Int = deleteKeyAndMaterial(key.keyId) {
-    if (key.source == "xkmsd") return@deleteKeyAndMaterial
-    if (softwareKeys.contains(key.keyId)) {
-        softwareKeys.delete(key.keyId)
-    } else {
-        KeyStoreSyncManager.keystoreAliasesOf(key.keyId).firstOrNull { keystoreManager.deleteByAlias(it) }
     }
 }

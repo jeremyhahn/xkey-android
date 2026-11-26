@@ -24,7 +24,7 @@ import java.io.IOException
 
 /*
  * A transport sends only through the SessionSender bound to its current
- * connection (ruling 554, #141). These capture that sender at the call and
+ * connection. These capture that sender at the call and
  * send on it, as a remote client does with its ConnectedDesktop; with no
  * established session there is nothing to send on.
  */

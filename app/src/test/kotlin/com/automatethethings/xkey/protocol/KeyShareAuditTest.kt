@@ -31,6 +31,7 @@ import com.automatethethings.xkey.settings.PairedDeviceData
 import com.automatethethings.xkey.settings.PairedDeviceRepository
 import com.automatethethings.xkey.settings.DeviceLookup
 import com.automatethethings.xkey.storage.XKeyDatabase
+import com.automatethethings.xkey.storage.readShareable
 import com.automatethethings.xkey.storage.dao.ContactDao
 import com.automatethethings.xkey.storage.dao.KeyDao
 import com.automatethethings.xkey.storage.dao.KeySharingPolicyDao
@@ -54,6 +55,7 @@ import java.util.Base64
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
@@ -92,6 +94,11 @@ class KeyShareAuditTest {
     private lateinit var pairedDevices: PairedDeviceRepository
     private lateinit var context: Context
     private lateinit var grants: KeySharingPolicyDao
+    private val policies = mockk<com.automatethethings.xkey.storage.dao.KeyPolicyDao>(relaxed = true) {
+        coEvery { deletion(any()) } returns null
+        // No policy row: the store enforces the key row's own policy.
+        coEvery { policyRow(any()) } returns null
+    }
     private lateinit var handler: RequestHandler
     private val entries = mutableListOf<AuditLogEntity>()
 
@@ -130,8 +137,11 @@ class KeyShareAuditTest {
         val database = mockk<XKeyDatabase>(relaxed = true)
         every { database.keyDao() } returns keyDao
         every { database.contactDao() } returns contactDao
+        // No delete of any key is pending: a relaxed DAO would report one.
+        every { database.keyPolicyDao() } returns policies
         grants = mockk(relaxed = true)
         coEvery { grants.isKeySharedWithPeer(any(), any()) } returns false
+        coEvery { grants.isPeerGranted(any(), any()) } returns false
         every { database.keySharingPolicyDao() } returns grants
         mockkObject(XKeyDatabase.Companion)
         every { XKeyDatabase.getInstance(any()) } returns database
@@ -149,6 +159,9 @@ class KeyShareAuditTest {
 
         context = mockk(relaxed = true)
         every { context.filesDir } returns tmp.root
+        // The software ML-DSA store is built on the application context's files directory.
+        every { context.applicationContext } returns context
+        com.automatethethings.xkey.crypto.PqcSoftwareKeyStore.clearSharedForTest()
         every { context.getSystemService(Context.KEYGUARD_SERVICE) } returns
             mockk<KeyguardManager>(relaxed = true)
         every { context.getSystemService(NotificationManager::class.java) } returns
@@ -161,7 +174,11 @@ class KeyShareAuditTest {
             DeviceLookup.Paired(PairedDeviceData(USB_PEER, USB_PEER_NAME, 0L))
 
         keystoreManager = mockk(relaxed = true)
-        every { keystoreManager.getPublicKeyPEM(any()) } returns null
+        every { keystoreManager.getPublicKeyPEM(any(), any()) } returns null
+        // No Keystore key holds an id: a share reads the general namespace.
+        every { keystoreManager.exportKind(any()) } returns com.automatethethings.xkey.crypto.UserKeyKind.GENERAL
+        // ...and a key row describes the general key (#270 review r5).
+        every { keystoreManager.rowKeyKind(any(), any(), any(), any()) } returns com.automatethethings.xkey.crypto.UserKeyKind.GENERAL
         handler = RequestHandler(
             context = context,
             keystoreManager = keystoreManager,
@@ -176,6 +193,7 @@ class KeyShareAuditTest {
     fun tearDown() {
         Dispatchers.resetMain()
         unmockkAll()
+        com.automatethethings.xkey.crypto.PqcSoftwareKeyStore.clearSharedForTest()
     }
 
     // -----------------------------------------------------------------
@@ -201,7 +219,7 @@ class KeyShareAuditTest {
 
     @Test
     fun sharingAHardwareKeyRecordsOnePublicExport() = runTest {
-        every { keystoreManager.getPublicKeyPEM(KEY_ID) } returns "-----BEGIN PUBLIC KEY-----\nAAAA\n-----END PUBLIC KEY-----"
+        every { keystoreManager.getPublicKeyPEM(KEY_ID, any()) } returns "-----BEGIN PUBLIC KEY-----\nAAAA\n-----END PUBLIC KEY-----"
         coEvery { keyDao.getByKeyId(KEY_ID) } returns keyEntity(SharingPolicyType.ALL_PEERS)
 
         val result = success(served(importSharedKey()))
@@ -318,6 +336,8 @@ class KeyShareAuditTest {
         assertEquals(PEER, entry.deviceId)
         assertTrue(entry.errorMessage!!.isNotBlank())
         assertNoKeyBytes(entry)
+        assertOneDenial(MethodNames.LOCAL_IMPORT_SHARED_KEY)
+        assertEquals("the failed export and the denial, nothing else: $entries", 2, entries.size)
     }
 
     /**
@@ -327,7 +347,7 @@ class KeyShareAuditTest {
      */
     @Test
     fun aRefusedHardwareExportRecordsTheStoredKeyType() = runTest {
-        every { keystoreManager.getPublicKeyPEM(KEY_ID) } returns "-----BEGIN PUBLIC KEY-----\nAAAA\n-----END PUBLIC KEY-----"
+        every { keystoreManager.getPublicKeyPEM(KEY_ID, any()) } returns "-----BEGIN PUBLIC KEY-----\nAAAA\n-----END PUBLIC KEY-----"
         coEvery { keyDao.getByKeyId(KEY_ID) } returns
             keyEntity(SharingPolicyType.PRIVATE, keyType = "signing")
 
@@ -338,6 +358,8 @@ class KeyShareAuditTest {
         assertFalse(entry.success)
         assertEquals("signing", entry.keyType)
         assertEquals("public", JSONObject(entry.details!!).getString("format"))
+        assertOneDenial(MethodNames.LOCAL_IMPORT_SHARED_KEY)
+        assertEquals("the failed export and the denial, nothing else: $entries", 2, entries.size)
 
         entries.clear()
         coEvery { keyDao.getByKeyId(KEY_ID) } returns
@@ -500,6 +522,7 @@ class KeyShareAuditTest {
     fun aSelectedPeerGrantFollowsTheCallerNotTheHandlerWidePeer() = runTest {
         givenSoftwareKey(exportable = true, shareable = true, policy = SharingPolicyType.SELECTED_PEERS)
         coEvery { grants.isKeySharedWithPeer(KEY_ID, PEER) } returns true
+        coEvery { grants.isPeerGranted(KEY_ID, PEER) } returns true
 
         handler.setConnectedDevicePublicKeyHex(USB_PEER)
         val granted = success(served(importSharedKey(), peer = PEER))
@@ -509,7 +532,15 @@ class KeyShareAuditTest {
         val refused = Response.fromJson(served(importSharedKey(), peer = USB_PEER))
         assertEquals(ErrorCodes.OPERATION_DENIED, refused.error?.code)
 
-        assertEquals(listOf(true to PEER, false to USB_PEER), entries.map { it.success to it.deviceId })
+        // B's refusal writes its failed export, then the dispatcher's denial row.
+        assertEquals(
+            listOf(
+                Triple(AuditOperationType.KEY_EXPORTED, true, PEER),
+                Triple(AuditOperationType.KEY_EXPORTED, false, USB_PEER),
+                Triple(AuditOperationType.POLICY_DENIED, false, USB_PEER)
+            ),
+            entries.map { Triple(it.operationType, it.success, it.deviceId) }
+        )
     }
 
     /**
@@ -653,6 +684,7 @@ class KeyShareAuditTest {
         val database = mockk<XKeyDatabase>(relaxed = true)
         every { database.keyDao() } returns keyDao
         every { database.contactDao() } returns dao
+        every { database.keyPolicyDao() } returns policies
         every { XKeyDatabase.getInstance(any()) } returns database
     }
 
@@ -678,12 +710,26 @@ class KeyShareAuditTest {
             1,
             Regex("withContext\\(NonCancellable\\)").findAll(source).count()
         )
+        // The sharing-policy change is written by KeyPolicyStore.setPolicy,
+        // which runs the decision's audit after its commit, uncancellably:
+        // the handler's one policy write passes a decision that records it.
+        val setPolicyStart = source.indexOf("private suspend fun handleLocalSetKeyPolicy(")
+        assertTrue("handleLocalSetKeyPolicy found", setPolicyStart >= 0)
+        val setPolicy = source.substring(setPolicyStart, source.indexOf("\n    }\n", setPolicyStart))
         assertTrue(
-            "the sharing-policy change records through persistAudited, as a ledger revoke",
+            "the sharing-policy change records through the store decision's audit",
             Regex(
-                "persistAudited\\(\\s*write = \\{(\\s*//[^\\n]*)*\\s*" +
-                    "SharePermissionLedger\\.revoking\\(entity\\.keyId\\) \\{\\s*keyDao\\.compareAndSetSharingPolicy\\("
-            ).containsMatchIn(source)
+                "KeyPolicyStore\\.RemoteDecision\\([^)]*\\)\\s*\\{\\s*replaced ->[^}]*" +
+                    "AuditLogger\\.logKeySharingChanged\\("
+            ).containsMatchIn(setPolicy)
+        )
+        assertTrue(
+            "the sharing-policy change is written through the store with that decision",
+            Regex("KeySharingPeers\\.setKeyPolicy\\([^{}]*?decision = decision\\s*\\)").containsMatchIn(setPolicy)
+        )
+        assertFalse(
+            "no sharing-policy write bypasses the store",
+            Regex("keyDao\\.(compareAndSetSharingPolicy|setSharingPolicy|updateSharingPolicy)\\(").containsMatchIn(source)
         )
         for ((fn, write, record) in listOf(
             Triple("handleSharePublicKey", "dao.insert(", "AuditLogger.logContactImported("),
@@ -698,6 +744,34 @@ class KeyShareAuditTest {
                 assertEquals("$fn makes one $call", 1, Regex(Regex.escape(call)).findAll(body).count())
                 assertTrue("$fn runs $call inside persistAudited", body.indexOf(call) > gate)
             }
+        }
+    }
+
+/**
+     * #255 review: every crypto use of a software key reads its material
+     * through `withUsableSoftwareKey`, inside the store's use gate, so a use
+     * that waited out a delete never runs with bytes read before it. Only
+     * the choke point itself, the audit's key-type read and the share
+     * handler's (gated at dispatch, no crypto) read the store.
+     */
+    @Test
+    fun everySoftwareKeyUseReadsItsMaterialInsideTheUseGate() {
+        val source = handlerSource()
+        val members = source.split(Regex("\n(?=    (?:(?:private|internal|public|override) )*(?:suspend )?(?:inline )?fun )"))
+        val readers = members.filter { "SoftwareKeyStore(context).get(" in it }
+            .map { Regex("fun (?:<[^>]*> )?(\\w+)").find(it)!!.groupValues[1] }
+        assertEquals(setOf("withUsableSoftwareKey", "auditKeyType", "handleImportSharedKey"), readers.toSet())
+        assertTrue(
+            "the choke point reads the record inside the general key's use gate",
+            Regex(
+                "fun <T> withUsableSoftwareKey\\([\\s\\S]*?withUsableGeneralKey\\([^)]*\\)\\s*\\{\\s*" +
+                    "com\\.automatethethings\\.xkey\\.crypto\\.SoftwareKeyStore\\(context\\)\\.get\\("
+            ).containsMatchIn(source)
+        )
+        for (fn in listOf("handleLocalSymmetricEncrypt", "handleLocalSymmetricDecrypt", "handleLocalHMAC")) {
+            val start = source.indexOf("private suspend fun $fn(")
+            assertTrue("$fn found", start >= 0)
+            assertTrue("$fn uses withUsableSoftwareKey", "withUsableSoftwareKey(" in source.substring(start, source.indexOf("\n    }\n", start)))
         }
     }
 
@@ -892,6 +966,719 @@ class KeyShareAuditTest {
     }
 
     // -----------------------------------------------------------------
+    // A credential and a general key sharing an id (#255 review r2)
+    // -----------------------------------------------------------------
+
+    /**
+     * #255 review r2: with the credential's delete still owed beside the
+     * general key's surviving row, local.getPublicKey and
+     * local.importSharedKey of the id export the general key's own public
+     * key, never the deleted credential's under the general key's grant;
+     * with no general key under the id, the lookup would reach the
+     * credential, and both are refused. A real [KeystoreManager] resolves.
+     */
+    @Test
+    fun aPendingCredentialDeleteNeverExportsTheCredentialAsTheGeneralKey() = runTest {
+        val aliases = HashMap<String, ByteArray>()
+        val platform = mockk<KeyStore>(relaxed = true)
+        every { platform.containsAlias(any()) } answers { firstArg<String>() in aliases }
+        every { platform.getCertificate(any()) } answers {
+            aliases[firstArg()]?.let { bytes ->
+                mockk<java.security.cert.Certificate> {
+                    every { publicKey } returns mockk { every { encoded } returns bytes }
+                    every { encoded } returns bytes
+                }
+            }
+        }
+        every { KeyStore.getInstance("AndroidKeyStore") } returns platform
+        val credentialKey = "credential".toByteArray()
+        val generalKey = "general".toByteArray()
+        aliases["xkey_credential_$KEY_ID"] = credentialKey
+        aliases["xkey_key_$KEY_ID"] = generalKey
+        // The credential's delete is owed beside the general key's row 7.
+        coEvery { policies.keyInstance(KEY_ID) } returns 7L
+        coEvery { policies.deletion(KEY_ID) } returns com.automatethethings.xkey.storage.entity.KeyDeletionEntity(
+            KEY_ID, 7L, "keystore",
+            JSONObject().put("${KeystoreManager.KEYSTORE_ENTRY}xkey_credential_$KEY_ID", "1").toString()
+        )
+        // The row is the general key's: it records that key's public key (#270 review r4).
+        coEvery { keyDao.getByKeyId(KEY_ID) } returns keyEntity(SharingPolicyType.ALL_PEERS, keyType = "signing")
+            .copy(publicKeyDer = generalKey)
+        handler = RequestHandler(
+            context = context,
+            keystoreManager = KeystoreManager(context),
+            biometricLauncher = null,
+            sessionAuthManager = null,
+            pairedDeviceRepository = pairedDevices
+        )
+        handler.setConnectedDevicePublicKeyHex(PEER)
+        val getPublicKey = Request(
+            id = 5,
+            method = MethodNames.LOCAL_GET_PUBLIC_KEY,
+            params = JSONObject().put("keyId", KEY_ID).put("format", "der")
+        ).toJson()
+
+        assertEquals(
+            "getPublicKey exports the general key's own key",
+            Base64.getEncoder().encodeToString(generalKey),
+            success(served(getPublicKey)).getString("publicKey")
+        )
+        val pem = success(served(importSharedKey())).getString("public_key_pem")
+        assertTrue("importSharedKey exports the general key's own key: $pem", Base64.getEncoder().encodeToString(generalKey) in pem)
+        assertFalse(Base64.getEncoder().encodeToString(credentialKey) in pem)
+
+        // No general key under the id: the general lookup finds none, and
+        // never reads the credential (#255 review r3).
+        aliases.remove("xkey_key_$KEY_ID")
+        for (request in listOf(getPublicKey, importSharedKey())) {
+            val response = Response.fromJson(served(request))
+            assertTrue("refused: $response", response.error != null && response.result == null)
+        }
+    }
+
+    /** A platform Keystore holding [keys] by alias, read by a real [KeystoreManager]. */
+    private fun platformKeystore(keys: Map<String, java.security.KeyPair>) {
+        val platform = mockk<KeyStore>(relaxed = true)
+        every { platform.containsAlias(any()) } answers { firstArg<String>() in keys }
+        every { platform.getKey(any(), any()) } answers { keys[firstArg()]?.private }
+        every { platform.getCertificate(any()) } answers {
+            keys[firstArg()]?.let { pair ->
+                mockk<java.security.cert.Certificate> {
+                    every { publicKey } returns pair.public
+                    every { encoded } returns pair.public.encoded
+                }
+            }
+        }
+        every { KeyStore.getInstance("AndroidKeyStore") } returns platform
+    }
+
+    private fun ecKeyPair(): java.security.KeyPair =
+        java.security.KeyPairGenerator.getInstance("EC").apply { initialize(java.security.spec.ECGenParameterSpec("secp256r1")) }.generateKeyPair()
+
+    /**
+     * #255 review r3: local.generateKey of an id a credential already holds
+     * is refused before any key is made, so no general key is ever created
+     * beside a credential of its id.
+     */
+    @Test
+    fun aKeyIsNeverGeneratedUnderAnIdACredentialHolds() = runTest {
+        platformKeystore(mapOf("xkey_credential_$KEY_ID" to ecKeyPair()))
+        val keystore = io.mockk.spyk(KeystoreManager(context))
+        handler = RequestHandler(
+            context = context,
+            keystoreManager = keystore,
+            biometricLauncher = null,
+            sessionAuthManager = null,
+            pairedDeviceRepository = pairedDevices
+        )
+        handler.setConnectedDevicePublicKeyHex(PEER)
+        val generate = Request(
+            id = 6,
+            method = MethodNames.LOCAL_GENERATE_KEY,
+            params = JSONObject().put("keyId", KEY_ID).put("keyType", "fido2").put("algorithm", "ES256")
+                .put("rpId", "example.com").put("requireUserVerification", false)
+        ).toJson()
+
+        val response = Response.fromJson(served(generate))
+
+        assertEquals("refused: $response", ErrorCodes.KEY_EXISTS, response.error?.code)
+        io.mockk.coVerify(exactly = 0) { keystore.generateKeyForAlgorithm(any(), any(), any(), any()) }
+        io.mockk.coVerify(exactly = 0) { keystore.generateKeyWithAuthDuration(any(), any(), any()) }
+    }
+
+    /**
+     * #255 verify r6: local.generateKey with an empty keyId wrote a software
+     * key whose record names no id, which the reader then took as any id's.
+     * The id is refused as invalid params before any key is made or written.
+     */
+    @Test
+    fun anEmptyKeyIdIsRefusedBeforeAnyKeyIsWritten() = runTest {
+        handler.setConnectedDevicePublicKeyHex(PEER)
+        val generate = Request(
+            id = 7,
+            method = MethodNames.LOCAL_GENERATE_KEY,
+            params = JSONObject().put("keyId", "").put("algorithm", "AES-256")
+                .put("exportable", true).put("requireUserVerification", false)
+        ).toJson()
+
+        val response = Response.fromJson(served(generate))
+
+        assertEquals("refused: $response", ErrorCodes.INVALID_PARAMS, response.error?.code)
+        io.mockk.verify(exactly = 0) { anyConstructed<SoftwareKeyStore>().put(any()) }
+        io.mockk.coVerify(exactly = 0) { keystoreManager.generateKeyForAlgorithm(any(), any(), any(), any()) }
+        assertEquals("files written for an empty id", emptyList<String>(), java.io.File(tmp.root, "software_keys").list()?.toList().orEmpty())
+    }
+
+    /**
+     * #255 review r3: a passkey assertion signs with the key whose COSE key
+     * the passkey's creation returned. With a general key and a credential
+     * both under the id the assertion is refused, never signed with the
+     * other key; with the general key alone (a passkey made through
+     * local.generateKey) the signature verifies against the general key's
+     * public key, the one its COSE key encodes, and not the credential's.
+     */
+    @Test
+    fun aPasskeyAssertionSignsWithTheKeyWhosePublicKeyWasReturned() = runTest {
+        val general = ecKeyPair()
+        val credential = ecKeyPair()
+        val keys = mutableMapOf("xkey_key_$KEY_ID" to general, "xkey_credential_$KEY_ID" to credential)
+        platformKeystore(keys)
+        val keystore = KeystoreManager(context)
+        val passkey = keyEntity(SharingPolicyType.ALL_PEERS, shareable = true, keyType = "fido2").copy(rpId = "example.com")
+        coEvery { keyDao.getByKeyId(KEY_ID) } returns passkey
+        // The assertion names the passkey by its wire id, among the relying party's passkeys.
+        coEvery { keyDao.getFido2ByRpId("example.com") } returns listOf(passkey)
+        handler = RequestHandler(
+            context = context,
+            keystoreManager = keystore,
+            biometricLauncher = null,
+            sessionAuthManager = null,
+            pairedDeviceRepository = pairedDevices
+        )
+        handler.setConnectedDevicePublicKeyHex(PEER)
+        val clientDataHash = java.security.MessageDigest.getInstance("SHA-256").digest("client-data".toByteArray())
+        val assertion = Request(
+            id = 7,
+            method = MethodNames.LOCAL_SIGN_FIDO2_ASSERTION,
+            params = JSONObject().put("credentialId", Fido2WireIds.encode(KEY_ID)).put("rpId", "example.com")
+                .put("clientDataHash", Base64.getEncoder().encodeToString(clientDataHash))
+                .put("userVerificationRequired", false)
+        ).toJson()
+
+        // Both namespaces hold the id: no key is the passkey's for certain.
+        assertEquals(null, keystore.soleKind(KEY_ID))
+        val refused = Response.fromJson(served(assertion))
+        assertEquals("refused: $refused", ErrorCodes.KEY_NOT_FOUND, refused.error?.code)
+
+        // The general key alone: its COSE key is the one generateKey returned.
+        keys.remove("xkey_credential_$KEY_ID")
+        val cose = keystore.getCOSEPublicKey(KEY_ID, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL)
+        fun coordinate(key: java.security.PublicKey) = (key as java.security.interfaces.ECPublicKey).w.affineX.toByteArray().takeLast(32).toByteArray()
+        assertTrue("the COSE key encodes the general key", cose != null && java.util.Collections.indexOfSubList(cose.toList(), coordinate(general.public).toList()) >= 0)
+        assertFalse("the COSE key encodes the credential", java.util.Collections.indexOfSubList(cose!!.toList(), coordinate(credential.public).toList()) >= 0)
+        val result = success(served(assertion))
+        val authData = Base64.getDecoder().decode(result.getString("authenticatorData"))
+        val signature = Base64.getDecoder().decode(result.getString("signature"))
+        // WebAuthn: ECDSA with SHA-256 over authenticatorData || clientDataHash, hashed once.
+        fun verifies(key: java.security.PublicKey) = java.security.Signature.getInstance("SHA256withECDSA").run {
+            initVerify(key)
+            update(authData + clientDataHash)
+            verify(signature)
+        }
+        assertTrue("the assertion verifies against the returned public key", verifies(general.public))
+        assertFalse("the assertion signed with the credential", verifies(credential.public))
+    }
+
+    /**
+     * #255 review r4: a hardware key shares its public key from either
+     * namespace (SPEC key sharing). A key that lives only under its
+     * credential alias exports its own public key through local.getPublicKey
+     * and shares it through local.importSharedKey, never KEY_NOT_FOUND.
+     */
+    @Test
+    fun aCredentialOnlyKeySharesAndExportsItsPublicKey() = runTest {
+        val credential = ecKeyPair()
+        platformKeystore(mapOf("xkey_credential_$KEY_ID" to credential))
+        coEvery { keyDao.getByKeyId(KEY_ID) } returns keyEntity(SharingPolicyType.ALL_PEERS, keyType = "signing")
+        handler = RequestHandler(
+            context = context,
+            keystoreManager = KeystoreManager(context),
+            biometricLauncher = null,
+            sessionAuthManager = null,
+            pairedDeviceRepository = pairedDevices
+        )
+        handler.setConnectedDevicePublicKeyHex(PEER)
+        val expected = Base64.getEncoder().encodeToString(credential.public.encoded)
+        val getPublicKey = Request(
+            id = 8,
+            method = MethodNames.LOCAL_GET_PUBLIC_KEY,
+            params = JSONObject().put("keyId", KEY_ID).put("format", "der")
+        ).toJson()
+
+        assertEquals("getPublicKey exports the credential's key", expected, success(served(getPublicKey)).getString("publicKey"))
+        val pem = success(served(importSharedKey())).getString("public_key_pem")
+        assertTrue("importSharedKey shares the credential's key: $pem", expected in pem.replace("\n", "").replace("\r", ""))
+    }
+
+    /**
+     * #270 review r4: a credential row beside a general key of the same id
+     * exports the key its row describes ([KeystoreManager.rowKeyKind]), the
+     * credential's, under the row's algorithm, never the general key's.
+     */
+    @Test
+    fun aCredentialRowBesideASameIdGeneralKeyExportsTheCredentialsKey() = runTest {
+        val credential = ecKeyPair()
+        val general = ecKeyPair()
+        platformKeystore(mapOf("xkey_credential_$KEY_ID" to credential, "xkey_key_$KEY_ID" to general))
+        coEvery { keyDao.getByKeyId(KEY_ID) } returns keyEntity(SharingPolicyType.ALL_PEERS, keyType = "fido2")
+            .copy(algorithm = "ES256", publicKeyDer = credential.public.encoded)
+        handler = RequestHandler(
+            context = context,
+            keystoreManager = KeystoreManager(context),
+            biometricLauncher = null,
+            sessionAuthManager = null,
+            pairedDeviceRepository = pairedDevices
+        )
+        handler.setConnectedDevicePublicKeyHex(PEER)
+        val getPublicKey = Request(
+            id = 8,
+            method = MethodNames.LOCAL_GET_PUBLIC_KEY,
+            params = JSONObject().put("keyId", KEY_ID).put("format", "der")
+        ).toJson()
+
+        val result = success(served(getPublicKey))
+        assertEquals(
+            "getPublicKey exports the credential's key",
+            Base64.getEncoder().encodeToString(credential.public.encoded),
+            result.getString("publicKey")
+        )
+        assertEquals("ES256", result.getString("algorithm"))
+
+        // #270 review r5: both sharing paths send the key the row describes,
+        // never the same-id general key's public half under the credential
+        // row's permissions: local.importSharedKey and the desktop sharing
+        // sheet's one share read (readShareable with the sheet's row).
+        val expected = Base64.getEncoder().encodeToString(credential.public.encoded)
+        val wrong = Base64.getEncoder().encodeToString(general.public.encoded)
+        val pem = success(served(importSharedKey())).getString("public_key_pem").replace("\n", "").replace("\r", "")
+        assertTrue("importSharedKey shares the credential's key: $pem", expected in pem && wrong !in pem)
+
+        val keystore = KeystoreManager(context)
+        val store = com.automatethethings.xkey.storage.KeyPolicyStore.of(XKeyDatabase.getInstance(context), keystore)
+        val sheetPem = store.readShareable(context, KEY_ID, keystore, keyDao.getByKeyId(KEY_ID)) { null }
+            .publicKeyPem!!.replace("\n", "").replace("\r", "")
+        assertTrue("the desktop share sends the credential's key: $sheetPem", expected in sheetPem && wrong !in sheetPem)
+    }
+
+    /**
+     * #270 verify r4: local.sign and local.getPublicKey of one id name the
+     * same key, through one ownership decision. A credential row beside a
+     * general key of the same id exports the credential's key, so local.sign
+     * never signs with the general key in its place: it signs with the
+     * exported key or refuses, never returns a signature that the exported
+     * key does not verify.
+     */
+    @Test
+    fun signAndExportOfASharedIdNameTheSameKey() = runTest {
+        val credential = ecKeyPair()
+        val general = ecKeyPair()
+        platformKeystore(mapOf("xkey_credential_$KEY_ID" to credential, "xkey_key_$KEY_ID" to general))
+        coEvery { keyDao.getByKeyId(KEY_ID) } returns keyEntity(SharingPolicyType.ALL_PEERS, keyType = "fido2")
+            .copy(algorithm = "ES256", publicKeyDer = credential.public.encoded)
+        handler = RequestHandler(
+            context = context,
+            keystoreManager = KeystoreManager(context),
+            biometricLauncher = null,
+            sessionAuthManager = null,
+            pairedDeviceRepository = pairedDevices
+        )
+        handler.setConnectedDevicePublicKeyHex(PEER)
+        val getPublicKey = Request(
+            id = 8,
+            method = MethodNames.LOCAL_GET_PUBLIC_KEY,
+            params = JSONObject().put("keyId", KEY_ID).put("format", "der")
+        ).toJson()
+        val exported = java.security.KeyFactory.getInstance("EC").generatePublic(
+            java.security.spec.X509EncodedKeySpec(
+                Base64.getDecoder().decode(success(served(getPublicKey)).getString("publicKey"))
+            )
+        )
+
+        val signed = JSONObject(String(served(
+            keyUse(MethodNames.LOCAL_SIGN, "data", "userVerificationRequired" to false, "algorithm" to "ES256"),
+            peer = PEER
+        )))
+        if (signed.has("error")) return@runTest
+        val verifier = java.security.Signature.getInstance("SHA256withECDSA")
+        verifier.initVerify(exported)
+        verifier.update("payload".toByteArray())
+        assertTrue(
+            "local.sign signs with the key local.getPublicKey exports",
+            verifier.verify(Base64.getDecoder().decode(signed.getJSONObject("result").getString("signature")))
+        )
+    }
+
+    /**
+     * #255 review r5: with the Ed25519 store unreadable, whether a legacy
+     * general Ed25519 key holds the id is unknown, so a credential of that
+     * id is never exported in its place: local.getPublicKey and
+     * local.importSharedKey refuse and export nothing, never fall back to
+     * the credential namespace. The same id exports once the store reads.
+     */
+    @Test
+    fun anUnreadableEd25519StoreExportsNeitherNamespace() = runTest {
+        val credential = ecKeyPair()
+        platformKeystore(mapOf("xkey_credential_$KEY_ID" to credential))
+        coEvery { keyDao.getByKeyId(KEY_ID) } returns keyEntity(SharingPolicyType.ALL_PEERS, keyType = "signing")
+        val keystore = io.mockk.spyk(KeystoreManager(context))
+        every { keystore.ed25519Prefs() } throws java.security.GeneralSecurityException("master key unavailable")
+        handler = RequestHandler(
+            context = context,
+            keystoreManager = keystore,
+            biometricLauncher = null,
+            sessionAuthManager = null,
+            pairedDeviceRepository = pairedDevices
+        )
+        handler.setConnectedDevicePublicKeyHex(PEER)
+        val getPublicKey = Request(
+            id = 8,
+            method = MethodNames.LOCAL_GET_PUBLIC_KEY,
+            params = JSONObject().put("keyId", KEY_ID).put("format", "der")
+        ).toJson()
+        val encoded = Base64.getEncoder().encodeToString(credential.public.encoded)
+
+        for ((name, request) in listOf("getPublicKey" to getPublicKey, "importSharedKey" to importSharedKey())) {
+            val bytes = served(request)
+            val response = Response.fromJson(bytes)
+            assertNull("$name exported with an unreadable store: ${response.result}", response.result)
+            assertTrue("$name answered no error", response.error != null)
+            assertFalse("$name sent the credential's key", encoded in String(bytes))
+        }
+        verify(exactly = 0) { keystore.getPublicKeyPEM(any(), any()) }
+        verify(exactly = 0) { keystore.getPublicKeyDER(any(), any()) }
+        assertTrue(
+            "a refused export was recorded as a success",
+            entries.none { it.operationType == AuditOperationType.KEY_EXPORTED && it.success }
+        )
+
+        // The store reads again: the credential-only id exports its own key.
+        every { keystore.ed25519Prefs() } returns null
+        assertEquals(encoded, success(served(getPublicKey)).getString("publicKey"))
+    }
+
+    /**
+     * #255 review r7, the handler side of the bypass check: a request whose
+     * key read meets an unreadable key store (here the software key store)
+     * is answered with a refusal, operation denied, never an internal error
+     * and never an exception out of the handler.
+     */
+    @Test
+    fun anUnreadableKeyStoreIsARefusedRequest() = runTest {
+        platformKeystore(mapOf("xkey_credential_$KEY_ID" to ecKeyPair()))
+        coEvery { keyDao.getByKeyId(KEY_ID) } returns keyEntity(SharingPolicyType.ALL_PEERS, keyType = "signing")
+        val keystore = realKeystoreHandler()
+        val software = io.mockk.mockk<com.automatethethings.xkey.crypto.SoftwareKeyStore>()
+        every { software.presence(any()) } returns com.automatethethings.xkey.crypto.KeyPresence.UNREADABLE
+        every { keystore.softwareKeys() } returns software
+        val getPublicKey = Request(
+            id = 11,
+            method = MethodNames.LOCAL_GET_PUBLIC_KEY,
+            params = JSONObject().put("keyId", KEY_ID).put("format", "der")
+        ).toJson()
+
+        val response = Response.fromJson(served(getPublicKey))
+
+        assertNull("a key was read from an unreadable store: ${response.result}", response.result)
+        assertEquals("the request is refused: ${response.error}", ErrorCodes.OPERATION_DENIED, response.error?.code)
+    }
+
+    /**
+     * #255 verify r2y: an older build's software key record whose metadata
+     * cannot be parsed while its material is there could be this id's, so
+     * the store is unreadable for it: local.importSharedKey refuses and never
+     * falls back to the credential under the id.
+     */
+    @Test
+    fun aMalformedLegacySoftwareRecordRefusesTheShareOfACredential() = runTest {
+        val credential = ecKeyPair()
+        platformKeystore(mapOf("xkey_credential_$KEY_ID" to credential))
+        coEvery { keyDao.getByKeyId(KEY_ID) } returns keyEntity(SharingPolicyType.ALL_PEERS, keyType = "signing")
+        val keystore = realKeystoreHandler()
+        val filesDir = java.nio.file.Files.createTempDirectory("software-keys").toFile()
+        try {
+            val dir = java.io.File(filesDir, "software_keys").apply { mkdirs() }
+            java.io.File(dir, "legacy.meta").writeText("{not json")
+            java.io.File(dir, "legacy.key").writeBytes(ByteArray(4))
+            val storeContext = io.mockk.mockk<android.content.Context>()
+            every { storeContext.filesDir } returns filesDir
+            val software = com.automatethethings.xkey.crypto.SoftwareKeyStore(storeContext, io.mockk.mockk(relaxed = true))
+            every { keystore.softwareKeys() } returns software
+
+            val bytes = served(importSharedKey())
+            val response = Response.fromJson(bytes)
+
+            assertNull("importSharedKey shared past a malformed record: ${response.result}", response.result)
+            assertEquals("the request is refused: ${response.error}", ErrorCodes.OPERATION_DENIED, response.error?.code)
+            val encoded = Base64.getEncoder().encodeToString(credential.public.encoded)
+            assertFalse("importSharedKey sent the credential's key", encoded in String(bytes))
+        } finally {
+            filesDir.deleteRecursively()
+        }
+    }
+
+    /** A handler over a spied real [KeystoreManager] on the platform keystore, the Ed25519 store empty. */
+    private fun realKeystoreHandler(): KeystoreManager {
+        val keystore = io.mockk.spyk(KeystoreManager(context))
+        every { keystore.ed25519Prefs() } returns null
+        handler = RequestHandler(
+            context = context,
+            keystoreManager = keystore,
+            biometricLauncher = null,
+            sessionAuthManager = null,
+            pairedDeviceRepository = pairedDevices
+        )
+        handler.setConnectedDevicePublicKeyHex(PEER)
+        return keystore
+    }
+
+    /**
+     * #255 review r6: a software key (SoftwareKeyStore) and a credential
+     * under one id. The general namespace counts the software store, so the
+     * id exports as its general key: local.importSharedKey shares the
+     * software key's material, local.getPublicKey (no Keystore public key in
+     * the general namespace) refuses, and neither ever sends the
+     * credential's public key under the software key's row.
+     */
+    @Test
+    fun aSoftwareKeyBesideACredentialNeverExportsTheCredential() = runTest {
+        val credential = ecKeyPair()
+        platformKeystore(mapOf("xkey_credential_$KEY_ID" to credential))
+        givenSoftwareKey(exportable = true, shareable = true)
+        every { anyConstructed<SoftwareKeyStore>().presence(KEY_ID) } returns
+            com.automatethethings.xkey.crypto.KeyPresence.PRESENT
+        every { anyConstructed<SoftwareKeyStore>().generation(KEY_ID) } returns "1"
+        val keystore = realKeystoreHandler()
+        val encoded = Base64.getEncoder().encodeToString(credential.public.encoded)
+
+        assertEquals(com.automatethethings.xkey.crypto.UserKeyKind.GENERAL, keystore.exportKind(KEY_ID))
+        assertNull("an id two keys hold has no sole kind", keystore.soleKind(KEY_ID))
+
+        val getPublicKey = Request(
+            id = 11,
+            method = MethodNames.LOCAL_GET_PUBLIC_KEY,
+            params = JSONObject().put("keyId", KEY_ID).put("format", "der")
+        ).toJson()
+        val refused = served(getPublicKey)
+        val response = Response.fromJson(refused)
+        assertNull("getPublicKey exported a key: ${response.result}", response.result)
+        assertEquals(ErrorCodes.EXPORT_FAILED, response.error?.code)
+        assertFalse("getPublicKey sent the credential's key", encoded in String(refused))
+
+        val shared = served(importSharedKey())
+        val result = success(shared)
+        assertEquals(Base64.getEncoder().encodeToString(MATERIAL), result.getString("wrapped_key"))
+        assertFalse("importSharedKey sent the credential's key", encoded in String(shared))
+
+        val credentialKind = com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL
+        verify(exactly = 0) { keystore.getPublicKeyPEM(KEY_ID, credentialKind) }
+        verify(exactly = 0) { keystore.getPublicKeyDER(KEY_ID, credentialKind) }
+    }
+
+    /**
+     * #255 review r6: both generators refuse an id a software key holds,
+     * before any key is made, so no credential or Keystore general key is
+     * ever created beside it.
+     */
+    @Test
+    fun noGeneratorCreatesAKeyUnderAnIdASoftwareKeyHolds() = runTest {
+        platformKeystore(emptyMap())
+        every { anyConstructed<SoftwareKeyStore>().presence(KEY_ID) } returns
+            com.automatethethings.xkey.crypto.KeyPresence.PRESENT
+        val keystore = realKeystoreHandler()
+        val legacy = Request(
+            id = 12,
+            method = MethodNames.GENERATE_KEY,
+            params = JSONObject().put("credentialId", KEY_ID).put("algorithm", -7).put("requireUserVerification", false)
+        ).toJson()
+        val local = Request(
+            id = 13,
+            method = MethodNames.LOCAL_GENERATE_KEY,
+            params = JSONObject().put("keyId", KEY_ID).put("keyType", "signing").put("algorithm", "ES256")
+                .put("requireUserVerification", false)
+        ).toJson()
+
+        val legacyResponse = Response.fromJson(served(legacy))
+        val localResponse = Response.fromJson(served(local))
+
+        assertEquals("legacy generateKey: $legacyResponse", ErrorCodes.INVALID_PARAMS, legacyResponse.error?.code)
+        assertEquals("local.generateKey: $localResponse", ErrorCodes.KEY_EXISTS, localResponse.error?.code)
+        io.mockk.coVerify(exactly = 0) { keystore.generateKey(any(), any(), any()) }
+        io.mockk.coVerify(exactly = 0) { keystore.generateKeyWithAuthDuration(any(), any(), any()) }
+        io.mockk.coVerify(exactly = 0) { keystore.generateKeyForAlgorithm(any(), any(), any(), any()) }
+        verify(exactly = 0) { anyConstructed<SoftwareKeyStore>().put(any()) }
+    }
+
+    /**
+     * #255 review r4: generateKey and local.generateKey of one id at once,
+     * the first holding its creation open, make exactly one key: the second
+     * is refused, never run beside the first (the two RPC families reserve
+     * the id under one name, and check it inside the shared material lock).
+     */
+    @Test
+    fun concurrentGeneratorsOfOneIdMakeOneKey() = runTest {
+        val keys = java.util.concurrent.ConcurrentHashMap<String, java.security.KeyPair>()
+        platformKeystore(keys)
+        val keystore = io.mockk.spyk(KeystoreManager(context))
+        val release = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val generated = java.util.concurrent.atomic.AtomicInteger()
+        coEvery { keystore.generateKeyWithAuthDuration(KEY_ID, any(), any()) } coAnswers {
+            release.await()
+            generated.incrementAndGet()
+            keys["xkey_credential_$KEY_ID"] = ecKeyPair()
+            keystore.getCOSEPublicKey(KEY_ID, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL)!!
+        }
+        coEvery { keystore.generateKeyForAlgorithm(KEY_ID, any(), any(), any()) } coAnswers {
+            release.await()
+            generated.incrementAndGet()
+            val pair = ecKeyPair()
+            keys["xkey_key_$KEY_ID"] = pair
+            pair.public.encoded
+        }
+        every { keystore.credentialSecurityLevel(KEY_ID) } returns com.automatethethings.xkey.crypto.KeySecurityLevel.TEE
+        every { keystore.generalKeySecurityLevel(KEY_ID) } returns com.automatethethings.xkey.crypto.KeySecurityLevel.TEE
+        // The store on in-memory tables: a relaxed database's transaction never ends.
+        val tables = com.automatethethings.xkey.storage.FakeKeyPolicyTables()
+        mockkObject(com.automatethethings.xkey.storage.KeyPolicyStore.Companion)
+        every { com.automatethethings.xkey.storage.KeyPolicyStore.of(any(), any()) } returns
+            tables.store(com.automatethethings.xkey.storage.KeyPolicyStore.KeyResolver { id, kind -> keystore.resolveKey(id, kind) })
+        handler = RequestHandler(
+            context = context,
+            keystoreManager = keystore,
+            biometricLauncher = null,
+            sessionAuthManager = null,
+            pairedDeviceRepository = pairedDevices
+        )
+        handler.setConnectedDevicePublicKeyHex(PEER)
+        val legacy = Request(
+            id = 9,
+            method = MethodNames.GENERATE_KEY,
+            params = JSONObject().put("credentialId", KEY_ID).put("algorithm", -7).put("requireUserVerification", false)
+        ).toJson()
+        val local = Request(
+            id = 10,
+            method = MethodNames.LOCAL_GENERATE_KEY,
+            params = JSONObject().put("keyId", KEY_ID).put("keyType", "signing").put("algorithm", "ES256")
+                .put("requireUserVerification", false)
+        ).toJson()
+
+        for (order in listOf(listOf(legacy, local), listOf(local, legacy))) {
+            keys.clear()
+            generated.set(0)
+            // Two connections, as two peers' requests arrive.
+            val first = backgroundScope.async { Response.fromJson(served(order[0], connection = "test:first")) }
+            kotlinx.coroutines.yield()
+            val second = Response.fromJson(
+                kotlinx.coroutines.withTimeout(10_000) { served(order[1], connection = "test:second") }
+            )
+            assertTrue("the second creation is refused while the first runs: $second", second.error != null && second.result == null)
+            if (!release.isCompleted) release.complete(Unit)
+            val made = first.await()
+            assertTrue("the first creation makes its key: $made", made.error == null)
+            assertEquals("exactly one key under the id", 1, generated.get())
+            assertEquals("exactly one namespace holds the id", 1, keys.size)
+        }
+    }
+
+    /**
+     * #255 review r3, the bypass check: no caller resolves a key id without
+     * naming its namespace. KeystoreManager has no resolver, lookup, sign,
+     * exists or delete of a key id without a non-null kind, and each derives
+     * its alias from that kind alone; every sign of a user key in Handler and
+     * the credential provider runs inside the use gate of the key id and kind
+     * it signs with; the gate resolves through the same resolver. Any
+     * unqualified resolver (a nullable or defaulted kind, a one-argument
+     * resolve) fails this test.
+     */
+    @Test
+    fun everyKeyLookupInHandlerResolvesTheKindItsGateChecks() {
+        val source = handlerSource()
+        val lookups = Regex("keystoreManager\\.(getPublicKeyDER|getPublicKeyPEM|getPublicKeySSH|getCOSEPublicKey|getPublicKey|getAttestationChain|keySecurityLevel|resolveKeystoreAlias|resolveKey|keyExists|deleteKey|isKeyStrongBoxBacked)\\(([^)]*)\\)")
+            .findAll(source).toList()
+        // A generated key's discard deletes its own alias (#255 review r7), no lookup.
+        assertTrue("lookups found: ${lookups.size}", lookups.size >= 8)
+        for (lookup in lookups) {
+            assertTrue(
+                "a lookup names the user key it reads: ${lookup.value}",
+                Regex(",\\s*(com\\.automatethethings\\.xkey\\.crypto\\.UserKeyKind\\.(GENERAL|CREDENTIAL)|[a-z]\\w*Kind)$").containsMatchIn(lookup.groupValues[2])
+            )
+        }
+        for (raw in listOf("xkey_credential_", "xkey_key_", "KEY_ALIAS_PREFIX", "keyStore.", "containsAlias(")) {
+            assertFalse("Handler reads a Keystore alias itself: $raw", raw in source.lines().filterNot { it.trim().startsWith("//") || it.trim().startsWith("*") }.joinToString("\n"))
+        }
+        assertTrue("Handler's store gates through the Keystore resolver", "KeyPolicyStore.of(XKeyDatabase.getInstance(context), keystoreManager)" in source)
+
+        val main = listOf(java.io.File("src/main/kotlin"), java.io.File("app/src/main/kotlin")).first { it.isDirectory }
+        val manager = java.io.File(main, "com/automatethethings/xkey/crypto/KeystoreManager.kt").readText()
+        Regex("\\w+\\s*:\\s*UserKeyKind\\?").findAll(manager).forEach {
+            org.junit.Assert.fail("KeystoreManager takes a nullable kind, an unqualified resolver: ${it.value}")
+        }
+        assertTrue(
+            "resolveKeystoreAlias is the resolver's alias",
+            "fun resolveKeystoreAlias(keyId: String, kind: UserKeyKind): String? = resolveKey(keyId, kind)?.alias" in manager
+        )
+        assertTrue(
+            "resolveKey names its namespace, its presence from every backend of it (#255 review r6)",
+            "fun resolveKey(keyId: String, kind: UserKeyKind): ResolvedKey? {\n" +
+                "        if (!holdsUserKey(keyId, kind)) return null\n" +
+                "        val own = userKeyAlias(keyId, kind)" in manager
+        )
+        assertEquals("one resolveKey", 1, Regex("fun resolveKey\\(").findAll(manager).count())
+        assertEquals("one resolveKeystoreAlias", 1, Regex("fun resolveKeystoreAlias\\(").findAll(manager).count())
+        for (fn in listOf(
+            "getPublicKeyDER", "getPublicKeySSH", "getPublicKey", "getCOSEPublicKey", "getAttestationChain", "keySecurityLevel",
+            "sign", "signWithoutBiometric", "keyExists", "deleteKey", "isKeyStrongBoxBacked"
+        )) {
+            // KeystoreManager's own functions: a fun interface's member (CryptoObjectSigner.sign) names no key.
+            val starts = Regex("fun $fn\\(").findAll(manager).map { it.range.first }
+                .filterNot { manager.lastIndexOf("fun interface ", it) > manager.lastIndexOf("class KeystoreManager", it) }
+                .toList()
+            assertEquals("one $fn", 1, starts.size)
+            val start = starts.single()
+            val header = manager.substring(start, manager.indexOf(")", manager.indexOf("kind", start)) + 1)
+            assertTrue("$fn takes a non-null kind: $header", Regex("\\bkind: UserKeyKind[,)\\s]").containsMatchIn(header + " "))
+            val body = manager.substring(start, manager.indexOf("\n\n", start).let { if (it < 0) manager.length else it })
+            // A delete deletes the alias of its kind directly, past no cross-backend presence guard (#255 review r7).
+            val resolves = if (fn == "deleteKey") "userKeyAlias\\(\\w+, kind\\)" else "(resolveKeystoreAlias|keySecurityLevel)\\(\\w+, kind\\)"
+            assertTrue("$fn resolves with its kind", Regex(resolves).containsMatchIn(body))
+        }
+        val pem = manager.substring(manager.indexOf("fun getPublicKeyPEM("))
+        assertTrue("getPublicKeyPEM reads the DER of its kind", Regex("getPublicKeyDER\\(\\w+, kind\\)").containsMatchIn(pem.substring(0, pem.indexOf("\n    }\n"))))
+
+        // No caller anywhere resolves a key id without a namespace.
+        main.walkTopDown().filter { it.extension == "kt" }.forEach { file ->
+            val text = file.readText()
+            Regex("\\bresolve(KeystoreAlias|Key)\\(\\s*[\\w.]+\\s*\\)").findAll(text).forEach {
+                org.junit.Assert.fail("${file.name}: an unqualified resolver call: ${it.value}")
+            }
+        }
+
+        // Each user-key sign runs inside the gate of the id and kind it signs with.
+        val credentialProvider = java.io.File(main, "com/automatethethings/xkey/credential/handler/GetCredentialHandler.kt").readText()
+        for ((name, text) in listOf("Handler" to source, "GetCredentialHandler" to credentialProvider)) {
+            val calls = Regex("keystoreManager\\.(sign|signWithoutBiometric)\\(").findAll(text).count()
+            val gated = Regex("(?:withUsableKey|withKeyUseInOneTurn)\\(([\\w.]+), (\\w+)(?:, \"\\w+\")?\\) \\{\\s*keystoreManager\\.(sign|signWithoutBiometric)\\(\\s*(credentialId = )?([\\w.]+),\\s*(kind = )?(\\w+)")
+                .findAll(text).toList()
+            assertTrue("$name signs a user key", calls > 0)
+            assertEquals("$name: every sign runs in its gate", calls, gated.size)
+            for (call in gated) {
+                assertEquals("$name signs the id it gates: ${call.value}", call.groupValues[1], call.groupValues[5])
+                assertEquals("$name signs with the kind it gates: ${call.value}", call.groupValues[2], call.groupValues[7])
+            }
+        }
+
+        // #255 review r4: the share and export paths resolve the key's kind
+        // once and gate and read that kind, never a hardcoded namespace.
+        val sheet = java.io.File(main, "com/automatethethings/xkey/ui/KeySharingBottomSheet.kt").readText()
+        assertTrue("the desktop share reads through the one share read", "keyPolicyStore.readShareable(" in sheet)
+        assertFalse("the desktop share reads no key itself", Regex("getPublicKey\\w*\\(").containsMatchIn(sheet))
+        assertTrue("importSharedKey reads through the one share read", "keyPolicyStore.readShareable(context, keyId, keystoreManager, keyDao.getByKeyId(keyId))" in source)
+        assertTrue("the desktop share reads the key its row describes", "readShareable(context, keyId, KeystoreManager(context), entity)" in sheet)
+        assertTrue("getPublicKey gates the kind it exports", "keyPolicyStore.withUsableKey(pubKeyParams.keyId, exportKind)" in source)
+        val share = java.io.File(main, "com/automatethethings/xkey/storage/ShareableKeyRead.kt").readText()
+        assertTrue("the share read resolves its kind once", "val kind = keystore.rowOwnerKind(context, keyId, row)" in share && "withUsableKey(keyId, kind)" in share)
+        assertTrue("Handler's key decision is the share read's", "keystoreManager.rowOwnerKind(context, keyId, row)" in source)
+
+        val store = java.io.File(main, "com/automatethethings/xkey/storage/KeyPolicyStore.kt").readText()
+        assertTrue("the gate resolves as the lookups do", "keys = KeyResolver { keyId, kind -> keystore.resolveKey(keyId, kind) }" in store)
+        assertTrue("requireUsable checks the key the lookup reaches", "keys.resolve(keyId, kind)" in store)
+        main.walkTopDown().filter { it.extension == "kt" }.forEach { file ->
+            Regex("KeyPolicyStore\\.of\\(([^\\n]*)\\)").findAll(file.readText()).forEach { call ->
+                assertTrue("${file.name}: every store resolves through the Keystore: ${call.value}", "," in call.groupValues[1])
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------
 
@@ -917,8 +1704,8 @@ class KeyShareAuditTest {
     }
 
     /** Handles [request] as one arriving on a served connection whose peer is [peer]. */
-    private suspend fun served(request: ByteArray, peer: String? = PEER): ByteArray =
-        withContext(RequestHandler.servedConnection(SessionBindingProvider { null }, peer, "test:connection")) {
+    private suspend fun served(request: ByteArray, peer: String? = PEER, connection: String = "test:connection"): ByteArray =
+        withContext(RequestHandler.servedConnection(SessionBindingProvider { null }, peer, connection)) {
             handler.handleRawRequest(request)
         }
 
@@ -987,11 +1774,31 @@ class KeyShareAuditTest {
         return response.result!!
     }
 
+    /**
+     * The one entry of [type]. Any other entry may only be the POLICY_DENIED
+     * row the dispatcher writes for a refusal, which a refusal test pins
+     * with [assertOneDenial]; no other record may appear.
+     */
     private fun single(type: AuditOperationType): AuditLogEntity {
-        assertEquals("one entry expected: $entries", 1, entries.size)
-        val entry = entries.single()
-        assertEquals(type, entry.operationType)
-        return entry
+        val matching = entries.filter { it.operationType == type }
+        assertEquals("one $type entry expected: $entries", 1, matching.size)
+        val others = entries.filterNot { it.operationType == type }
+        assertTrue(
+            "no other record than a policy denial expected: $entries",
+            others.all { it.operationType == AuditOperationType.POLICY_DENIED }
+        )
+        return matching.single()
+    }
+
+    /** Exactly one POLICY_DENIED row, naming the caller's peer and [method]. */
+    private fun assertOneDenial(method: String) {
+        // Not single(POLICY_DENIED): a refusal also writes its own failed row.
+        val denials = entries.filter { it.operationType == AuditOperationType.POLICY_DENIED }
+        assertEquals("one denial expected: $entries", 1, denials.size)
+        val denial = denials.single()
+        assertFalse(denial.success)
+        assertEquals(PEER, denial.deviceId)
+        assertEquals(method, JSONObject(denial.details!!).getString("operation"))
     }
 
     /** Neither the material nor its encodings may appear in any field. */

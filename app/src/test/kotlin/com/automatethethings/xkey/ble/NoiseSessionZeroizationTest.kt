@@ -32,7 +32,7 @@ import org.junit.Before
 import org.junit.Test
 
 /**
- * [NoiseSession] overwrites its key material before it lets go of it (#6).
+ * [NoiseSession] overwrites its key material before it lets go of it.
  *
  * The session's live arrays are reached through
  * [NoiseSession.secretArraysForTest]; a test keeps the references, drives the
@@ -41,8 +41,7 @@ import org.junit.Test
  * these tests prove the session overwrites the arrays it owns, nothing more.
  *
  * The rest of the harness is the one [NoiseHandshakeTest] uses: the responder
- * runs against [NoiseInitiatorSession], and `loadStaticKey` falls back to an
- * in-memory static key off-device.
+ * runs against [NoiseInitiatorSession], its static key in the [NoiseTestKeyStore].
  */
 class NoiseSessionZeroizationTest {
 
@@ -65,6 +64,7 @@ class NoiseSessionZeroizationTest {
 
     @Before
     fun setUp() {
+        NoiseTestKeyStore.install()
         mockkStatic(Log::class)
         every { Log.v(any(), any<String>()) } returns 0
         every { Log.d(any(), any<String>()) } returns 0
@@ -157,6 +157,36 @@ class NoiseSessionZeroizationTest {
     // ---------------------------------------------------------------------
     // The protocol still works
     // ---------------------------------------------------------------------
+
+    /**
+     * `reset()` leaves no secret behind for the next handshake to start from:
+     * no ephemeral private key exists until the next msg1 arrives.
+     */
+    @Test
+    fun resetLeavesNoEphemeralPrivateKey() = runTest {
+        val responder = newResponder()
+        handshake(NoiseInitiatorSession(randomBytes(KEY_SIZE)), responder)
+
+        responder.reset()
+
+        val held = responder.secretArraysForTest()
+        assertFalse("no ephemeral private key after reset", "ephemeralPrivateKey" in held)
+        assertAllZero(held - "staticPrivateKey")
+    }
+
+    /** A reset session still completes a full handshake with a new peer. */
+    @Test
+    fun aResetSessionCompletesANewHandshake() = runTest {
+        val responder = newResponder()
+        handshake(NoiseInitiatorSession(randomBytes(KEY_SIZE)), responder)
+        responder.reset()
+
+        val second = NoiseInitiatorSession(randomBytes(KEY_SIZE))
+        handshake(second, responder)
+
+        assertTrue(responder.isHandshakeComplete())
+        assertArrayEquals(second.getLocalStaticPublicKey(), responder.getRemoteStaticKey())
+    }
 
     // ---------------------------------------------------------------------
     // Keys handed out

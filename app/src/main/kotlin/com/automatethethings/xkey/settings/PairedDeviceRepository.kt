@@ -278,13 +278,14 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
         var stillPending = false
         val evicted = synchronized(storeLock) {
             val devices = storedDevices().toMutableList()
-            // Remove stale entries for this device. A re-pairing device will have a new Noise
-            // static key, so we match by publicKeyHex, BLE address, OR device name to ensure
-            // the old entry is replaced rather than duplicated.
+            // Remove stale entries for this device: the same key, or the same BLE radio
+            // re-pairing under a new Noise static key. The device name is no identity: two
+            // desktops can share a host name, and matching on it would silently unpair the
+            // other one and revoke its grants. The pairing carries nothing else stable, so a
+            // TCP or USB re-pairing under a new key adds a second entry the user can remove.
             val evicted = devices.filter {
                 it.publicKeyHex == publicKeyHex ||
-                    (bleAddress != null && it.bleAddress == bleAddress) ||
-                    it.deviceName == deviceName
+                    (bleAddress != null && it.bleAddress == bleAddress)
             }
             devices.removeAll(evicted)
             devices.add(PairedDeviceData(
@@ -526,6 +527,29 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
 
     fun isRevocationPending(publicKeyHex: String): Boolean = publicKeyHex in pendingRevocations()
 
+    /**
+     * The key policy denials builds before the database's version 13
+     * recorded here, by key id, each as "instance@POLICY" (#193). Read once,
+     * by the 12 -> 13 migration, which moves them into the key policy rows;
+     * nothing records them any more.
+     */
+    fun legacyKeyPolicyDenials(): Map<String, String> =
+        prefs.all.mapNotNull { (name, value) ->
+            if (name.startsWith(KEY_PENDING_KEY_POLICY) && value is String) {
+                name.removePrefix(KEY_PENDING_KEY_POLICY) to value
+            } else {
+                null
+            }
+        }.toMap()
+
+    /** Deletes the records [legacyKeyPolicyDenials] read, once the migration has committed them. */
+    fun dropLegacyKeyPolicyDenials(keyIds: Collection<String>) {
+        if (keyIds.isEmpty()) return
+        val edit = prefs.edit()
+        keyIds.forEach { edit.remove(KEY_PENDING_KEY_POLICY + it) }
+        if (!edit.commit()) Log.w(TAG, "Dropping moved key policy denials did not reach disk; they are not read again")
+    }
+
     /** The generation of [publicKeyHex]'s pending revocation, or null if none is pending. */
     fun pendingRevocationGeneration(publicKeyHex: String): Long? =
         synchronized(storeLock) { readPending()[publicKeyHex] }
@@ -579,10 +603,25 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
      * that clears the marker, and the grant cleanup deletes the row; the call
      * returns false. A marker an ended process left behind is settled the
      * same way by [recoverInterruptedGrantWrites].
+     *
+     * The grant is bound to the pairing current now. A caller that approved
+     * it earlier passes the [pairing] it read then, from [pairingGeneration].
      */
     suspend fun writeGrant(publicKeyHex: String, write: suspend () -> Unit): Boolean {
+        val pairing = pairingGeneration(publicKeyHex) ?: return false
+        return writeGrant(publicKeyHex, pairing, write)
+    }
+
+    /**
+     * [writeGrant] for the pairing generation [pairing], read by [pairingGeneration]
+     * when the user approved the grant. Refused, without running [write],
+     * when the key's current pairing is not that one: a grant approved for
+     * an ended pairing never reaches a later pairing of the same key.
+     */
+    suspend fun writeGrant(publicKeyHex: String, pairing: Long, write: suspend () -> Unit): Boolean {
         val marker = synchronized(storeLock) {
             val generation = currentPairing(publicKeyHex) ?: return false
+            if (generation != pairing) return false
             if (publicKeyHex in pendingRevocations()) return false
             val marker = publicKeyHex to generation
             if (grantWritesInFlight.merge(marker, 1, Int::plus) == 1) {
@@ -745,6 +784,7 @@ class PairedDeviceRepository internal constructor(private val prefs: SharedPrefe
         private const val KEY_PAIRINGS = "pairing_generations"
         private const val KEY_PAIRING_GENERATION = "pairing_generation"
         private const val KEY_GRANT_WRITES = "grant_writes"
+        private const val KEY_PENDING_KEY_POLICY = "pending_key_policy:"
         private const val GENERATION_SEPARATOR = '@'
 
         /**

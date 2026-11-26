@@ -78,6 +78,8 @@ class UserVerificationWireErrorTest {
 
         keyDao = mockk(relaxed = true)
         val database = mockk<XKeyDatabase>(relaxed = true)
+        // No key has a pending deletion.
+        every { database.keyPolicyDao() } returns mockk<com.automatethethings.xkey.storage.dao.KeyPolicyDao>(relaxed = true) { io.mockk.coEvery { deletion(any()) } returns null }
         every { database.keyDao() } returns keyDao
         mockkObject(XKeyDatabase.Companion)
         every { XKeyDatabase.getInstance(any()) } returns database
@@ -120,7 +122,7 @@ class UserVerificationWireErrorTest {
         assertEquals(request.method, request.id, response.id)
         assertNull(request.method, response.result)
         assertEquals(request.method, ErrorCodes.BIOMETRIC_FAILED, response.error?.code)
-        assertEquals(request.method, -32003, response.error?.code)
+        assertEquals(request.method, -32002, response.error?.code)
         assertEquals(request.method, error.message, response.error?.message)
     }
 

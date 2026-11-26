@@ -40,8 +40,8 @@ import org.junit.Before
 import org.junit.Test
 
 /**
- * A send the event consumer makes never waits for an event queued behind it
- * (#63). The peer may write its identity frame before it
+ * A send the event consumer makes never waits for an event queued behind it.
+ * The peer may write its identity frame before it
  * enables notifications: the consumer handling that frame waits for the
  * enable, so the enable has to signal readiness from its callback, not from
  * the consumer. Only the connection that owns the address now is signalled.
@@ -57,9 +57,7 @@ class GattServerNotificationReadyTest {
         const val MTU = 247
         const val TIMEOUT_MS = 5_000L
 
-        // GattServer.NOTIFICATION_READY_TIMEOUT_MS. The tracked scope holds
-        // its timer: it never fires here, so what arrives was not released
-        // by the wait expiring (#252).
+        // GattServer.NOTIFICATION_READY_TIMEOUT_MS; the tracked scope never fires it here.
         const val NOTIFICATION_READY_TIMEOUT_MS = 5_000L
 
         val ENABLE = byteArrayOf(0x01, 0x00)
@@ -81,6 +79,7 @@ class GattServerNotificationReadyTest {
 
     @Before
     fun setUp() {
+        NoiseTestKeyStore.install()
         mockkStatic(Log::class)
         every { Log.v(any(), any<String>()) } returns 0
         every { Log.d(any(), any<String>()) } returns 0

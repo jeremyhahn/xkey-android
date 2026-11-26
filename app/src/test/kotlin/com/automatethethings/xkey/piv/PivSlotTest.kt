@@ -188,4 +188,119 @@ class PivSlotTest {
         assertEquals(2048, PivAlgorithm.RS2048.keySizeBits)
         assertEquals("RSA 2048", PivAlgorithm.RS2048.displayName)
     }
+
+    @Test
+    fun `PivAlgorithm ids are the ones a YubiKey reports`() {
+        val expected = mapOf(
+            PivAlgorithm.ES256 to 0x11,
+            PivAlgorithm.ES384 to 0x14,
+            PivAlgorithm.RS2048 to 0x07,
+            PivAlgorithm.RS3072 to 0x05,
+            PivAlgorithm.RS4096 to 0x16,
+            PivAlgorithm.ED25519 to 0xE0,
+            PivAlgorithm.X25519 to 0xE1,
+            // SP 800-78 assigns no ML-DSA id.
+            PivAlgorithm.ML_DSA_44 to null,
+            PivAlgorithm.ML_DSA_65 to null,
+            PivAlgorithm.ML_DSA_87 to null,
+        )
+
+        assertEquals("table must cover every algorithm", PivAlgorithm.entries.toSet(), expected.keys)
+        expected.forEach { (algorithm, id) ->
+            assertEquals("$algorithm PIV algorithm id", id, algorithm.pivAlgorithmId)
+        }
+    }
+
+    @Test
+    fun `every PivAlgorithm round trips through its PIV id`() {
+        // The ML-DSA entries have no PIV id (SP 800-78 assigns none).
+        PivAlgorithm.entries.filter { it.mlDsaSet == null }.forEach { algorithm ->
+            assertEquals(algorithm, PivAlgorithm.fromPivAlgorithmId(checkNotNull(algorithm.pivAlgorithmId)))
+        }
+        assertNull(PivAlgorithm.fromPivAlgorithmId(0x00))
+        assertNull(PivAlgorithm.fromPivAlgorithmId(0xE2))
+    }
+
+    @Test
+    fun `curve 25519 algorithms need Android 13 and the others run on API 28`() {
+        assertFalse(PivAlgorithm.ED25519.isAvailableOn(32))
+        assertTrue(PivAlgorithm.ED25519.isAvailableOn(33))
+        assertFalse(PivAlgorithm.X25519.isAvailableOn(32))
+        assertTrue(PivAlgorithm.X25519.isAvailableOn(33))
+        listOf(
+            PivAlgorithm.ES256, PivAlgorithm.ES384, PivAlgorithm.RS2048,
+            PivAlgorithm.RS3072, PivAlgorithm.RS4096
+        ).forEach {
+            assertTrue("$it on API 28", it.isAvailableOn(28))
+        }
+    }
+
+    @Test
+    fun `only X25519 agrees and only X25519 cannot sign`() {
+        PivAlgorithm.entries.forEach { algorithm ->
+            val isX25519 = algorithm == PivAlgorithm.X25519
+            assertEquals("$algorithm canSign", !isX25519, algorithm.canSign)
+            assertEquals("$algorithm canAgree", isX25519, algorithm.canAgree)
+        }
+    }
+
+    /** The `piv_slots` row stores `algorithm.name`: renaming an entry orphans stored keys. */
+    @Test
+    fun `PivAlgorithm names stay stable`() {
+        assertEquals(
+            listOf("ES256", "ES384", "RS2048", "RS3072", "RS4096", "ED25519", "X25519", "ML_DSA_44", "ML_DSA_65", "ML_DSA_87"),
+            PivAlgorithm.entries.map { it.name }
+        )
+        PivAlgorithm.entries.forEach { assertEquals(it, PivAlgorithm.fromStoredName(it.name)) }
+        assertNull(PivAlgorithm.fromStoredName("Ed25519"))
+        assertNull(PivAlgorithm.fromStoredName(null))
+    }
+
+    @Test
+    fun `curve 25519 display names match the desktop spelling`() {
+        assertNotNull(PivAlgorithm.ED25519)
+        assertEquals("Ed25519", PivAlgorithm.ED25519.displayName)
+        assertEquals("X25519", PivAlgorithm.X25519.displayName)
+    }
+
+    @Test
+    fun `PivAlgorithm RS3072 has correct properties`() {
+        assertEquals("RSA", PivAlgorithm.RS3072.keyAlgorithm)
+        assertEquals(3072, PivAlgorithm.RS3072.keySizeBits)
+        assertEquals("RSA 3072", PivAlgorithm.RS3072.displayName)
+    }
+
+    @Test
+    fun `PivAlgorithm RS4096 has correct properties`() {
+        assertEquals("RSA", PivAlgorithm.RS4096.keyAlgorithm)
+        assertEquals(4096, PivAlgorithm.RS4096.keySizeBits)
+        assertEquals("RSA 4096", PivAlgorithm.RS4096.displayName)
+    }
+
+    @Test
+    fun `PivAlgorithm carries the PIV algorithm ids`() {
+        assertEquals(0x11, PivAlgorithm.ES256.pivAlgorithmId)
+        assertEquals(0x14, PivAlgorithm.ES384.pivAlgorithmId)
+        assertEquals(0x07, PivAlgorithm.RS2048.pivAlgorithmId)
+        assertEquals(0x05, PivAlgorithm.RS3072.pivAlgorithmId)
+        assertEquals(0x16, PivAlgorithm.RS4096.pivAlgorithmId)
+        val withIds = PivAlgorithm.entries.mapNotNull { it.pivAlgorithmId }
+        assertEquals("every algorithm with an id has its own", withIds.size, withIds.toSet().size)
+    }
+
+    @Test
+    fun `ML-DSA slot algorithms have no SP 800-78 id`() {
+        for (algorithm in listOf(PivAlgorithm.ML_DSA_44, PivAlgorithm.ML_DSA_65, PivAlgorithm.ML_DSA_87)) {
+            assertEquals(null, algorithm.pivAlgorithmId)
+            assertEquals("ML-DSA", algorithm.keyAlgorithm)
+            assertEquals(algorithm.displayName, algorithm.mlDsaSet!!.wireName)
+            assertEquals(algorithm.mlDsaSet!!.publicKeyBytes * 8, algorithm.keySizeBits)
+        }
+        assertEquals(null, PivAlgorithm.ES256.mlDsaSet)
+        assertEquals(
+            "every algorithm without an id is ML-DSA",
+            PivAlgorithm.entries.filter { it.pivAlgorithmId == null }.toSet(),
+            PivAlgorithm.entries.filter { it.mlDsaSet != null }.toSet()
+        )
+    }
 }

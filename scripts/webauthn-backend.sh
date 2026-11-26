@@ -2,20 +2,7 @@
 #
 # Copyright (c) 2026 Jeremy Hahn
 # Copyright (c) 2026 Automate The Things, LLC
-#
-# Brings up the go-xkms WebAuthn relying party as a backend for xKey Android
-# E2E testing, and wires it to a connected device or emulator.
-#
-# Why `adb reverse` and plain HTTP: WebAuthn only runs in a secure context.
-# Reversing the port makes the RP reachable at http://localhost:PORT *on the
-# device*, and localhost is a secure context — so no TLS certificate has to be
-# trusted on the device just to run a ceremony.
-#
-# Usage:
-#   scripts/webauthn-backend.sh start     # build + run the RP, set up adb reverse
-#   scripts/webauthn-backend.sh stop      # stop the RP and remove the tunnel
-#   scripts/webauthn-backend.sh status    # report RP and tunnel state
-#   scripts/webauthn-backend.sh provider  # register xKey as a credential provider
+# Runs the go-xkms WebAuthn RP for E2E tests, reachable on the device via adb reverse at http://localhost. Usage: scripts/webauthn-backend.sh start|stop|status|provider
 set -euo pipefail
 
 GO_XKMS="${GO_XKMS:-$HOME/sources/go-xkms}"

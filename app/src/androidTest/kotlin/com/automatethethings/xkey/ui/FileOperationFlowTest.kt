@@ -584,7 +584,10 @@ class FileOperationFlowTest {
         val encrypted = scratchFile("xkey-fileop-round-$suffix.xkeyenc")
         runBlocking {
             FileOutputStream(encrypted).use { output ->
-                FileEncryptor(keystoreManager).encryptForRecipient(
+                FileEncryptor(
+                    keystoreManager,
+                    com.automatethethings.xkey.storage.KeyPolicyStore.of(com.automatethethings.xkey.storage.XKeyDatabase.getInstance(context), keystoreManager)
+                ).encryptForRecipient(
                     publicKeyDer,
                     ByteArrayInputStream(TEXT_CONTENT.toByteArray()),
                     output
@@ -610,7 +613,10 @@ class FileOperationFlowTest {
         val encrypted = scratchFile("xkey-fileop-used-$suffix.xkeyenc")
         runBlocking {
             FileOutputStream(encrypted).use { output ->
-                FileEncryptor(keystoreManager).encryptForRecipient(
+                FileEncryptor(
+                    keystoreManager,
+                    com.automatethethings.xkey.storage.KeyPolicyStore.of(com.automatethethings.xkey.storage.XKeyDatabase.getInstance(context), keystoreManager)
+                ).encryptForRecipient(
                     publicKeyDer,
                     ByteArrayInputStream(TEXT_CONTENT.toByteArray()),
                     output
@@ -745,6 +751,7 @@ class FileOperationFlowTest {
         val signature = runBlocking {
             keystoreManager.signWithoutBiometric(
                 signingKeyId,
+                com.automatethethings.xkey.crypto.UserKeyKind.GENERAL,
                 SignatureVerifier.hexToBytes(contentHash)
             )
         }

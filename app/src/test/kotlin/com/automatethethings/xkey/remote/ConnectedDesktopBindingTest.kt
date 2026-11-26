@@ -27,8 +27,8 @@ import org.junit.Test
 
 /**
  * Every outbound `remote.*` send goes through a [ConnectedDesktop], whose
- * [SessionSender] is bound to the one connection that authenticated its key
- * (ruling 554, #141). A client that could take a transport's own
+ * [SessionSender] is bound to the one connection that authenticated its key.
+ * A client that could take a transport's own
  * [MessageSender] would send on whichever session the transport holds at
  * send time, so a peer that replaced the captured one would receive it.
  *

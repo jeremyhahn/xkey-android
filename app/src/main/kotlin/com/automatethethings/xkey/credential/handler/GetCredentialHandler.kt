@@ -38,6 +38,7 @@ import com.automatethethings.xkey.credential.NoCredentialsFoundException
 import com.automatethethings.xkey.crypto.BiometricHelper
 import com.automatethethings.xkey.crypto.BiometricRequiredException
 import com.automatethethings.xkey.crypto.KeystoreManager
+import com.automatethethings.xkey.storage.KeyPolicyStore
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.entity.CredentialMetadataEntity
 import kotlinx.coroutines.CancellationException
@@ -69,6 +70,7 @@ class GetCredentialHandler(
     private val credentialDao = database.credentialMetadataDao()
     private val keyDao = database.keyDao()
     private val signCounter = PasskeySignCounter(credentialDao, keyDao)
+    private val keyPolicyStore = KeyPolicyStore.of(database, keystoreManager)
 
     /**
      * Handle the begin phase of credential assertion.
@@ -170,6 +172,17 @@ class GetCredentialHandler(
 
         val credential = credentialDao.getByCredentialId(credentialId)
             ?: throw NoCredentialsFoundException(credentialId)
+        // The one namespace holding the passkey (#255 review r3); the gate
+        // and every signature name it, and an id held in both is refused.
+        val passkeyKind = keystoreManager.soleKind(credentialId)
+            ?: throw NoCredentialsFoundException(credentialId)
+        // The store's deleted-key gate (#193 r12): a passkey whose delete
+        // reported success signs nothing, though its material is still owed.
+        try {
+            keyPolicyStore.requireUsable(credentialId, passkeyKind)
+        } catch (e: KeyPolicyStore.KeyDeletedException) {
+            throw NoCredentialsFoundException(credentialId)
+        }
         Log.d(TAG, "Found credential: rpId=${credential.rpId}, signCount=${credential.signCount}")
 
         // Log available credential options for debugging
@@ -207,6 +220,13 @@ class GetCredentialHandler(
         var clientDataJsonBase64: String? = null
         Log.d(TAG, "clientDataHash provided: ${clientDataHash != null}")
 
+        // Whether the caller brings its own hash or not, it must be a
+        // privileged browser on an origin the rpId is valid for: a supplied
+        // hash fixes the origin the relying party will see.
+        val origin = CallerOrigin.verify(request.callingAppInfo, rpId) { reason, cause ->
+            CredentialAssertionException(reason, cause)
+        }
+
         if (clientDataHash == null) {
             // Browser didn't provide clientDataHash - construct clientDataJSON
             // ourselves. Because this provider is signing the client data, the
@@ -219,30 +239,7 @@ class GetCredentialHandler(
             } catch (e: JSONException) {
                 throw InvalidRequestException("Request is missing a challenge", e)
             }
-            val callingPackage = request.callingAppInfo.packageName
-            val verifiedOrigin = try {
-                request.callingAppInfo.getOrigin(BROWSER_PRIVILEGED_ALLOWLIST)
-            } catch (e: Exception) {
-                Log.e(TAG, "Origin verification failed for $callingPackage", e)
-                throw CredentialAssertionException(
-                    "Could not verify the calling app's origin ($callingPackage)",
-                    e
-                )
-            }
-            val origin = verifiedOrigin ?: throw CredentialAssertionException(
-                "Calling app $callingPackage provided no client data hash and has no " +
-                    "verified web origin; refusing to sign an assertion"
-            )
             Log.d(TAG, "Using origin: $origin")
-
-            // The origin goes into clientDataJSON and the rpId is hashed into
-            // authenticator data. Signing a response where they are unrelated
-            // would let an app obtain an assertion for a site it does not control.
-            if (!RelyingPartyOrigin.isRpIdValidForOrigin(rpId, origin)) {
-                throw CredentialAssertionException(
-                    "Relying party $rpId is not valid for the caller's origin $origin"
-                )
-            }
 
             val clientDataJson = JSONObject().apply {
                 put("type", "webauthn.get")
@@ -264,12 +261,17 @@ class GetCredentialHandler(
 
         // An auth-bound key forces CryptoObject-backed verification during
         // signing, so verification is guaranteed for those keys.
-        val keyRequiresAuth = try {
-            keyDao.getByKeyId(credentialId)?.biometricRequired ?: false
+        val keyPolicy = try {
+            keyDao.getByKeyId(credentialId)
         } catch (e: Exception) {
             Log.w(TAG, "Could not read key policy, assuming not auth-bound: ${e.message}")
-            false
+            null
         }
+        val keyRequiresAuth = keyPolicy?.biometricRequired ?: false
+        // Only a per-operation key (auth duration 0) proves this ceremony's
+        // verification through its own CryptoObject prompt. A time-window key
+        // signs silently while its window is open, so it is no proof.
+        val keyVerifiesPerOperation = keyRequiresAuth && keyPolicy?.authDurationSeconds == 0
         val canVerify = biometricHelper?.isBiometricAvailable() == true
 
         val willVerify = keyRequiresAuth || when (uvRequirement) {
@@ -321,23 +323,35 @@ class GetCredentialHandler(
                 // One queue turn covers the prompt, the counter and the
                 // signature's own prompt, if its key is auth-bound.
                 BiometricHelper.inOneTurn("passkeyAssertion") {
-                    if (!keyRequiresAuth) {
-                        // Keystore only demands a prompt for an auth-bound key, so for
-                        // any other key sign() would take its silent path and we would
-                        // assert UV=1 without anyone being verified. Verify explicitly.
+                    if (!keyVerifiesPerOperation) {
+                        // Keystore demands a prompt only for a per-operation key. Any
+                        // other key, including a time-window key inside its window,
+                        // signs silently, and we would assert UV=1 without anyone
+                        // being verified in this ceremony. Verify explicitly; a
+                        // time-window key accepts the device credential too.
                         helper.authenticateWithoutCrypto(
                             title = "Sign In",
-                            subtitle = "Authenticate to $rpId"
+                            subtitle = "Authenticate to $rpId",
+                            allowDeviceCredential = keyRequiresAuth
                         )
                     }
                     signOnNextCount { data ->
-                        keystoreManager.sign(
-                            credentialId, data, helper,
-                            title = "Sign In",
-                            subtitle = "Authenticate to $rpId"
-                        )
+                        // The material-use lock and its deleted-key recheck
+                        // (#255 review): a delete acknowledged while the
+                        // prompt waited signs nothing; one that comes later
+                        // waits for this signature. On the turn held above,
+                        // then the key's use (#255 review r4).
+                        keyPolicyStore.withKeyUseInOneTurn(credentialId, passkeyKind, "passkeyAssertion") {
+                            keystoreManager.sign(
+                                credentialId, passkeyKind, data, helper,
+                                title = "Sign In",
+                                subtitle = "Authenticate to $rpId"
+                            )
+                        }
                     }
                 }
+            } catch (e: KeyPolicyStore.KeyDeletedException) {
+                throw NoCredentialsFoundException(credentialId)
             } catch (bioEx: Exception) {
                 Log.e(TAG, "Verified signing failed", bioEx)
                 throw CredentialAssertionException("Biometric signing failed", bioEx)
@@ -345,7 +359,11 @@ class GetCredentialHandler(
         } else {
             try {
                 Log.d(TAG, "Signing without verification, credentialId=$credentialId")
-                signOnNextCount { data -> keystoreManager.signWithoutBiometric(credentialId, data) }
+                signOnNextCount { data ->
+                    keyPolicyStore.withUsableKey(credentialId, passkeyKind) { keystoreManager.signWithoutBiometric(credentialId, passkeyKind, data) }
+                }
+            } catch (e: KeyPolicyStore.KeyDeletedException) {
+                throw NoCredentialsFoundException(credentialId)
             } catch (e: BiometricRequiredException) {
                 // The key turned out to be auth-bound after all. Rather than
                 // sign with UV=0 baked into authData while actually verifying,

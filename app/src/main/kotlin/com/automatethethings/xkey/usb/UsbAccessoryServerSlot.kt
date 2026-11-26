@@ -36,7 +36,7 @@ import kotlinx.coroutines.withTimeoutOrNull
  *
  * A server that closes (a pulled cable, a session that ended by itself, a
  * refused open) drops out of the slot, so the next attach builds a fresh one
- * without a service restart (#134). The server is published before it
+ * without a service restart. The server is published before it
  * connects, because connect starts watching for the detach: a close that comes
  * at once finds it and clears it. The attach runs on a worker and the detach
  * broadcast on the main thread, so the slot is guarded by a lock.

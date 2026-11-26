@@ -1,13 +1,36 @@
 # File operations architecture
 
-> **Status: REFERENCE** · Last verified: 2026-10-09
-> As-built description of xKey's file encryption (ECIES) and the file sign, encrypt and decrypt flows.
+> **Status: REFERENCE** · Last verified: 2026-11-23
+> How xKey signs, verifies, encrypts and decrypts a file shared to it from another app.
 
-## File Encryption (ECIES) Flow
+All four operations start in `FileOperationActivity` (`ui/`), which other apps
+reach through the Android share sheet. The pieces it calls:
 
-xKey uses an Elliptic Curve Integrated Encryption Scheme where the ECDH key
-agreement happens entirely in hardware. The derived AES key is used in software
-because Android Keystore does not support importing arbitrary derived keys.
+| Class | Package | Job |
+|-------|---------|-----|
+| `FileEncryptor` | `crypto/` | ECIES encrypt and decrypt in the `.xkeyenc` format |
+| `KeystoreManager` | `crypto/` | Signing and ECDH with keys held in Android Keystore |
+| `MediaHasher` | `media/` | SHA-256 content hashes, including the canonical JPEG hash |
+| `XmpMetadataHelper` | `media/` | Reads and writes the signature block in a JPEG's EXIF |
+| `SignerVerification`, `SignatureVerifier` | `media/` | The per-signer verify decision and the signature check |
+| `FileOperationStaging` | `ui/` | Owns the temporary files each operation writes |
+| `AuditLogger` | `audit/` | Records each operation in the audit log |
+
+Only the first file of a share is processed. The activity accepts
+`ACTION_SEND_MULTIPLE`, but every operation works on `fileUris.first()`.
+
+## File encryption (ECIES)
+
+The ECDH step runs inside Android Keystore, so neither the ephemeral private
+key nor the recipient-side private key is ever in app memory. The AES key that
+comes out of HKDF is used in software: Keystore cannot import a key derived
+outside it.
+
+ECDH needs keys created with `PURPOSE_AGREE_KEY`, which Keystore supports
+from Android 12 (API 31). The app installs on Android 9 (minSdk 28), but
+encrypt and decrypt fail below Android 12, and an EC key generated before the
+device reached API 31 cannot decrypt. `KeystoreManager.performECDH` throws an
+`ECDHException` that says so.
 
 ### Encryption
 
@@ -18,33 +41,37 @@ sequenceDiagram
     participant KM as KeystoreManager
     participant KS as Android Keystore
 
-    App->>FE: encryptForRecipient(recipientPubKey, plaintext, output)
+    App->>FE: encryptForRecipient(recipientPublicKeyDer, plaintext, output)
 
-    Note over FE: Generate ephemeral key ID
-    FE->>KS: KeyPairGenerator(EC P-256, PURPOSE_AGREE_KEY)
-    KS-->>FE: Ephemeral key pair created in hardware
+    Note over FE: keyId = "ephemeral_" + UUID
+    FE->>KS: KeyPairGenerator(EC secp256r1, PURPOSE_AGREE_KEY)
+    KS-->>FE: Ephemeral key pair created in Keystore
 
     FE->>KM: getPublicKeyDER(ephemeralKeyId)
     KM-->>FE: Ephemeral public key (DER)
 
-    FE->>KM: performECDH(ephemeralKeyId, recipientPubKey)
-    KM->>KS: KeyAgreement.doPhase(recipientPubKey)
-    Note over KS: ECDH in hardware -- private key never leaves TEE
-    KS-->>KM: Shared secret bytes
+    FE->>KM: performECDH(ephemeralKeyId, recipientPublicKeyDer)
+    KM->>KS: KeyAgreement ECDH
+    KS-->>KM: Shared secret
     KM-->>FE: Shared secret
 
-    Note over FE: Generate random 32-byte salt
-    FE->>FE: HKDF-SHA256(sharedSecret, salt) --> AES-256 key
-    Note over FE: Generate random 12-byte IV
+    Note over FE: salt = 32 random bytes
+    FE->>FE: HKDF-SHA256(sharedSecret, salt, "xkey-file-encryption-v1") -> AES-256 key
+    Note over FE: iv = 12 random bytes
 
     FE->>FE: Write .xkeyenc header
-    FE->>FE: AES-256-GCM encrypt (streaming via CipherOutputStream)
+    FE->>FE: AES-256-GCM encrypt through CipherOutputStream
 
-    FE->>KM: deleteKey(ephemeralKeyId)
-    Note over KM: Ephemeral key destroyed
-
-    FE-->>App: Encrypted file written
+    FE->>KM: deleteKey(ephemeralKeyId), in a finally block
+    FE-->>App: Encrypted bytes written
 ```
+
+The ephemeral key is generated without a user-authentication requirement and
+without a StrongBox request, so it lives in the TEE. Its Keystore alias is
+`xkey_key_ephemeral_<UUID>`. It is deleted in a `finally` block, so a failed
+encryption does not leave it behind. The delete goes through
+`SharePermissionLedger.revoking` (in `remote/RemoteShareClient.kt`), which also refuses any later share of that
+key ID.
 
 ### Decryption
 
@@ -57,215 +84,126 @@ sequenceDiagram
 
     App->>FE: decryptWithKey(localKeyId, input, output)
 
-    FE->>FE: Read .xkeyenc header (version, ephemeral pubkey, salt, IV)
+    FE->>FE: Read header (version, ephemeral public key, salt, IV)
+    Note over FE: Version other than 0x01 or a short header -> DecryptionException
 
-    FE->>KM: performECDH(localKeyId, ephemeralPubKeyDer)
-    KM->>KS: KeyAgreement.doPhase(ephemeralPubKey)
-    Note over KS: ECDH in hardware
-    KS-->>KM: Shared secret bytes
+    FE->>KM: performECDH(localKeyId, ephemeralPublicKeyDer)
+    KM->>KS: KeyAgreement ECDH
+    KS-->>KM: Shared secret
     KM-->>FE: Shared secret
 
-    FE->>FE: HKDF-SHA256(sharedSecret, salt) --> AES-256 key
-    FE->>FE: AES-256-GCM decrypt (streaming via CipherInputStream)
-
-    FE-->>App: Decrypted file written
+    FE->>FE: HKDF-SHA256(sharedSecret, salt, "xkey-file-encryption-v1") -> AES-256 key
+    FE->>FE: AES-256-GCM decrypt through CipherInputStream
+    FE-->>App: Plaintext written
 ```
 
-## Data Flow: Sign a File
-
-```mermaid
-graph LR
-    A[Share Sheet] -->|URI| B[FileOperationActivity]
-    B -->|InputStream| C[MediaHasher]
-    C -->|Hash bytes| D[KeystoreManager]
-    D -->|In hardware| E[Android Keystore]
-    E -->|Signature| D
-    D -->|Signature bytes| B
-    B -->|ContentAuthenticityData| F[XmpMetadataHelper]
-    F -->|Write EXIF| G[File System]
-    B -->|Log event| H[AuditLogger]
-    H -->|Insert| I[(audit_logs)]
-```
-
-## Data Flow: Encrypt a File
-
-```mermaid
-graph LR
-    A[Share Sheet] -->|URI| B[FileOperationActivity]
-    B -->|Recipient key| C[ContactDao]
-    C -->|PublicKeyDer| B
-    B -->|Plaintext stream| D[FileEncryptor]
-    D -->|Generate ephemeral| E[Android Keystore]
-    D -->|ECDH in hardware| E
-    E -->|Shared secret| D
-    D -->|HKDF derive| F[AES-256 key]
-    D -->|AES-GCM stream| G[.xkeyenc file]
-    D -->|Delete ephemeral| E
-    B -->|Log event| H[AuditLogger]
-```
-
-This document provides end-to-end user flow diagrams for the major operations
-in xKey, from user intent through system interaction to final result.
-
-## Sign a File via Share Sheet
-
-A user shares a document from any app (e.g., a file manager, email client,
-or browser) and signs it with their xKey key.
+## Sign a file
 
 ```mermaid
 sequenceDiagram
     actor User
-    participant App as Any App
-    participant Share as Android Share Sheet
     participant FOA as FileOperationActivity
-    participant KS as Key Selector
     participant MH as MediaHasher
     participant KM as KeystoreManager
-    participant HW as TEE / StrongBox
+    participant ST as FileOperationStaging
     participant XMP as XmpMetadataHelper
-    participant SAF as System File Picker
+    participant SAF as Save picker
 
-    User->>App: Long-press file, tap Share
-    App->>Share: ACTION_SEND with file URI
-    Share-->>User: Show share targets
-    User->>Share: Select "xKey"
-    Share->>FOA: Launch with EXTRA_STREAM URI
+    User->>FOA: Share a file to xKey, pick Sign, pick a key, tap Process
+    FOA->>MH: hashCanonicalUri(uri)
+    MH-->>FOA: Content hash (hex)
 
-    FOA-->>User: Show file info + operation selector
-    User->>FOA: Select "Sign"
-    FOA-->>User: Show key selector
-    User->>KS: Choose signing key
+    FOA->>KM: signWithAlgorithm(keyId, hashBytes, key.algorithm)
+    KM-->>FOA: Signature bytes
 
-    User->>FOA: Tap "Process"
-    FOA->>MH: hashStream(file content)
-    MH-->>FOA: SHA-256 hex hash
+    FOA->>FOA: Build ContentAuthenticityData with one CREATOR entry
 
-    FOA->>KM: signWithAlgorithm(keyId, hashBytes, "ES256")
-    KM->>HW: Sign in hardware
-    HW-->>KM: Signature bytes
-    KM-->>FOA: DER-encoded signature
-
-    alt Image or video file
-        FOA->>XMP: writeSignature(filePath, data)
-        XMP-->>FOA: Signature embedded in EXIF
+    alt JPEG (MIME type image/jpeg or image/jpg)
+        FOA->>ST: stage(fileName, mimeType) and copy the file in
+        FOA->>XMP: writeSignature(stagedPath, data)
+        Note over XMP: EXIF UserComment = "XKEY_SIG:" + JSON
+        FOA->>ST: deliverTo(staged) -> openOutputStream(original uri)
         FOA-->>User: "File signed successfully"
-    else Other file type
-        FOA->>SAF: ACTION_CREATE_DOCUMENT (.xkeysig)
-        SAF-->>User: Choose save location
-        User->>SAF: Confirm save
-        FOA-->>User: "Signature saved as .xkeysig"
+    else Any other type, video included
+        FOA->>SAF: CreateDocument("application/json"), name "<file>.xkeysig"
+        User->>SAF: Pick a location
+        FOA-->>User: Signature saved
     end
 ```
 
-## Encrypt a File for a Recipient
+A JPEG is signed in place: the signed copy is written back over the shared
+URI, so the sharing app must grant write access. Every other file, videos
+included, gets a detached `.xkeysig` file the user saves through the system
+picker. The hash is the canonical one (see
+[media signing](../media-signing/architecture.md)): for a JPEG it skips the
+metadata segments, so writing the signature into the EXIF does not change
+the hash it covers.
 
-A user encrypts a file so that only a specific recipient (whose public key
-is stored as a contact) can decrypt it.
+## Encrypt a file for a recipient
 
-```mermaid
-sequenceDiagram
-    actor User
-    participant App as Any App
-    participant FOA as FileOperationActivity
-    participant CD as Contact Selector
-    participant FE as FileEncryptor
-    participant KS as Android Keystore
-    participant SAF as System File Picker
-
-    User->>App: Share file to xKey
-    App->>FOA: ACTION_SEND with file URI
-
-    FOA-->>User: Show file info + operation selector
-    User->>FOA: Select "Encrypt"
-    FOA-->>User: Show recipient selector
-    User->>CD: Choose recipient (from contacts)
-    CD-->>FOA: ContactEntity with publicKeyDer
-
-    User->>FOA: Tap "Process"
-
-    FOA->>FE: encryptForRecipient(recipientPubKey, plaintext, output)
-
-    Note over FE,KS: Generate ephemeral EC key in Keystore
-    FE->>KS: KeyPairGenerator(P-256, PURPOSE_AGREE_KEY)
-    KS-->>FE: Ephemeral key pair
-
-    Note over FE,KS: ECDH in hardware
-    FE->>KS: KeyAgreement(ephemeral, recipientPubKey)
-    KS-->>FE: Shared secret
-
-    Note over FE: HKDF-SHA256 -> AES-256 key
-    Note over FE: AES-256-GCM streaming encrypt
-    Note over FE: Delete ephemeral key
-
-    FE-->>FOA: Encryption complete
-
-    FOA->>SAF: ACTION_CREATE_DOCUMENT (.xkeyenc)
-    SAF-->>User: Choose save location
-    User->>SAF: Confirm save
-    FOA-->>User: "File encrypted for [recipient name]"
-```
-
-## Decrypt a File
-
-A user receives an encrypted `.xkeyenc` file and decrypts it using their
-encryption key.
+The recipient is a contact (`ContactEntity`), and the contact's
+`publicKeyDer` is the key the file is encrypted to. There is no key picker
+for Encrypt.
 
 ```mermaid
 sequenceDiagram
     actor User
-    participant App as File Manager
     participant FOA as FileOperationActivity
-    participant KS as Key Selector
     participant FE as FileEncryptor
-    participant KM as KeystoreManager
-    participant HW as TEE / StrongBox
-    participant SAF as System File Picker
+    participant ST as FileOperationStaging
+    participant SAF as Save picker
 
-    User->>App: Share .xkeyenc file to xKey
-    App->>FOA: ACTION_SEND with .xkeyenc URI
-
-    FOA-->>User: Show file info
-    FOA->>FOA: Detect .xkeyenc extension, pre-select "Decrypt"
-    FOA-->>User: Show encryption key selector
-    User->>KS: Choose decryption key (EC key with PURPOSE_AGREE_KEY)
-
-    User->>FOA: Tap "Process"
-
-    FOA->>FE: decryptWithKey(localKeyId, inputStream, outputStream)
-    FE->>FE: Read header (version, ephemeral pubkey, salt, IV)
-    FE->>KM: performECDH(localKeyId, ephemeralPubKeyDer)
-    KM->>HW: ECDH key agreement in hardware
-    HW-->>KM: Shared secret
-    KM-->>FE: Shared secret
-    FE->>FE: HKDF-SHA256 -> AES-256 key
-    FE->>FE: AES-256-GCM streaming decrypt
-
-    FE-->>FOA: Decryption complete
-
-    FOA->>SAF: ACTION_CREATE_DOCUMENT (original filename)
-    SAF-->>User: Choose save location
-    User->>SAF: Confirm save
-    FOA-->>User: "File decrypted successfully"
+    User->>FOA: Share a file, pick Encrypt, pick a recipient, tap Process
+    FOA->>ST: stage("<file>.xkeyenc")
+    FOA->>FE: encryptForRecipient(contact.publicKeyDer, input, staged file)
+    FE-->>FOA: Done
+    FOA->>SAF: CreateDocument("application/octet-stream"), name "<file>.xkeyenc"
+    User->>SAF: Pick a location
+    FOA->>ST: Copy staged file to the chosen URI, then delete it
 ```
 
-## Staging Files
+## Decrypt a file
 
-Sign (JPEG in-band), encrypt and decrypt write their output to a staging
-file before it is copied to its target. `FileOperationStaging` (in `ui/`)
-owns these files:
+The user shares an `.xkeyenc` file and picks Decrypt by hand; the screen does
+not pre-select it from the extension.
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant FOA as FileOperationActivity
+    participant FE as FileEncryptor
+    participant ST as FileOperationStaging
+    participant SAF as Save picker
+
+    User->>FOA: Share an .xkeyenc file, pick Decrypt, pick a key, tap Process
+    FOA->>ST: stage(outputName)
+    FOA->>FE: decryptWithKey(keyId, input, staged file)
+    FE-->>FOA: Done
+    FOA->>SAF: CreateDocument("*/*"), name = outputName
+    User->>SAF: Pick a location
+    FOA->>ST: Copy staged file to the chosen URI, then delete it
+```
+
+The suggested output name is the input name with `.xkeyenc` removed, or
+`decrypted_<name>` when the input does not end in `.xkeyenc`.
+
+## Staging files
+
+Sign (JPEG in place), encrypt and decrypt write their output to a staging
+file before it is copied to its target. `FileOperationStaging` owns these
+files:
 
 - They live in `<cacheDir>/file-ops-staging/` and nowhere else.
 - Each name is generated (`stage-<random>.<ext>`). The shared file's display
-  name lends only its extension, and only when it is 1-10 letters or digits,
-  so a `../` in a display name cannot move the file, and two operations never
-  share a path. When the caller passes the content's MIME type, the
-  extension is the one that content requires instead: JPEG content stages as
-  `.jpg` whatever its display name, so the XMP helper's EXIF write lands in
-  the staged file and not in a sidecar beside it.
-- Companion rule: whatever a helper writes beside a staged file, named
+  name lends only its extension, and only when it is 1 to 10 letters or
+  digits, so a `../` in a display name cannot move the file, and two
+  operations never share a path. When the caller passes the content's MIME
+  type, the extension is the one that content requires instead: JPEG content
+  stages as `.jpg` whatever its display name, so the EXIF write lands in the
+  staged file and not in a sidecar beside it.
+- Anything a helper writes beside a staged file, named
   `<staged name>.<suffix>` (the XMP helper's `<staged>.xkeysig` sidecar),
-  belongs to that file and is deleted with it at every point below, so no
-  helper output escapes ownership.
+  belongs to that file and is deleted with it at every point below.
 - A staging file is deleted when its write step throws, once it is copied to
   the target (whether the copy succeeds or throws), when the user cancels the
   save picker, and when the activity finishes.
@@ -273,19 +211,23 @@ owns these files:
   death or an activity recreation go at the next start. The sweep touches
   nothing outside that directory.
 
-## Verify a File
+## Verify a file
 
-Verify reads an embedded (in-band) signature block, or asks for a
-`.xkeysig` sidecar when there is none. Each signer's result comes from
-`SignerVerification.verify` (in `media/`), the rule the verified-media viewer
-shares:
+Verify reads the embedded signature block from a JPEG's EXIF. For any other
+file, or a JPEG without a block, it opens the system picker to choose a
+`.xkeysig` file. Each signer's result comes from `SignerVerification.verify`
+(in `media/`), the same rule the verified-media viewer uses:
 
 1. The stored content hash must match the file first: the canonical hash for
-   an in-band block, the canonical or whole-file hash for a sidecar
+   an embedded block, the canonical or whole-file hash for a `.xkeysig` file
    (`MediaHasher.contentHashMatchesUri`). On a mismatch every signer fails,
    so a signature block copied onto another file never verifies.
-2. The signature is checked against a public key we hold: the contact's, or
-   the local key whose public key hashes to the entry's fingerprint.
+2. The signature is checked against a public key the app holds: the contact
+   whose fingerprint equals the entry's `keyFingerprint`, or, when no contact
+   matches, the local key whose public key hashes to that fingerprint.
 3. No such public key means the signer is unknown, never verified. A local
-   key row without public key material never matches by keyId: the
+   key row without public key material never matches by key ID, because the
    fingerprint comes from the file being checked.
+
+`SignatureVerifier` checks ES256, ES384, ES512, RS256, RS384 and RS512. Any
+other algorithm name fails.

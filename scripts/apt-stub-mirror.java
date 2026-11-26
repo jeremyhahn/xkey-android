@@ -1,11 +1,4 @@
-// apt-stub-mirror: a loopback HTTP server for scripts/apt-retry-test.sh.
-// It serves the files of one directory (a flat apt repository) and answers
-// the first FAIL_N requests with HTTP 500, as a mirror with a transient
-// fault does; FAIL_N -1 answers every request with 500. It binds 127.0.0.1
-// on a free port and writes the port to PORT_FILE once it listens.
-//
-// Usage: java scripts/apt-stub-mirror.java DIR FAIL_N PORT_FILE
-// Needs a JDK 11+ (single-file source launch); the images have /opt/jbr.
+// Loopback HTTP server for apt-retry-test.sh: answers the first FAIL_N requests with 500. Usage: java scripts/apt-stub-mirror.java DIR FAIL_N PORT_FILE
 
 import com.sun.net.httpserver.HttpServer;
 import java.io.OutputStream;

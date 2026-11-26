@@ -702,12 +702,7 @@ class FileOperationActivity : AppCompatActivity() {
         lifecycleScope.launch(Dispatchers.IO) {
             val allKeys = keyDao.getAll()
             // Signing-type keys: signing, fido2, ca, or any key with signing algorithm
-            signingKeys = allKeys.filter { key ->
-                key.keyType in listOf("signing", "fido2", "ca", "attestation") ||
-                    key.algorithm.startsWith("ES") ||
-                    key.algorithm.startsWith("RS") ||
-                    key.algorithm == "Ed25519"
-            }
+            signingKeys = fileSigningKeys(allKeys)
             // Encryption-type keys: encryption keys or EC keys that can do ECDH
             encryptionKeys = allKeys.filter { key ->
                 key.keyType == "encryption" ||
@@ -913,12 +908,14 @@ class FileOperationActivity : AppCompatActivity() {
                 val hashHex = MediaHasher.hashCanonicalUri(contentResolver, uri)
                 val hashBytes = hexToBytes(hashHex)
 
-                // Sign the hash
-                val signatureBytes = keystoreManager.signWithAlgorithm(
+                // Sign the hash, under the material-use lock and its
+                // deleted-key recheck (#255 review).
+                val store = com.automatethethings.xkey.storage.KeyPolicyStore.of(XKeyDatabase.getInstance(this@FileOperationActivity), keystoreManager)
+                val signatureBytes = store.withUsableKey(key.keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL) { keystoreManager.signWithAlgorithm(
                     key.keyId,
                     hashBytes,
                     key.algorithm
-                )
+                ) }
 
                 val signatureBase64 = android.util.Base64.encodeToString(
                     signatureBytes, android.util.Base64.NO_WRAP
@@ -947,13 +944,12 @@ class FileOperationActivity : AppCompatActivity() {
                 )
 
                 // Determine if we can embed in EXIF or need sidecar
-                val mimeType = contentResolver.getType(uri) ?: ""
                 val fileName = getFileName(uri) ?: "file"
 
-                if (mimeType.startsWith("image/jpeg") || mimeType.startsWith("image/jpg")) {
-                    // Copy to a staging file, write EXIF, then copy back. The MIME
+                if (MediaHasher.isJpegUri(contentResolver, uri)) {
+                    // Copy to a staging file, write EXIF, then copy back. The JPEG
                     // type makes it a .jpg, so the EXIF write lands in it.
-                    val tempFile = staging.stage(fileName, mimeType) { staged ->
+                    val tempFile = staging.stage(fileName, MediaHasher.JPEG_MIME_TYPE) { staged ->
                         contentResolver.openInputStream(uri)?.use { input ->
                             FileOutputStream(staged).use { output ->
                                 input.copyTo(output)
@@ -1221,7 +1217,10 @@ class FileOperationActivity : AppCompatActivity() {
         lifecycleScope.launch(Dispatchers.IO) {
             try {
                 // Encrypt to a staging file
-                val fileEncryptor = FileEncryptor(keystoreManager)
+                val fileEncryptor = FileEncryptor(
+                    keystoreManager,
+                    com.automatethethings.xkey.storage.KeyPolicyStore.of(XKeyDatabase.getInstance(this@FileOperationActivity), keystoreManager)
+                )
                 stageForSave(
                     staging,
                     "$fileName.xkeyenc",
@@ -1311,7 +1310,10 @@ class FileOperationActivity : AppCompatActivity() {
         lifecycleScope.launch(Dispatchers.IO) {
             try {
                 // Decrypt to a staging file
-                val fileEncryptor = FileEncryptor(keystoreManager)
+                val fileEncryptor = FileEncryptor(
+                    keystoreManager,
+                    com.automatethethings.xkey.storage.KeyPolicyStore.of(XKeyDatabase.getInstance(this@FileOperationActivity), keystoreManager)
+                )
                 stageForSave(
                     staging,
                     outputName,
@@ -1377,6 +1379,11 @@ class FileOperationActivity : AppCompatActivity() {
         }
         return data
     }
+}
+
+/** The keys the file-signing picker offers: those signWithAlgorithm has a JCA signature for. */
+internal fun fileSigningKeys(keys: List<KeyEntity>): List<KeyEntity> = keys.filter { key ->
+    KeystoreManager.hasJcaSignature(key.algorithm)
 }
 
 /** The staged file one save picker is open for. */

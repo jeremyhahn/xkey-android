@@ -284,12 +284,7 @@ class RequestHandlerAttestationTest {
         val chain = certificates(result.getJSONArray("certificateChain"))
         assertTrue("a device attestation must carry a chain", chain.isNotEmpty())
 
-        // RootOfTrust: bootState is the verifiedBootState enumeration
-        // (0=VERIFIED, 1=SELF_SIGNED, 2=UNVERIFIED, 3=FAILED) and the two boot
-        // measurements are base64, possibly empty when the device does not
-        // publish them.
-        // `getInt`/`getBoolean`/`decode` each raise on the wrong shape, so
-        // reading the fields is itself the assertion that they are usable.
+        // bootState is verifiedBootState (0 VERIFIED .. 3 FAILED); the boot measurements are base64, possibly empty; each getter throws on the wrong shape.
         val bootState = result.getInt("bootState")
         assertTrue("bootState $bootState is outside the RootOfTrust enumeration", bootState in 0..3)
         result.getBoolean("deviceLocked")
@@ -388,20 +383,7 @@ class RequestHandlerAttestationTest {
         )
     }
 
-    // An `attestDeviceDoesNotSignTheChannelBindingThePeerSent` test stood here
-    // until the go-xkms#129 addendum removed `channelBinding` from the request.
-    // It sent a relayed binding and asserted the signature did not verify under
-    // it. With no such field there is nothing to relay and nothing to echo, so
-    // the behaviour it guarded is now unreachable rather than merely forbidden
-    // — a regression path that cannot be expressed needs no test. Deleted
-    // rather than adapted, on purpose: the alternative is a test that pretends
-    // to check a property the wire no longer permits anyone to violate.
-    //
-    // What still protects the derivation: the pinned vectors and the role-swap
-    // assertion in AttestTranscriptTest, and
-    // attestDeviceSignatureVerifiesOverTheTranscriptTheVerifierRebuilds below,
-    // which catches a WRONG derivation because the expected binding is computed
-    // here independently of the handler.
+    // The binding derivation is covered by AttestTranscriptTest's vectors and the transcript-rebuild test below.
 
     /**
      * With no session there is no channel to bind to, and a transcript that
@@ -496,7 +478,7 @@ class RequestHandlerAttestationTest {
      */
     @Test
     fun attestDeviceBindsTheAttestedKeyFingerprintWhenPairing() {
-        // Start from a clean binding so the assertion is about THIS attestation.
+        // Start from a clean binding so the assertion is about this attestation.
         pairedDevices.removeDevice(peerKeyHex)
         pairedDevices.addDevice(peerKeyHex, peerName)
         connectPeer(peerKeyHex)
