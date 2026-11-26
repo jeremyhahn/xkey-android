@@ -115,11 +115,39 @@ class LocalGenerateKeyEd25519HandlerTest {
         assertNull(tables.key("ed"))
     }
 
-    private suspend fun generate(keyId: String, algorithm: String): JSONObject {
+    /** PR #397 review (P1): an Ed25519 key is 256 bits; any other requested size is refused before a key is made. */
+    @Test
+    fun `EdDSA with keySizeBits 4096 is refused with INVALID_PARAMS and makes no key`() = runBlocking<Unit> {
+        val spki = KeyPairGenerator.getInstance("Ed25519").generateKeyPair().public.encoded
+        coEvery { keystore.generateKeyForAlgorithm(any(), "EdDSA", any(), any(), any()) } returns spki
+
+        val response = generate("ed", "EdDSA", keySizeBits = 4096)
+
+        assertNull("EdDSA at 4096 bits must be refused, got $response", response.optJSONObject("result"))
+        assertEquals(ErrorCodes.INVALID_PARAMS, response.getJSONObject("error").getInt("code"))
+        io.mockk.coVerify(exactly = 0) { keystore.generateKeyForAlgorithm(any(), any(), any(), any(), any()) }
+        assertNull(tables.key("ed"))
+    }
+
+    @Test
+    fun `EdDSA with no size or with keySizeBits 256 records 256`() = runBlocking<Unit> {
+        val spki = KeyPairGenerator.getInstance("Ed25519").generateKeyPair().public.encoded
+        coEvery { keystore.generateKeyForAlgorithm(any(), "EdDSA", any(), any(), any()) } returns spki
+
+        for ((keyId, size) in listOf("ed-default" to null, "ed-256" to 256)) {
+            val result = generate(keyId, "EdDSA", keySizeBits = size).optJSONObject("result")
+            assertNotNull("EdDSA with keySizeBits $size must succeed", result)
+            assertEquals(256, result!!.getInt("keySizeBits"))
+            assertEquals(256, tables.key(keyId)!!.keySizeBits)
+        }
+    }
+
+    private suspend fun generate(keyId: String, algorithm: String, keySizeBits: Int? = null): JSONObject {
         val params = JSONObject()
             .put("keyId", keyId)
             .put("algorithm", algorithm)
             .put("requireUserVerification", false)
+        if (keySizeBits != null) params.put("keySizeBits", keySizeBits)
         val request = JSONObject().put("jsonrpc", "2.0").put("id", 1)
             .put("method", MethodNames.LOCAL_GENERATE_KEY)
             .put("params", params)
