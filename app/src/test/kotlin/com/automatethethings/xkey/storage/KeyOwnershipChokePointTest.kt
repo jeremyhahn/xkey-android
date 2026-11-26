@@ -107,7 +107,8 @@ class KeyOwnershipChokePointTest {
     @Test
     fun theRowMatchReadsEd25519KeysFromTheirBackend() {
         val rowKeyKind = body(source("crypto/KeystoreManager.kt"), "rowKeyKind")
-        assertTrue("rowKeyKind reads no Ed25519 key", "getEd25519PrivateKey(" in rowKeyKind && "ed25519PublicKeyDer(" in rowKeyKind)
+        assertTrue("rowKeyKind reads a legacy Ed25519 private key", "getEd25519PrivateKey(" !in rowKeyKind && "ed25519PublicKeyDer(" !in rowKeyKind)
+        assertTrue("rowKeyKind places a legacy Ed25519 key by its entry", "ED25519_ENTRY" in rowKeyKind)
     }
 
     /** #270 verify r3: a remote (`xkmsd`) key's delete resolves no kind, so it probes no local backend. */
