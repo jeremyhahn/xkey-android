@@ -50,7 +50,6 @@ import com.automatethethings.xkey.ca.CAInitResult
 import com.automatethethings.xkey.ca.CASubject
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.entity.KeyEntity
-import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.bootstrap.BootstrapClient
 import com.automatethethings.xkey.bootstrap.BootstrapFailedException
 import com.automatethethings.xkey.bootstrap.NoMethodsConfiguredException
@@ -2531,7 +2530,7 @@ class SettingsActivity : AppCompatActivity() {
     }
 }
 
-/** The keys the media-signing picker offers: signing and FIDO2 keys MediaSigningService can sign with. */
+/** The keys the media-signing picker offers: signing and FIDO2 keys MediaSigningService signs with and SignatureVerifier verifies. */
 internal fun mediaSigningKeys(keys: List<KeyEntity>): List<KeyEntity> = keys.filter {
-    (it.keyType == "signing" || it.keyType == "fido2") && KeystoreManager.hasJcaSignature(it.algorithm)
+    (it.keyType == "signing" || it.keyType == "fido2") && com.automatethethings.xkey.media.SignatureVerifier.offersSigning(it.algorithm)
 }

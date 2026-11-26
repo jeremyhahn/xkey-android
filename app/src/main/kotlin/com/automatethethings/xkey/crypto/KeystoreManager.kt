@@ -3173,13 +3173,16 @@ class KeystoreManager(
          * The keys among [keys] of a type in [keyTypes] that sign through a
          * JCA signature, in [keys]' order: the one selection every co-signing
          * key choice (automatic or picked) goes through, so an ML-DSA key is
-         * never chosen to co-sign.
+         * never chosen to co-sign. A co-signature is a media signature, so the
+         * key must also be one the media verifier checks
+         * ([com.automatethethings.xkey.media.SignatureVerifier.offersSigning]):
+         * an EdDSA key is never chosen either.
          */
         fun jcaSigningKeys(
             keys: List<KeyEntity>,
             keyTypes: Collection<String>
         ): List<KeyEntity> =
-            keys.filter { it.keyType in keyTypes && hasJcaSignature(it.algorithm) }
+            keys.filter { it.keyType in keyTypes && com.automatethethings.xkey.media.SignatureVerifier.offersSigning(it.algorithm) }
 
         private val JCA_SIGNATURE_ALGORITHMS = mapOf(
             "ES256" to SIG_ALGORITHM_ES256,

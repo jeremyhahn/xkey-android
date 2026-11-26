@@ -137,6 +137,8 @@ class KeyCreationAlgorithmsTest {
 
         assertEquals(listOf("ec", "rsa"), mediaSigningKeys(keys).map { it.keyId })
         assertEquals(listOf("ec", "rsa"), fileSigningKeys(keys).map { it.keyId })
+        // A co-signature is a media signature: co-signing selection drops them too.
+        assertEquals(listOf("ec", "rsa"), KeystoreManager.jcaSigningKeys(keys, listOf("signing", "fido2")).map { it.keyId })
     }
 
     /** Every algorithm a signing picker offers makes signatures SignatureVerifier accepts. */
