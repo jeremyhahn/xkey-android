@@ -40,8 +40,10 @@ import androidx.recyclerview.widget.ItemTouchHelper
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.automatethethings.xkey.R
-import com.automatethethings.xkey.remote.SharePermissionLedger
+import com.automatethethings.xkey.crypto.KeystoreManager
+import com.automatethethings.xkey.storage.KeyPolicyStore
 import com.automatethethings.xkey.storage.XKeyDatabase
+import com.automatethethings.xkey.storage.keyMaterialDeleter
 import com.automatethethings.xkey.storage.dao.KeyDao
 import com.automatethethings.xkey.storage.entity.KeyEntity
 import com.google.android.material.card.MaterialCardView
@@ -61,6 +63,7 @@ import kotlinx.coroutines.launch
 class PasskeysActivity : AppCompatActivity() {
 
     private lateinit var keyDao: KeyDao
+    private val keyPolicyStore by lazy { KeyPolicyStore.of(XKeyDatabase.getInstance(this), KeystoreManager(this)) }
     private lateinit var adapter: PasskeyAdapter
 
     private lateinit var rootLayout: FrameLayout
@@ -546,7 +549,16 @@ class PasskeysActivity : AppCompatActivity() {
             .setMessage(getString(R.string.passkey_delete_message, displayName))
             .setPositiveButton(R.string.key_delete_confirm) { _, _ ->
                 lifecycleScope.launch {
-                    SharePermissionLedger.revoking(key.keyId) { keyDao.deleteByKeyId(key.keyId) }
+                    val outcome = deletePasskey(
+                        key,
+                        keyPolicyStore,
+                        keyMaterialDeleter(this@PasskeysActivity, row = key),
+                        XKeyDatabase.getInstance(this@PasskeysActivity).credentialMetadataDao()
+                    )
+                    outcome.refusal?.let { refusal ->
+                        Snackbar.make(rootLayout, getString(refusal), Snackbar.LENGTH_LONG).show()
+                        return@launch
+                    }
                     Snackbar.make(
                         rootLayout,
                         R.string.passkey_deleted,

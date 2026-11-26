@@ -20,12 +20,20 @@ import com.automatethethings.xkey.storage.dao.CredentialMetadataDao
 import com.automatethethings.xkey.storage.entity.KeyEntity
 
 /**
- * The passkey screens' one delete.
+ * The passkey screens' one delete. The passkey is deleted as every other
+ * user key is, through [deleteUserKey] and [KeyPolicyStore.deleteKey]:
+ * its key_deletions tombstone is written in the row delete's transaction
+ * and its material is deleted, so the next key sync cannot copy it back.
+ * Only once the key is [UserKeyDelete.DELETED] is its credential_metadata
+ * row deleted, so the credential provider stops offering it; a passkey
+ * gone, refused or still blocked keeps its row.
  */
-@Suppress("UNUSED_PARAMETER")
 internal suspend fun deletePasskey(
     key: KeyEntity,
     store: KeyPolicyStore,
     material: KeyMaterial,
     credentials: CredentialMetadataDao
-): UserKeyDelete = UserKeyDelete.GONE
+): UserKeyDelete =
+    deleteUserKey(key, store, material).also { outcome ->
+        if (outcome == UserKeyDelete.DELETED) credentials.deleteByCredentialId(key.keyId)
+    }
