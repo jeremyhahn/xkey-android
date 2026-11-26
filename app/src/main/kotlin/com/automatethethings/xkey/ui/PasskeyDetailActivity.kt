@@ -29,8 +29,10 @@ import androidx.core.content.ContextCompat
 import androidx.core.widget.NestedScrollView
 import androidx.lifecycle.lifecycleScope
 import com.automatethethings.xkey.R
-import com.automatethethings.xkey.remote.SharePermissionLedger
+import com.automatethethings.xkey.crypto.KeystoreManager
+import com.automatethethings.xkey.storage.KeyPolicyStore
 import com.automatethethings.xkey.storage.XKeyDatabase
+import com.automatethethings.xkey.storage.keyMaterialDeleter
 import com.automatethethings.xkey.storage.dao.KeyDao
 import com.automatethethings.xkey.storage.entity.KeyEntity
 import com.automatethethings.xkey.storage.entity.SharingPolicyType
@@ -60,6 +62,7 @@ class PasskeyDetailActivity : AppCompatActivity() {
     private lateinit var rootLayout: FrameLayout
     private lateinit var contentLayout: LinearLayout
     private lateinit var keyDao: KeyDao
+    private val keyPolicyStore by lazy { KeyPolicyStore.of(XKeyDatabase.getInstance(this), KeystoreManager(this)) }
     private var currentKeyId: String? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -437,7 +440,16 @@ class PasskeyDetailActivity : AppCompatActivity() {
             .setMessage(getString(R.string.passkey_delete_message, displayName))
             .setPositiveButton(R.string.key_delete_confirm) { _, _ ->
                 lifecycleScope.launch {
-                    SharePermissionLedger.revoking(key.keyId) { keyDao.deleteByKeyId(key.keyId) }
+                    val outcome = deletePasskey(
+                        key,
+                        keyPolicyStore,
+                        keyMaterialDeleter(this@PasskeyDetailActivity, row = key),
+                        XKeyDatabase.getInstance(this@PasskeyDetailActivity).credentialMetadataDao()
+                    )
+                    outcome.refusal?.let { refusal ->
+                        Snackbar.make(rootLayout, getString(refusal), Snackbar.LENGTH_LONG).show()
+                        return@launch
+                    }
                     Snackbar.make(
                         rootLayout,
                         R.string.passkey_deleted,
