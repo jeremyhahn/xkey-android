@@ -88,8 +88,7 @@ class KeystoreManagerAliasTest {
             runCatching { runBlocking { dao.deleteByKeyId(keyId) } }
         }
         rawAliases.forEach { alias -> runCatching { keyStore.deleteEntry(alias) } }
-        // Ed25519 private keys are held in EncryptedSharedPreferences, not the
-        // Keystore, so deleting the alias above would not remove them.
+        // Legacy software Ed25519 keys live in EncryptedSharedPreferences, not the Keystore.
         runCatching {
             val prefs = EncryptedSharedPreferences.create(
                 context,
@@ -545,7 +544,7 @@ class KeystoreManagerAliasTest {
     }
 
     @Test
-    fun ed25519KeysLiveOutsideTheAndroidKeystore() {
+    fun ed25519KeysLiveInTheAndroidKeystoreOnApi33() {
         val keyId = newGeneralKeyId("ed25519")
 
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
@@ -555,19 +554,13 @@ class KeystoreManagerAliasTest {
             return
         }
 
-        val der = try {
-            runBlocking { keystoreManager.generateKeyForAlgorithm(keyId, "Ed25519", -1, false) }
-        } catch (e: KeyGenerationException) {
-            // Ed25519 is a JCE provider capability, not a Keystore one. A device
-            // without it must fail cleanly rather than leave a half-made key.
-            assertFalse(keystoreManager.generalKeyExists(keyId))
-            return
-        }
+        val der = runBlocking { keystoreManager.generateKeyForAlgorithm(keyId, "Ed25519", -1, false) }
 
         assertTrue(der.isNotEmpty())
-        assertFalse("no Keystore entry is created for Ed25519", keystoreManager.generalKeyExists(keyId))
+        assertTrue("an Ed25519 key is a Keystore entry on API 33+", keyStore.containsAlias("xkey_key_$keyId"))
+        assertTrue(keystoreManager.generalKeyExists(keyId))
         assertEquals(
-            "a software Ed25519 key resolves to the general alias (callers use it as a Keystore alias; #186)",
+            "an Ed25519 key resolves to the general alias (#186)",
             "xkey_key_$keyId",
             keystoreManager.resolveKeystoreAlias(keyId, UserKeyKind.GENERAL)
         )

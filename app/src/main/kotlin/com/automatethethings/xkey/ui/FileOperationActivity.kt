@@ -1381,9 +1381,9 @@ class FileOperationActivity : AppCompatActivity() {
     }
 }
 
-/** The keys the file-signing picker offers: those signWithAlgorithm has a JCA signature for. */
+/** The keys the file-signing picker offers: those signWithAlgorithm signs and SignatureVerifier verifies. */
 internal fun fileSigningKeys(keys: List<KeyEntity>): List<KeyEntity> = keys.filter { key ->
-    KeystoreManager.hasJcaSignature(key.algorithm)
+    com.automatethethings.xkey.media.SignatureVerifier.offersSigning(key.algorithm)
 }
 
 /** The staged file one save picker is open for. */

@@ -1531,6 +1531,14 @@ class RequestHandler(
         val algorithmName = CoseAlgorithms.getAlgorithmName(genParams.algorithm)
         // An ML-DSA request the phone cannot meet is refused before any prompt.
         CoseAlgorithms.mlDsaSet(genParams.algorithm)?.let { mlDsaBacking(genParams, it) }
+        // No FIDO2 path signs with EdDSA (its COSE key is EC2 only), so an
+        // EdDSA FIDO2 key is refused before any prompt, key or row.
+        if (genParams.algorithm == CoseAlgorithms.EDDSA && genParams.keyType == KeyTypes.FIDO2) {
+            throw ProtocolException(
+                "EdDSA is not supported for FIDO2 keys; use ES256",
+                errorCode = ErrorCodes.INVALID_PARAMS
+            )
+        }
 
         // Every id is the key it names: the resolver never reads an id as a
         // raw Keystore alias, so `xkey_key_a` is key `xkey_key_a`, never key
@@ -2062,6 +2070,15 @@ class RequestHandler(
         // The requesting desktop, captured before anything can suspend.
         val caller = auditCaller()
 
+        // A legacy software Ed25519 key is listed and deleted only; it never signs.
+        if (!keystoreManager.generalKeyExists(signParams.keyId) &&
+            keystoreManager.hasSoftwareEd25519Key(com.automatethethings.xkey.crypto.KeystoreManager.generalKeyAlias(signParams.keyId))
+        ) {
+            throw ProtocolException(
+                "Key ${signParams.keyId} is a legacy software Ed25519 key, which cannot sign; delete it and create a new Ed25519 key",
+                errorCode = ErrorCodes.INVALID_ALGORITHM
+            )
+        }
         if (!keystoreManager.generalKeyExists(signParams.keyId)) {
             throw ProtocolException("Key not found: ${signParams.keyId}", errorCode = ErrorCodes.KEY_NOT_FOUND)
         }
@@ -5355,6 +5372,15 @@ class RequestHandler(
                     request.id,
                     ErrorCodes.OPERATION_DENIED,
                     "Key $keyId is not a signing key"
+                )
+            }
+            // The auto-select's own check: a co-signature is a media
+            // signature, so only an algorithm SignatureVerifier verifies co-signs.
+            if (!com.automatethethings.xkey.media.SignatureVerifier.offersSigning(named.algorithm)) {
+                return Response.error(
+                    request.id,
+                    ErrorCodes.OPERATION_DENIED,
+                    "Key $keyId cannot co-sign: ${named.algorithm} co-signatures cannot be verified"
                 )
             }
             named

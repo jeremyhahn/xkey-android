@@ -100,7 +100,6 @@ class Ed25519ValueReadFailureTest {
     fun aValueReadSecurityExceptionIsUnreadable() {
         assertThrowsUnreadable { keystore.userKeyGeneration(ID) }
         assertThrowsUnreadable { keyMaterialGeneration(mockk(relaxed = true), ID, keystore) }
-        assertThrowsUnreadable { keystore.getEd25519PrivateKey(ALIAS) }
         assertThrowsUnreadable { keystore.deleteUserKeyGeneration(ID, mapOf("ed25519:$ALIAS" to "tag")) }
     }
 

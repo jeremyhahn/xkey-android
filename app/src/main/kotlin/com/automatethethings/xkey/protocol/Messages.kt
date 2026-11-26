@@ -1005,11 +1005,12 @@ object CoseAlgorithms {
 
     /**
      * The key size [algorithm] fixes, or its default modulus for RSA: curve
-     * size for EC, key length for AES, digest length for HMAC. Null when the
-     * algorithm has no size a request can name (EdDSA, unknown).
+     * size for EC, 256 for EdDSA (Ed25519 is its only curve), key length for
+     * AES, digest length for HMAC. Null for an unknown algorithm.
      */
     fun nominalKeySizeBits(algorithm: Int): Int? = when (algorithm) {
         ES256, ES384, ES512, RS256, RS384, RS512 -> getKeySizeBits(algorithm)
+        EDDSA -> 256
         ML_DSA_44, ML_DSA_65, ML_DSA_87 -> getKeySizeBits(algorithm)
         A128GCM -> 128
         A192GCM -> 192

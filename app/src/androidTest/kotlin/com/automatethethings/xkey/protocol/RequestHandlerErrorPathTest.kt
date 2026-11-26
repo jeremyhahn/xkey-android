@@ -640,10 +640,7 @@ class RequestHandlerErrorPathTest {
         assertEquals(ErrorCodes.ENCRYPTION_FAILED, response.errorCode())
     }
 
-    /**
-     * EdDSA has a COSE id but no Keystore key behind local.generateKey (only
-     * the name Ed25519 makes one): UnsupportedAlgorithmException.
-     */
+    /** EdDSA is a Keystore key from API 33; below it UnsupportedAlgorithmException maps to INVALID_ALGORITHM. */
     @Test
     fun unsupportedAlgorithmMapsToInvalidAlgorithm() {
         val keyId = "unsupported-$runId"
@@ -657,7 +654,11 @@ class RequestHandlerErrorPathTest {
                 .put("requireUserVerification", false)
                 .put("preferStrongBox", false)
         )
-        assertEquals(ErrorCodes.INVALID_ALGORITHM, response.errorCode())
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            assertEquals(null, response.error)
+        } else {
+            assertEquals(ErrorCodes.INVALID_ALGORITHM, response.errorCode())
+        }
     }
 
     /** An exportable asymmetric key is a policy refusal, not a crypto failure. */

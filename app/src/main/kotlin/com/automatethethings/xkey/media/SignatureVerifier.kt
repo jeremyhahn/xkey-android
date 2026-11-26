@@ -35,6 +35,28 @@ object SignatureVerifier {
 
     private const val TAG = "SignatureVerifier"
 
+    /** The algorithms [verify] checks, each with the JCA signature it verifies with. */
+    private val VERIFIED_SIGNATURES = mapOf(
+        "ES256" to "SHA256withECDSA",
+        "ES384" to "SHA384withECDSA",
+        "ES512" to "SHA512withECDSA",
+        "RS256" to "SHA256withRSA",
+        "RS384" to "SHA384withRSA",
+        "RS512" to "SHA512withRSA"
+    )
+
+    /** True when [verify] checks signatures of [algorithm]; any other algorithm's always fail it. */
+    fun verifies(algorithm: String): Boolean = algorithm in VERIFIED_SIGNATURES
+
+    /**
+     * The one test every file- and media-signing key picker filters on: a key
+     * of [algorithm] signs through a JCA signature and [verify] can check what
+     * it signs. An EdDSA or ML-DSA key fails it, so no picker offers a key
+     * whose signatures no one can verify.
+     */
+    fun offersSigning(algorithm: String): Boolean =
+        com.automatethethings.xkey.crypto.KeystoreManager.hasJcaSignature(algorithm) && verifies(algorithm)
+
     /**
      * Verifies [entry] against [publicKeyDer].
      *
@@ -85,15 +107,7 @@ object SignatureVerifier {
                 KeyFactory.getInstance("EC")
             }
             val publicKey = keyFactory.generatePublic(X509EncodedKeySpec(publicKeyDer))
-            val sigAlgorithm = when (algorithm) {
-                "ES256" -> "SHA256withECDSA"
-                "ES384" -> "SHA384withECDSA"
-                "ES512" -> "SHA512withECDSA"
-                "RS256" -> "SHA256withRSA"
-                "RS384" -> "SHA384withRSA"
-                "RS512" -> "SHA512withRSA"
-                else -> return false
-            }
+            val sigAlgorithm = VERIFIED_SIGNATURES[algorithm] ?: return false
             Signature.getInstance(sigAlgorithm).apply {
                 initVerify(publicKey)
                 update(data)
