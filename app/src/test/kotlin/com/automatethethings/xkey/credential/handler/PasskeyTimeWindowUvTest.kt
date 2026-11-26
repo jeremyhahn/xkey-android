@@ -123,7 +123,7 @@ class PasskeyTimeWindowUvTest {
         assertion("preferred")
 
         coVerify(exactly = 0) { helper.authenticateWithoutCrypto(any(), any(), any(), any(), any()) }
-        coVerify(exactly = 1) { keystoreManager.sign(CREDENTIAL_ID, any(), any(), helper, any(), any(), any()) }
+        coVerify(exactly = 1) { keystoreManager.sign(CREDENTIAL_ID, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL, any(), helper, any(), any(), any()) }
         assertEquals(UV or UP, signedFlags and (UV or UP))
     }
 
