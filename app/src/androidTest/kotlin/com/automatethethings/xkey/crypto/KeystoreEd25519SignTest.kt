@@ -21,8 +21,10 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
+import org.junit.Assume.assumeTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -38,6 +40,7 @@ class KeystoreEd25519SignTest {
     private lateinit var context: Context
     private lateinit var keystoreManager: KeystoreManager
     private val keyId = "ed25519-sign-${System.nanoTime()}"
+    private val otherKeyId = "ed25519-other-${System.nanoTime()}"
 
     @Before
     fun setUp() {
@@ -48,6 +51,7 @@ class KeystoreEd25519SignTest {
     @After
     fun tearDown() {
         runCatching { keystoreManager.deleteGeneralKey(keyId) }
+        runCatching { keystoreManager.deleteGeneralKey(otherKeyId) }
     }
 
     @Test
@@ -74,5 +78,31 @@ class KeystoreEd25519SignTest {
             verify(signature)
         }
         assertTrue("the Keystore's Ed25519 signature verifies under the returned key", verifies)
+    }
+
+    /**
+     * The check signApproved runs on a per-operation key's signature, on the
+     * device's own providers: a Keystore Ed25519 key's signature verifies
+     * under its public key, and another Keystore Ed25519 key's does not.
+     */
+    @Test
+    fun theApprovedKeyCheckAcceptsAKeystoreEd25519KeysOwnSignatureOnly() {
+        assumeTrue("Keystore Ed25519 keys need API 33", Build.VERSION.SDK_INT >= 33)
+        val approvedDer = runBlocking { keystoreManager.generateKeyForAlgorithm(keyId, "EdDSA", -1, false) }
+        runBlocking { keystoreManager.generateKeyForAlgorithm(otherKeyId, "EdDSA", -1, false) }
+        val algorithm = KeystoreManager.jcaSignatureAlgorithm("EdDSA")
+        val message = "xKey approved Ed25519 key".toByteArray()
+
+        val own = runBlocking { keystoreManager.signWithAlgorithm(keyId, message, "EdDSA") }
+        val other = runBlocking { keystoreManager.signWithAlgorithm(otherKeyId, message, "EdDSA") }
+
+        assertTrue(
+            "the approved key's signature verifies",
+            keystoreManager.verifiesUnder(approvedDer, algorithm, null, message, own)
+        )
+        assertFalse(
+            "another Keystore Ed25519 key's signature is refused",
+            keystoreManager.verifiesUnder(approvedDer, algorithm, null, message, other)
+        )
     }
 }

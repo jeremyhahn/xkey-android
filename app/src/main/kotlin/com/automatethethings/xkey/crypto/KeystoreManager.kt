@@ -1677,8 +1677,12 @@ class KeystoreManager(
         return signature
     }
 
-    /** Whether [signature] over [data] verifies under the X.509 [publicKeyDer]. */
-    private fun verifiesUnder(
+    /**
+     * Whether [signature] over [data] verifies under the X.509 [publicKeyDer].
+     * Internal so a device test can run it on the device's own providers.
+     */
+    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
+    internal fun verifiesUnder(
         publicKeyDer: ByteArray,
         jcaAlgorithm: String,
         set: MlDsaParameterSet?,
