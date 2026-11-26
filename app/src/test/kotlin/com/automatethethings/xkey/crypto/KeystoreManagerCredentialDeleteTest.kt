@@ -62,6 +62,8 @@ class KeystoreManagerCredentialDeleteTest {
 
     @Before
     fun setUp() {
+        // Main's shared ML-DSA store is per process: each test starts with none.
+        com.automatethethings.xkey.crypto.PqcSoftwareKeyStore.clearSharedForTest()
         mockkStatic(Log::class)
         every { Log.d(any(), any<String>()) } returns 0
         every { Log.w(any(), any<String>()) } returns 0
@@ -72,11 +74,16 @@ class KeystoreManagerCredentialDeleteTest {
         every { keyStore.deleteEntry(any()) } answers { entries.remove(firstArg<String>()) }
         mockkStatic(KeyStore::class)
         every { KeyStore.getInstance("AndroidKeyStore") } returns keyStore
-        keystoreManager = KeystoreManager(mockk<Context>(relaxed = true), pqcStore = noPqcKeys())
+        keystoreManager = KeystoreManager(mockk<Context>(relaxed = true).also {
+            // The ML-DSA store reads the context's files directory: an empty one here.
+            every { it.applicationContext } returns it
+            every { it.filesDir } returns java.nio.file.Files.createTempDirectory("pqc-keys").toFile().apply { deleteOnExit() }
+        }, pqcStore = noPqcKeys())
     }
 
     @After
     fun tearDown() {
+        com.automatethethings.xkey.crypto.PqcSoftwareKeyStore.clearSharedForTest()
         unmockkAll()
     }
 
@@ -97,28 +104,11 @@ class KeystoreManagerCredentialDeleteTest {
     }
 
     @Test
-    fun `deleteKey of a missing alias is not audited`() {
-        assertFalse(keystoreManager.deleteKey("missing"))
-
-        assertEquals(3, entries.size)
-        verify(exactly = 0) { AuditLogger.logKeyDeleted(any(), any(), any()) }
-    }
-
-    @Test
     fun `deleteGeneralKey of a missing alias is not audited`() {
         assertFalse(keystoreManager.deleteGeneralKey("missing"))
 
         assertEquals(3, entries.size)
         verify(exactly = 0) { AuditLogger.logKeyDeleted(any(), any(), any()) }
-    }
-
-    @Test
-    fun `two racing deleteKey calls audit one deletion`() {
-        val results = racingDeletes("xkey_credential_c") { keystoreManager.deleteKey("c") }
-
-        assertEquals(listOf(false, true), results.sorted())
-        assertFalse("xkey_credential_c" in entries)
-        verify(exactly = 1) { AuditLogger.logKeyDeleted("c", "c", "fido2") }
     }
 
     @Test
@@ -144,28 +134,14 @@ class KeystoreManagerCredentialDeleteTest {
         val prefs = InMemorySharedPreferences()
         val manager = softwareEd25519Manager(prefs)
         prefs.edit().putString("xkey_key_ed", "encoded-private-key").commit()
-        assertEquals("xkey_key_ed", manager.resolveKeystoreAlias("ed"))
+        assertEquals("xkey_key_ed", manager.resolveKeystoreAlias("ed", UserKeyKind.GENERAL))
 
         assertTrue(manager.deleteGeneralKey("ed"))
 
         assertFalse(prefs.contains("xkey_key_ed"))
-        assertNull(manager.resolveKeystoreAlias("ed"))
+        assertNull(manager.resolveKeystoreAlias("ed", UserKeyKind.GENERAL))
         assertFalse(manager.deleteGeneralKey("ed"))
         verify(exactly = 1) { AuditLogger.logKeyDeleted("ed", "ed", "general") }
-    }
-
-    @Test
-    fun `deleteKey removes a software Ed25519 key and audits it once`() {
-        val prefs = InMemorySharedPreferences()
-        val manager = softwareEd25519Manager(prefs)
-        prefs.edit().putString("xkey_key_ed", "encoded-private-key").commit()
-
-        assertTrue(manager.deleteKey("ed"))
-
-        assertFalse(prefs.contains("xkey_key_ed"))
-        assertNull(manager.resolveKeystoreAlias("ed"))
-        assertFalse(manager.deleteKey("ed"))
-        verify(exactly = 1) { AuditLogger.logKeyDeleted("ed", "ed", "fido2") }
     }
 
     @Test

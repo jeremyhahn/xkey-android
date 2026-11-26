@@ -84,6 +84,7 @@ class LocalGenerateKeyMlDsaHandlerTest {
     private lateinit var handler: RequestHandler
     private lateinit var keystore: KeystoreManager
     private lateinit var keyDao: KeyDao
+    private lateinit var policies: com.automatethethings.xkey.storage.dao.KeyPolicyDao
     private lateinit var handlerContext: Context
     private lateinit var pairedDevices: PairedDeviceRepository
     private val savedBackend = PqcHardware.backend
@@ -109,7 +110,11 @@ class LocalGenerateKeyMlDsaHandlerTest {
         PqcHardware.backend = null
 
         keyDao = mockk(relaxed = true)
-        coEvery { keyDao.insert(capture(stored)) } returns 1L
+        // Key rows are stored through the key policy store; no delete of any key is pending.
+        policies = mockk(relaxed = true)
+        coEvery { policies.deletion(any()) } returns null
+        coEvery { policies.policyRow(any()) } returns null
+        coEvery { policies.insertKey(capture(stored)) } returns 1L
         coEvery { keyDao.getByKeyId(any()) } returns null
         coEvery { keyDao.getByKeyId("pq") } returns KeyEntity(
             keyId = "pq", keyType = "signing", algorithm = "ML-DSA-65", label = "pq",
@@ -117,8 +122,20 @@ class LocalGenerateKeyMlDsaHandlerTest {
         )
         val database = mockk<XKeyDatabase>(relaxed = true)
         every { database.keyDao() } returns keyDao
+        every { database.keyPolicyDao() } returns policies
         mockkObject(XKeyDatabase.Companion)
         every { XKeyDatabase.getInstance(any()) } returns database
+        // The store on the policy DAO with a direct transaction: a relaxed database's transaction never ends.
+        mockkObject(com.automatethethings.xkey.storage.KeyPolicyStore.Companion)
+        every { com.automatethethings.xkey.storage.KeyPolicyStore.of(any(), any()) } answers {
+            com.automatethethings.xkey.storage.KeyPolicyStore(
+                policies,
+                object : com.automatethethings.xkey.storage.KeyPolicyStore.Transactor {
+                    override suspend fun <T> run(block: suspend () -> T): T = block()
+                },
+                keys = com.automatethethings.xkey.storage.KeyPolicyStore.KeyResolver { id, kind -> secondArg<KeystoreManager>().resolveKey(id, kind) }
+            )
+        }
         mockkStatic(KeyStore::class)
         every { KeyStore.getInstance("AndroidKeyStore") } returns mockk(relaxed = true)
 
@@ -131,8 +148,11 @@ class LocalGenerateKeyMlDsaHandlerTest {
             if (backings.lastOrNull() == PqcBacking.HARDWARE) KeySecurityLevel.TEE else KeySecurityLevel.SOFTWARE
         }
         every { keystore.generalKeyExists("pq") } returns true
+        // Every key here is a general key: a relaxed mock would name the credential.
+        every { keystore.exportKind(any()) } returns com.automatethethings.xkey.crypto.UserKeyKind.GENERAL
+        every { keystore.rowKeyKind(any(), any(), any(), any()) } returns com.automatethethings.xkey.crypto.UserKeyKind.GENERAL
         every { keystore.publicKeyDERAt(KeystoreManager.generalKeyAlias("pq")) } returns spki
-        every { keystore.getPublicKeyDER("pq") } returns spki
+        every { keystore.getPublicKeyDER("pq", com.automatethethings.xkey.crypto.UserKeyKind.GENERAL) } returns spki
         coEvery { keystore.signApprovedMlDsa(any(), any(), any(), any()) } returns
             ByteArray(MlDsaParameterSet.ML_DSA_65.signatureBytes) { 9 }
 
@@ -214,7 +234,7 @@ class LocalGenerateKeyMlDsaHandlerTest {
         every { keystore.deleteGeneralKey("f") } answers { material.remove("f") }
         every { keystore.generalKeyExists("f") } answers { "f" in material }
         var inserts = 0
-        coEvery { keyDao.insert(match { it.keyId == "f" }) } answers {
+        coEvery { policies.insertKey(match { it.keyId == "f" }) } answers {
             if (inserts++ == 0) throw IllegalStateException("database is full") else 1L
         }
         val params = """{"keyId":"f","algorithm":"ML-DSA-65","requireUserVerification":false}"""
@@ -255,7 +275,7 @@ class LocalGenerateKeyMlDsaHandlerTest {
             val source = java.io.File(root, path).readText()
             val uses = unitCall.findAll(source).map { it.range.first }.toList()
             assertEquals("$path: one generateMlDsaKeyAndCommit call", 1, uses.size)
-            val insert = source.indexOf("keyDao.insert(", uses[0])
+            val insert = source.indexOf(".insertKey(", uses[0])
             val nextFunction = source.indexOf("\n/**", uses[0]).let { if (it < 0) source.length else it }
                 .coerceAtMost(source.indexOf("\n    /**", uses[0]).let { if (it < 0) source.length else it })
             assertTrue("$path: the row is not stored in the unit", insert in uses[0]..nextFunction)
@@ -303,7 +323,7 @@ class LocalGenerateKeyMlDsaHandlerTest {
             generate("""{"keyId":"x","algorithm":"ML-DSA-87","keyBacking":"hardware","requireUserVerification":false}""")
         )
         assertEquals(emptyList<PqcBacking>(), backings)
-        coVerify(exactly = 0) { keyDao.insert(any()) }
+        coVerify(exactly = 0) { policies.insertKey(any()) }
     }
 
     @Test
@@ -361,9 +381,14 @@ class LocalGenerateKeyMlDsaHandlerTest {
         val alias = KeystoreManager.generalKeyAlias("pq")
         val launcher = mockk<BiometricActivityLauncher>(relaxed = true)
         val boundSignature = ByteArray(MlDsaParameterSet.ML_DSA_65.signatureBytes) { 5 }
+        // The prompt makes what it signs on its own turn, as the real launcher does.
+        var promptSigned: ByteArray? = null
         coEvery {
-            launcher.requestCryptoSignature(any(), any(), any(), any(), any(), alias, "ML-DSA-65", any())
-        } returns boundSignature
+            launcher.requestCryptoSignatureOnTurn(any(), any(), any(), any(), any(), alias, any(), "ML-DSA-65")
+        } coAnswers {
+            promptSigned = arg<suspend () -> ByteArray>(1)()
+            boundSignature
+        }
         every { keystore.isPerOperationKey(alias) } returns true
         coEvery { keystore.signApprovedMlDsa(alias, spki, any(), MlDsaParameterSet.ML_DSA_65, any(), any()) } coAnswers {
             val signer = arg<CryptoObjectSigner?>(5) ?: throw BiometricRequiredException()
@@ -387,7 +412,11 @@ class LocalGenerateKeyMlDsaHandlerTest {
         assertArrayEquals(boundSignature, Base64.getDecoder().decode(result!!.getString("signature")))
         coVerify(exactly = 0) { launcher.requestAuthentication(any(), any(), any(), any(), any()) }
         coVerify(exactly = 1) {
-            launcher.requestCryptoSignature("pq", "to sign".toByteArray(), any(), any(), any(), alias, "ML-DSA-65", any())
+            launcher.requestCryptoSignatureOnTurn("pq", any(), any(), any(), any(), alias, any(), "ML-DSA-65")
+        }
+        assertArrayEquals("to sign".toByteArray(), promptSigned)
+        coVerify(exactly = 0) {
+            launcher.requestCryptoSignature(any(), any(), any(), any(), any(), any(), any(), any())
         }
     }
 
@@ -408,11 +437,19 @@ class LocalGenerateKeyMlDsaHandlerTest {
     @Test
     fun `delete removes a software ML-DSA key through the keystore choke point`() = runTest {
         every { keystore.pqcSoftwareKeyExists("pq") } returns true
+        // The store finds the row this request read and deletes it.
+        coEvery { policies.keyInstance("pq") } returns 0L
+        coEvery { policies.deleteKey("pq") } returns 1
+        // The software key store holds generation "g1" of the key.
+        val software = mockk<com.automatethethings.xkey.crypto.SoftwareKeyStore>(relaxed = true)
+        every { keystore.softwareKeys() } returns software
+        every { software.generation("pq") } returns "g1"
+        every { software.deleteGeneration("pq", "g1") } returns true
 
         val response = call(MethodNames.LOCAL_DELETE_KEY, """{"keyId":"pq"}""")
 
         assertFalse(response.toString(), response.has("error"))
-        verify { keystore.deleteGeneralKey("pq") }
+        verify { software.deleteGeneration("pq", "g1") }
     }
 
     @Test

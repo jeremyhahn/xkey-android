@@ -64,7 +64,11 @@ class KeystoreManagerUncommittedRemovalTest {
         every { keyStore.containsAlias(any()) } returns false
         mockkStatic(KeyStore::class)
         every { KeyStore.getInstance("AndroidKeyStore") } returns keyStore
-        keystoreManager = KeystoreManager(mockk<Context>(relaxed = true), pqcStore = noPqcKeys())
+        keystoreManager = KeystoreManager(mockk<Context>(relaxed = true).also {
+            // The ML-DSA store reads the context's files directory: an empty one here.
+            every { it.applicationContext } returns it
+            every { it.filesDir } returns java.nio.file.Files.createTempDirectory("pqc-keys").toFile().apply { deleteOnExit() }
+        }, pqcStore = noPqcKeys())
     }
 
     @After
@@ -78,9 +82,9 @@ class KeystoreManagerUncommittedRemovalTest {
         val manager = softwareEd25519Manager(prefs)
         prefs.diskFails = true
 
-        assertThrows(KeyDeletionException::class.java) { manager.deleteKey("ua") }
+        assertThrows(KeyDeletionException::class.java) { manager.deleteGeneralKey("ua") }
         assertFalse("the cache already dropped the key", prefs.contains("xkey_key_ua"))
-        assertThrows(KeyDeletionException::class.java) { manager.deleteKey("ua") }
+        assertThrows(KeyDeletionException::class.java) { manager.deleteGeneralKey("ua") }
         assertThrows(KeyDeletionException::class.java) { manager.deleteByAlias("xkey_key_ua") }
         assertTrue("the key is still on disk", "xkey_key_ua" in prefs.disk)
     }
@@ -115,16 +119,16 @@ class KeystoreManagerUncommittedRemovalTest {
         val prefs = FakeSharedPreferences(mapOf("xkey_key_ud" to "secret"))
         val manager = softwareEd25519Manager(prefs)
         prefs.diskFails = true
-        assertThrows(KeyDeletionException::class.java) { manager.deleteKey("ud") }
+        assertThrows(KeyDeletionException::class.java) { manager.deleteGeneralKey("ud") }
 
         prefs.diskFails = false
         val writesBefore = prefs.diskWrites
 
-        assertTrue("the retried removal reports the key removed", manager.deleteKey("ud"))
+        assertTrue("the retried removal reports the key removed", manager.deleteGeneralKey("ud"))
         assertTrue("the retry wrote to disk", prefs.diskWrites > writesBefore)
         assertFalse("the key is gone from disk", "xkey_key_ud" in prefs.disk)
         assertTrue(manager.keyMaterialAbsent("ud"))
-        assertFalse(manager.deleteKey("ud"))
+        assertFalse(manager.deleteGeneralKey("ud"))
     }
 
     @Test
@@ -135,11 +139,11 @@ class KeystoreManagerUncommittedRemovalTest {
         assertThrows(KeyDeletionException::class.java) { manager.deleteByAlias("xkey_key_ue") }
         assertFalse("the cache already dropped the key", prefs.contains("xkey_key_ue"))
 
-        assertEquals("xkey_key_ue", manager.resolveKeystoreAlias("ue"))
+        assertEquals("xkey_key_ue", manager.resolveKeystoreAlias("ue", UserKeyKind.GENERAL))
         val absent = runCatching { manager.keyMaterialAbsent("ue") }
         assertTrue("keyMaterialAbsent, got $absent", absent.isFailure || absent.getOrNull() == false)
         assertEquals(KeySecurityLevel.SOFTWARE, manager.generalKeySecurityLevel("ue"))
-        assertThrows(KeyDeletionException::class.java) { manager.deleteKey("ue") }
+        assertThrows(KeyDeletionException::class.java) { manager.deleteGeneralKey("ue") }
         assertTrue("the key is still on disk", "xkey_key_ue" in prefs.disk)
     }
 
@@ -173,10 +177,10 @@ class KeystoreManagerUncommittedRemovalTest {
         val deleted = AtomicReference<Result<Boolean>>()
         val deletedByAlias = AtomicReference<Result<Boolean>>()
         val probe = thread {
-            resolved.set(runCatching { manager.resolveKeystoreAlias("ug") })
+            resolved.set(runCatching { manager.resolveKeystoreAlias("ug", UserKeyKind.GENERAL) })
             stored.set(runCatching { manager.hasSoftwareEd25519Key("xkey_key_ug") })
             absent.set(runCatching { manager.keyMaterialAbsent("ug") })
-            deleted.set(runCatching { manager.deleteKey("ug") })
+            deleted.set(runCatching { manager.deleteGeneralKey("ug") })
             deletedByAlias.set(runCatching { manager.deleteByAlias("xkey_key_ug") })
         }
         awaitParkedOrDone(probe)

@@ -154,10 +154,10 @@ class KeystoreManagerGeneralKeysTest {
     fun aKeyGeneratedWithoutTheStrongBoxPreferenceIsNeverReportedAsStrongBox() {
         val (keyId, _) = generate("ES256", "level-nopref")
 
-        val level = keystoreManager.keySecurityLevel(keyId)
+        val level = keystoreManager.keySecurityLevel(keyId, UserKeyKind.GENERAL)
         assertNotNull(level)
         assertNotEquals(KeySecurityLevel.STRONGBOX, level)
-        assertFalse(keystoreManager.isKeyStrongBoxBacked(keyId))
+        assertFalse(keystoreManager.isKeyStrongBoxBacked(keyId, UserKeyKind.GENERAL))
 
         assumeTrue("the TEE case needs a StrongBox device", keystoreManager.isStrongBoxAvailable())
         assertEquals(KeySecurityLevel.TEE, level)
@@ -174,7 +174,7 @@ class KeystoreManagerGeneralKeysTest {
         }
 
         listOf(aesId, hmacId).forEach { keyId ->
-            val level = keystoreManager.keySecurityLevel(keyId)
+            val level = keystoreManager.keySecurityLevel(keyId, UserKeyKind.GENERAL)
             assertNotNull(keyId, level)
             assertNotEquals(keyId, KeySecurityLevel.STRONGBOX, level)
             if (keystoreManager.isStrongBoxAvailable()) {
@@ -201,10 +201,10 @@ class KeystoreManagerGeneralKeysTest {
                 )
             }
 
-            val level = keystoreManager.keySecurityLevel(keyId)
+            val level = keystoreManager.keySecurityLevel(keyId, UserKeyKind.GENERAL)
             assertNotNull(algorithm, level)
             assertNotEquals(algorithm, KeySecurityLevel.STRONGBOX, level)
-            assertFalse(algorithm, keystoreManager.isKeyStrongBoxBacked(keyId))
+            assertFalse(algorithm, keystoreManager.isKeyStrongBoxBacked(keyId, UserKeyKind.GENERAL))
         }
     }
 
@@ -220,7 +220,7 @@ class KeystoreManagerGeneralKeysTest {
             keystoreManager.generateKeyForAlgorithm(keyId, "ES256", -1, preferStrongBox = true)
         }
 
-        val level = keystoreManager.keySecurityLevel(keyId)
+        val level = keystoreManager.keySecurityLevel(keyId, UserKeyKind.GENERAL)
         assertNotNull(level)
         if (!keystoreManager.isStrongBoxAvailable()) {
             assertNotEquals(KeySecurityLevel.STRONGBOX, level)
@@ -231,21 +231,21 @@ class KeystoreManagerGeneralKeysTest {
                 .getKeySpec(key, android.security.keystore.KeyInfo::class.java)
             val inStrongBox = info.securityLevel == KeyProperties.SECURITY_LEVEL_STRONGBOX
             assertEquals(inStrongBox, level == KeySecurityLevel.STRONGBOX)
-            assertEquals(inStrongBox, keystoreManager.isKeyStrongBoxBacked(keyId))
+            assertEquals(inStrongBox, keystoreManager.isKeyStrongBoxBacked(keyId, UserKeyKind.GENERAL))
         } else {
-            assertEquals(level == KeySecurityLevel.STRONGBOX, keystoreManager.isKeyStrongBoxBacked(keyId))
+            assertEquals(level == KeySecurityLevel.STRONGBOX, keystoreManager.isKeyStrongBoxBacked(keyId, UserKeyKind.GENERAL))
         }
     }
 
     @Test
     fun aMissingKeyHasNoSecurityLevel() {
-        assertNull(keystoreManager.keySecurityLevel("missing-${System.nanoTime()}"))
+        assertNull(keystoreManager.keySecurityLevel("missing-${System.nanoTime()}", UserKeyKind.GENERAL))
     }
 
     /**
      * A credential `k` (xkey_credential_k) and a general key `k` (xkey_key_k)
      * can coexist; the general key's level is read from its own alias, never
-     * from the credential that [KeystoreManager.resolveKeystoreAlias] prefers.
+     * from the credential of the same id.
      * The credential's KeyInfo read is made to fail, so a lookup that strayed
      * to the credential would throw on every device.
      */
@@ -264,7 +264,7 @@ class KeystoreManagerGeneralKeysTest {
                 keystoreManager.credentialSecurityLevel(keyId)
             }
         } finally {
-            keystoreManager.deleteKey(keyId)
+            UserKeyKind.entries.forEach { keystoreManager.deleteKey(keyId, it) }
         }
     }
 
@@ -281,10 +281,10 @@ class KeystoreManagerGeneralKeysTest {
             keystoreManager.generalKeySecurityLevel(keyId)
         }
         assertThrows(KeyInfoUnavailableException::class.java) {
-            keystoreManager.keySecurityLevel(keyId)
+            keystoreManager.keySecurityLevel(keyId, UserKeyKind.GENERAL)
         }
         assertThrows(KeyInfoUnavailableException::class.java) {
-            keystoreManager.isKeyStrongBoxBacked(keyId)
+            keystoreManager.isKeyStrongBoxBacked(keyId, UserKeyKind.GENERAL)
         }
     }
 
@@ -338,7 +338,7 @@ class KeystoreManagerGeneralKeysTest {
         }
 
         assertFalse("regeneration must mint a new key", first.contentEquals(second))
-        assertArrayEquals(second, keystoreManager.getPublicKeyDER(keyId))
+        assertArrayEquals(second, keystoreManager.getPublicKeyDER(keyId, UserKeyKind.GENERAL))
     }
 
     @Test

@@ -74,7 +74,13 @@ class FileEncryptorInstrumentedTest {
     @Before
     fun setUp() = runBlocking<Unit> {
         keystoreManager = KeystoreManager(ApplicationProvider.getApplicationContext())
-        encryptor = FileEncryptor(keystoreManager)
+        encryptor = FileEncryptor(
+            keystoreManager,
+            com.automatethethings.xkey.storage.KeyPolicyStore.of(
+                XKeyDatabase.getInstance(ApplicationProvider.getApplicationContext()),
+                keystoreManager
+            )
+        )
         preExistingEphemerals = ephemeralAliases()
 
         keystoreManager.generateKeyForAlgorithm(
@@ -83,7 +89,7 @@ class FileEncryptorInstrumentedTest {
             authDurationSeconds = -1,
             preferStrongBox = false
         )
-        recipientPublicKeyDer = keystoreManager.getPublicKeyDER(recipientKeyId)!!
+        recipientPublicKeyDer = keystoreManager.getPublicKeyDER(recipientKeyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL)!!
         Unit
     }
 

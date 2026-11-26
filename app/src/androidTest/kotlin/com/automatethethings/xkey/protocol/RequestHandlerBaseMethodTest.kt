@@ -94,12 +94,12 @@ class RequestHandlerBaseMethodTest {
         @AfterClass
         fun tearDown() {
             for (credentialId in createdCredentialIds) {
-                runCatching { keystoreManager.deleteKey(credentialId) }
+                runCatching { keystoreManager.deleteKey(credentialId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) }
             }
             // Anything a failing test created without registering it.
             for (credentialId in runCatching { keystoreManager.listCredentials() }.getOrDefault(emptyList())) {
                 if (credentialId.contains(runId)) {
-                    runCatching { keystoreManager.deleteKey(credentialId) }
+                    runCatching { keystoreManager.deleteKey(credentialId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) }
                 }
             }
         }
@@ -289,7 +289,7 @@ class RequestHandlerBaseMethodTest {
         assertTrue(response.errorMessage().contains("No activity available"))
         assertFalse(
             "no credential may exist after a refused generation",
-            keystoreManager.keyExists(credentialId)
+            keystoreManager.keyExists(credentialId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL)
         )
     }
 
@@ -360,7 +360,7 @@ class RequestHandlerBaseMethodTest {
             result.getBoolean("userVerified")
         )
 
-        val publicKey = keystoreManager.getPublicKey(credentialId)
+        val publicKey = keystoreManager.getPublicKey(credentialId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL)
             ?: throw AssertionError("the credential has no public key")
         val verifier = Signature.getInstance("SHA256withECDSA")
         verifier.initVerify(publicKey)
@@ -454,7 +454,7 @@ class RequestHandlerBaseMethodTest {
         assertTrue(deleted.getBoolean("deleted"))
         assertFalse(
             "the keystore entry must be gone",
-            keystoreManager.keyExists(credentialId)
+            keystoreManager.keyExists(credentialId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL)
         )
         assertFalse(
             call("loadKey", JSONObject().put("credentialId", credentialId)).ok().getBoolean("exists")

@@ -631,7 +631,7 @@ class ContactManagementFlowTest {
     /** Number of stored keys whose public half the Keystore can produce. */
     private fun exportableKeyCount(): Int {
         val keystore = KeystoreManager(context)
-        return runBlocking { keyDao.getAll() }.count { keystore.getPublicKeyPEM(it.keyId) != null }
+        return runBlocking { keyDao.getAll() }.count { key -> keystore.soleKind(key.keyId)?.let { keystore.getPublicKeyPEM(key.keyId, it) } != null }
     }
 
     private fun scrollListBy(

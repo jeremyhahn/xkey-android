@@ -79,28 +79,37 @@ class KeyStoreSyncManagerStaleEntryTest {
 
     @Test
     fun `sync keeps a key row while the software key store cannot be read`() = runBlocking<Unit> {
-        val manager = spyk(KeystoreManager(mockk<Context>(relaxed = true), pqcStore = noPqcKeys()))
+        val manager = spyk(KeystoreManager(mockk<Context>(relaxed = true).also {
+            // The ML-DSA store reads the context's files directory: an empty one here.
+            every { it.applicationContext } returns it
+            every { it.filesDir } returns java.nio.file.Files.createTempDirectory("pqc-keys").toFile().apply { deleteOnExit() }
+        }, pqcStore = noPqcKeys()))
         every { manager.softwareEd25519Supported() } returns true
         every { manager.ed25519Prefs() } throws IllegalStateException("master key unreadable")
         val credentialDao = mockk<CredentialMetadataDao>(relaxed = true)
         coEvery { credentialDao.getAll() } returns emptyList()
         val keyDao = mockk<KeyDao>(relaxed = true)
         val key = mockk<KeyEntity>(relaxed = true)
-        every { key.keyId } returns "ed"
+        // An id no other test leaves a removal that did not commit under.
+        every { key.keyId } returns "edunreadable"
         every { key.source } returns "local"
         coEvery { keyDao.getAll() } returns listOf(key)
 
-        KeyStoreSyncManager(manager, credentialDao, keyDao).syncAll()
+        KeyStoreSyncManager(manager, credentialDao, keyDao, mockk(relaxed = true)).syncAll()
 
         coVerify(exactly = 0) { keyDao.deleteByKeyId(any()) }
-        verify { Log.e(any(), match<String> { "ed" in it }, any()) }
+        verify { Log.e(any(), match<String> { "edunreadable" in it }, any()) }
     }
 
     @Test
     fun `sync still removes the row of a key absent from a readable store`() = runBlocking<Unit> {
         val prefs = mockk<SharedPreferences>()
         every { prefs.contains(any()) } returns false
-        val manager = spyk(KeystoreManager(mockk<Context>(relaxed = true), pqcStore = noPqcKeys()))
+        val manager = spyk(KeystoreManager(mockk<Context>(relaxed = true).also {
+            // The ML-DSA store reads the context's files directory: an empty one here.
+            every { it.applicationContext } returns it
+            every { it.filesDir } returns java.nio.file.Files.createTempDirectory("pqc-keys").toFile().apply { deleteOnExit() }
+        }, pqcStore = noPqcKeys()))
         every { manager.softwareEd25519Supported() } returns true
         every { manager.ed25519Prefs() } returns prefs
         val credentialDao = mockk<CredentialMetadataDao>(relaxed = true)
@@ -111,7 +120,7 @@ class KeyStoreSyncManagerStaleEntryTest {
         every { key.source } returns "local"
         coEvery { keyDao.getAll() } returns listOf(key)
 
-        KeyStoreSyncManager(manager, credentialDao, keyDao).syncAll()
+        KeyStoreSyncManager(manager, credentialDao, keyDao, mockk(relaxed = true)).syncAll()
 
         coVerify { keyDao.deleteByKeyId("gone") }
     }
@@ -122,7 +131,11 @@ class KeyStoreSyncManagerStaleEntryTest {
         // though the write to disk fails, so the cache alone reads it absent.
         val prefs = FakeSharedPreferences(mapOf("xkey_key_edsync" to "secret"))
         prefs.diskFails = true
-        val manager = spyk(KeystoreManager(mockk<Context>(relaxed = true), pqcStore = noPqcKeys()))
+        val manager = spyk(KeystoreManager(mockk<Context>(relaxed = true).also {
+            // The ML-DSA store reads the context's files directory: an empty one here.
+            every { it.applicationContext } returns it
+            every { it.filesDir } returns java.nio.file.Files.createTempDirectory("pqc-keys").toFile().apply { deleteOnExit() }
+        }, pqcStore = noPqcKeys()))
         every { manager.softwareEd25519Supported() } returns true
         every { manager.ed25519Prefs() } returns prefs
         assertThrows(KeyDeletionException::class.java) { manager.deleteByAlias("xkey_key_edsync") }
@@ -134,7 +147,7 @@ class KeyStoreSyncManagerStaleEntryTest {
         every { key.source } returns "local"
         coEvery { keyDao.getAll() } returns listOf(key)
 
-        KeyStoreSyncManager(manager, credentialDao, keyDao).syncAll()
+        KeyStoreSyncManager(manager, credentialDao, keyDao, mockk(relaxed = true)).syncAll()
 
         coVerify(exactly = 0) { keyDao.deleteByKeyId(any()) }
         assertTrue("the key is still on disk", "xkey_key_edsync" in prefs.disk)
@@ -143,7 +156,11 @@ class KeyStoreSyncManagerStaleEntryTest {
     @Test
     fun `sync overlapping a removal whose commit then fails keeps the key row`() {
         val prefs = FakeSharedPreferences(mapOf("xkey_key_edrace" to "secret"))
-        val manager = spyk(KeystoreManager(mockk<Context>(relaxed = true), pqcStore = noPqcKeys()))
+        val manager = spyk(KeystoreManager(mockk<Context>(relaxed = true).also {
+            // The ML-DSA store reads the context's files directory: an empty one here.
+            every { it.applicationContext } returns it
+            every { it.filesDir } returns java.nio.file.Files.createTempDirectory("pqc-keys").toFile().apply { deleteOnExit() }
+        }, pqcStore = noPqcKeys()))
         every { manager.softwareEd25519Supported() } returns true
         every { manager.ed25519Prefs() } returns prefs
         val credentialDao = mockk<CredentialMetadataDao>(relaxed = true)
@@ -156,7 +173,7 @@ class KeyStoreSyncManagerStaleEntryTest {
         // The probe's thread, published as it enters, and whether it returned.
         val probeThread = AtomicReference<Thread>()
         val probeDone = CountDownLatch(1)
-        every { manager.keyMaterialAbsent("edrace") } answers {
+        every { manager.holdsAnyKey("edrace") } answers {
             probeThread.set(Thread.currentThread())
             try {
                 callOriginal()
@@ -166,7 +183,7 @@ class KeyStoreSyncManagerStaleEntryTest {
         }
 
         val removal = PausedRemoval.start(prefs) { manager.deleteByAlias("xkey_key_edrace") }
-        val sync = thread { runBlocking { KeyStoreSyncManager(manager, credentialDao, keyDao).syncAll() } }
+        val sync = thread { runBlocking { KeyStoreSyncManager(manager, credentialDao, keyDao, mockk(relaxed = true)).syncAll() } }
         val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
         while (probeDone.count > 0L && probeThread.get()?.state != Thread.State.WAITING) {
             check(System.nanoTime() < deadline) { "the sync never probed the key" }

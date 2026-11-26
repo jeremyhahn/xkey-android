@@ -18,7 +18,7 @@ import android.util.Log
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.crypto.MlDsaParameterSet
 import com.automatethethings.xkey.crypto.PqcBacking
-import com.automatethethings.xkey.storage.dao.KeyDao
+import com.automatethethings.xkey.storage.KeyPolicyStore
 import com.automatethethings.xkey.storage.entity.KeyEntity
 import io.mockk.coEvery
 import io.mockk.every
@@ -50,7 +50,7 @@ class KeyManagementMlDsaCreateTest {
     private val material: MutableSet<String> = Collections.synchronizedSet(mutableSetOf())
     private val rows: MutableSet<String> = Collections.synchronizedSet(mutableSetOf())
     private lateinit var keystore: KeystoreManager
-    private lateinit var keyDao: KeyDao
+    private lateinit var keyPolicyStore: KeyPolicyStore
 
     @Before
     fun setUp() {
@@ -60,8 +60,8 @@ class KeyManagementMlDsaCreateTest {
         every { Log.e(any(), any<String>(), any()) } returns 0
         keystore = mockk(relaxed = true)
         every { keystore.deleteGeneralKey(any()) } answers { material.remove(firstArg<String>()) }
-        keyDao = mockk(relaxed = true)
-        coEvery { keyDao.insert(any()) } answers {
+        keyPolicyStore = mockk(relaxed = true)
+        coEvery { keyPolicyStore.insertKey(any()) } answers {
             rows += firstArg<KeyEntity>().keyId
             1L
         }
@@ -83,7 +83,7 @@ class KeyManagementMlDsaCreateTest {
     )
 
     private suspend fun create(keyId: String) =
-        createMlDsaKeyRow(keystore, keyDao, keyId, set, PqcBacking.SOFTWARE, -1) { row(keyId, it) }
+        createMlDsaKeyRow(keystore, keyPolicyStore, keyId, set, PqcBacking.SOFTWARE, -1) { row(keyId, it) }
 
     @Test
     fun `closing the screen while an ML-DSA key is made leaves both the key and its row or neither`() {
@@ -111,7 +111,7 @@ class KeyManagementMlDsaCreateTest {
             material += "f"
             spki
         }
-        coEvery { keyDao.insert(match { it.keyId == "f" }) } throws IllegalStateException("database is full")
+        coEvery { keyPolicyStore.insertKey(match { it.keyId == "f" }) } throws IllegalStateException("database is full")
 
         val failure = runCatching { runBlocking { create("f") } }
 

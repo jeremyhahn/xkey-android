@@ -75,7 +75,7 @@ class KeystoreManagerAuthBoundKeyTest {
     fun tearDown() {
         val dao = XKeyDatabase.getInstance(context).auditLogDao()
         (credentialIds + generalKeyIds).forEach { keyId ->
-            runCatching { keystoreManager.deleteKey(keyId) }
+            UserKeyKind.entries.forEach { kind -> runCatching { keystoreManager.deleteKey(keyId, kind) } }
             runCatching { keystoreManager.deleteGeneralKey(keyId) }
             runCatching { runBlocking { dao.deleteByKeyId(keyId) } }
         }
@@ -96,7 +96,7 @@ class KeystoreManagerAuthBoundKeyTest {
         if (strongBiometricEnrolled()) {
             val cose = runBlocking { keystoreManager.generateKey(credentialId, requireBiometric = true) }
             assertTrue("a biometric-bound credential still exports a COSE key", cose.isNotEmpty())
-            assertTrue(keystoreManager.keyExists(credentialId))
+            assertTrue(keystoreManager.keyExists(credentialId, UserKeyKind.CREDENTIAL))
             return
         }
 
@@ -109,7 +109,7 @@ class KeystoreManagerAuthBoundKeyTest {
         )
         assertFalse(
             "a refused generation must not leave a half-made key behind",
-            keystoreManager.keyExists(credentialId)
+            keystoreManager.keyExists(credentialId, UserKeyKind.CREDENTIAL)
         )
     }
 
@@ -250,7 +250,7 @@ class KeystoreManagerAuthBoundKeyTest {
         val keyId = newGeneralKeyId("rsa-cose")
         runBlocking { keystoreManager.generateKeyForAlgorithm(keyId, "RS256", -1, false) }
 
-        val failure = failureFrom { keystoreManager.getCOSEPublicKey(keyId) }
+        val failure = failureFrom { keystoreManager.getCOSEPublicKey(keyId, UserKeyKind.GENERAL) }
         assertTrue(
             "expected a typed failure for a non-EC key, got $failure",
             failure is KeyGenerationException
@@ -266,11 +266,11 @@ class KeystoreManagerAuthBoundKeyTest {
         val keyId = newGeneralKeyId("aes-export")
         runBlocking { keystoreManager.generateSymmetricKey(keyId, 256, -1) }
 
-        assertNull("no DER", keystoreManager.getPublicKeyDER(keyId))
-        assertNull("no PEM", keystoreManager.getPublicKeyPEM(keyId))
-        assertNull("no OpenSSH form", keystoreManager.getPublicKeySSH(keyId))
-        assertNull("no COSE form", keystoreManager.getCOSEPublicKey(keyId))
-        assertNull("no public key object", keystoreManager.getPublicKey(keyId))
+        assertNull("no DER", keystoreManager.getPublicKeyDER(keyId, UserKeyKind.GENERAL))
+        assertNull("no PEM", keystoreManager.getPublicKeyPEM(keyId, UserKeyKind.GENERAL))
+        assertNull("no OpenSSH form", keystoreManager.getPublicKeySSH(keyId, UserKeyKind.GENERAL))
+        assertNull("no COSE form", keystoreManager.getCOSEPublicKey(keyId, UserKeyKind.GENERAL))
+        assertNull("no public key object", keystoreManager.getPublicKey(keyId, UserKeyKind.GENERAL))
     }
 
     /**
@@ -284,7 +284,7 @@ class KeystoreManagerAuthBoundKeyTest {
         runBlocking { keystoreManager.generateSymmetricKey(keyId, 256, -1) }
 
         val failure = failureFrom {
-            runBlocking { keystoreManager.signWithoutBiometric(keyId, ByteArray(32)) }
+            runBlocking { keystoreManager.signWithoutBiometric(keyId, UserKeyKind.GENERAL, ByteArray(32)) }
         }
         assertTrue(
             "expected KeyNotFoundException, got $failure",
@@ -304,7 +304,7 @@ class KeystoreManagerAuthBoundKeyTest {
         runBlocking { keystoreManager.generateKeyForAlgorithm(keyId, "RS256", -1, false) }
 
         val failure = failureFrom {
-            runBlocking { keystoreManager.signWithoutBiometric(keyId, randomBytes(32)) }
+            runBlocking { keystoreManager.signWithoutBiometric(keyId, UserKeyKind.GENERAL, randomBytes(32)) }
         }
         assertTrue(
             "expected SigningException, got $failure",
@@ -327,10 +327,10 @@ class KeystoreManagerAuthBoundKeyTest {
         val unknown = "no-such-key-${System.nanoTime()}"
 
         val failure = failureFrom {
-            runBlocking { keystoreManager.sign(unknown, ByteArray(32), helper, "t", "s") }
+            runBlocking { keystoreManager.sign(unknown, UserKeyKind.GENERAL, ByteArray(32), helper, "t", "s") }
         }
         assertTrue("expected KeyNotFoundException, got $failure", failure is KeyNotFoundException)
-        assertNull(keystoreManager.resolveKeystoreAlias(unknown))
+        assertNull(keystoreManager.resolveKeystoreAlias(unknown, UserKeyKind.GENERAL))
     }
 
     /**
@@ -344,7 +344,7 @@ class KeystoreManagerAuthBoundKeyTest {
         runBlocking { keystoreManager.generateSymmetricKey(keyId, 256, -1) }
 
         val failure = failureFrom {
-            runBlocking { keystoreManager.sign(keyId, ByteArray(32), helper, "t", "s") }
+            runBlocking { keystoreManager.sign(keyId, UserKeyKind.GENERAL, ByteArray(32), helper, "t", "s") }
         }
         assertTrue("expected KeyNotFoundException, got $failure", failure is KeyNotFoundException)
     }
@@ -361,7 +361,7 @@ class KeystoreManagerAuthBoundKeyTest {
                 keystoreManager.generateKeyWithAuthDuration(credentialId, authDurationSeconds, false)
             }
             assertTrue(cose.isNotEmpty())
-            assertTrue(keystoreManager.keyExists(credentialId))
+            assertTrue(keystoreManager.keyExists(credentialId, UserKeyKind.CREDENTIAL))
             return
         }
 
@@ -376,7 +376,7 @@ class KeystoreManagerAuthBoundKeyTest {
         )
         assertFalse(
             "a refused generation must not leave a half-made key behind",
-            keystoreManager.keyExists(credentialId)
+            keystoreManager.keyExists(credentialId, UserKeyKind.CREDENTIAL)
         )
         assertTrue(
             "the failure must say which operation failed",

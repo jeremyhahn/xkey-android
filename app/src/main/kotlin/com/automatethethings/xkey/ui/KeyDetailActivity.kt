@@ -45,9 +45,6 @@ import androidx.core.widget.NestedScrollView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
-import com.automatethethings.xkey.crypto.KeyDeletionException
-import com.automatethethings.xkey.crypto.SoftwareKeyStore
-import com.automatethethings.xkey.storage.deleteKeyRow
 import com.google.android.material.appbar.AppBarLayout
 import com.google.android.material.appbar.CollapsingToolbarLayout
 import com.google.android.material.bottomsheet.BottomSheetDialog
@@ -56,6 +53,9 @@ import com.google.android.material.card.MaterialCardView
 import com.google.android.material.snackbar.Snackbar
 import com.automatethethings.xkey.R
 import com.automatethethings.xkey.crypto.KeystoreManager
+import com.automatethethings.xkey.storage.KeyPolicyStore
+import com.automatethethings.xkey.storage.orRefuse
+import com.automatethethings.xkey.storage.readOwnPublicKey
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.dao.KeySharingPolicyDao
 import com.automatethethings.xkey.storage.entity.KeyEntity
@@ -119,6 +119,7 @@ class KeyDetailActivity : AppCompatActivity() {
     }
 
     private val keyDao by lazy { XKeyDatabase.getInstance(this).keyDao() }
+    private val keyPolicyStore by lazy { KeyPolicyStore.of(XKeyDatabase.getInstance(this), keystoreManager) }
     private val keySharingPolicyDao: KeySharingPolicyDao by lazy {
         XKeyDatabase.getInstance(this).keySharingPolicyDao()
     }
@@ -2023,15 +2024,15 @@ class KeyDetailActivity : AppCompatActivity() {
      * Exports the public key in PEM format to clipboard.
      */
     private fun exportPublicKey(key: KeyEntity) {
-        val pem = keystoreManager.getPublicKeyPEM(key.keyId)
-
-        if (pem != null) {
-            val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-            clipboard.setPrimaryClip(ClipData.newPlainText("Public Key", pem))
-            Snackbar.make(coordinatorLayout, getString(R.string.key_public_key_copied), Snackbar.LENGTH_SHORT).show()
-        } else {
-            Snackbar.make(coordinatorLayout, getString(R.string.key_public_key_unavailable), Snackbar.LENGTH_SHORT).show()
-        }
+        // The key's one namespace (#255 review r3); an id held in both shows
+        // none, and a store that cannot be read is refused on screen, never
+        // thrown out of this button (#255 review r6).
+        val pem = keystoreManager.readOwnPublicKey(key.keyId).orRefuse(R.string.key_public_key_unavailable) { refusal ->
+            Snackbar.make(coordinatorLayout, getString(refusal), Snackbar.LENGTH_SHORT).show()
+        } ?: return
+        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        clipboard.setPrimaryClip(ClipData.newPlainText("Public Key", pem))
+        Snackbar.make(coordinatorLayout, getString(R.string.key_public_key_copied), Snackbar.LENGTH_SHORT).show()
     }
 
     /**
@@ -2039,13 +2040,13 @@ class KeyDetailActivity : AppCompatActivity() {
      */
     private fun deleteKey(key: KeyEntity) {
         lifecycleScope.launch {
-            try {
-                keyDao.deleteKeyRow(key, keystoreManager, SoftwareKeyStore(this@KeyDetailActivity))
-            } catch (e: KeyDeletionException) {
-                // The material may still be on disk: the row stays, and so
-                // does this screen.
-                android.util.Log.e("KeyDetail", "Deleting key ${key.keyId} failed", e)
-                Snackbar.make(coordinatorLayout, getString(R.string.key_delete_failed), Snackbar.LENGTH_LONG).show()
+            // With its policy row and grant rows, in one transaction (#193);
+            // the material only once the rows of this key row are deleted,
+            // in the store's serialisation of its material (#193 r8).
+            val outcome = deleteUserKey(key, keyPolicyStore,
+                com.automatethethings.xkey.storage.keyMaterialDeleter(this@KeyDetailActivity, row = key))
+            outcome.refusal?.let { refusal ->
+                Snackbar.make(coordinatorLayout, getString(refusal), Snackbar.LENGTH_LONG).show()
                 return@launch
             }
             finish()

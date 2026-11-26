@@ -688,7 +688,7 @@ class RequestHandlerLocalKeyFamilyTest {
                     .put("preferStrongBox", false)
             ).ok()
 
-            val level = keystoreManager.keySecurityLevel(keyId)
+            val level = keystoreManager.keySecurityLevel(keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL)
                 ?: throw AssertionError("$algorithm: the generated key must have a level")
             assertEquals(algorithm, level.wire, result.getString("securityLevel"))
             assertNotEquals(algorithm, "strongbox", result.getString("securityLevel"))
@@ -748,7 +748,7 @@ class RequestHandlerLocalKeyFamilyTest {
                 )
                 assertTrue(
                     "$algorithm: the credential must still be present",
-                    keystoreManager.keyExists(keyId)
+                    keystoreManager.keyExists(keyId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL)
                 )
 
                 val result = runBlocking {
@@ -761,7 +761,7 @@ class RequestHandlerLocalKeyFamilyTest {
                 assertFalse(algorithm, storedKey(freeKeyId).strongBoxBacked)
             } finally {
                 keystoreManager.keyInfoReader = real
-                keystoreManager.deleteKey(keyId)
+                keystoreManager.deleteKey(keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL)
             }
         }
     }

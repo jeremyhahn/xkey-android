@@ -21,6 +21,7 @@ import android.os.Looper
 import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.auth.BiometricActivityLauncher
 import com.automatethethings.xkey.auth.PromptOwnership
+import com.automatethethings.xkey.testing.MainLooperWait
 import com.automatethethings.xkey.testing.ReleaseMocks
 import com.automatethethings.xkey.ui.TransparentBiometricActivity
 import io.mockk.every
@@ -107,14 +108,9 @@ class FidoPromptCancellationTest {
         unmockkAll()
     }
 
-    /** Runs the main looper, as Android would, until [done] or a bounded wait passes. */
+    /** Runs the main looper, as Android would, until [done] holds while the session thread works. */
     private fun idleUntil(done: () -> Boolean): Boolean {
-        val deadline = System.currentTimeMillis() + 5_000
-        while (!done()) {
-            if (System.currentTimeMillis() > deadline) return false
-            shadowOf(Looper.getMainLooper()).idle()
-            Thread.sleep(5)
-        }
+        if (!MainLooperWait.holds(done)) return false
         shadowOf(Looper.getMainLooper()).idle()
         return true
     }

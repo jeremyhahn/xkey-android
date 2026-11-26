@@ -105,9 +105,10 @@ class ScriptedMessageSender(
 fun permissionOf(isShared: suspend (String, String) -> Boolean): SharePermission =
     SharePermission(
         mockk<KeySharingPolicyDao> {
-            coEvery { isKeySharedWithPeer(any(), any()) } coAnswers { isShared(firstArg(), secondArg()) }
+            coEvery { isPeerGranted(any(), any()) } coAnswers { isShared(firstArg(), secondArg()) }
         },
-        null
+        null,
+        com.automatethethings.xkey.storage.FakeKeyPolicyTables().store()
     )
 
 /**

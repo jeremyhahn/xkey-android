@@ -21,8 +21,12 @@ import com.automatethethings.xkey.audit.AuditLogger
 import com.automatethethings.xkey.storage.KeyStoreSyncManager
 import com.automatethethings.xkey.storage.dao.CredentialMetadataDao
 import com.automatethethings.xkey.storage.dao.KeyDao
-import com.automatethethings.xkey.storage.deleteKeyRow
+import com.automatethethings.xkey.storage.FakeKeyPolicyTables
 import com.automatethethings.xkey.storage.entity.KeyEntity
+import com.automatethethings.xkey.storage.entity.SharingPolicyType
+import com.automatethethings.xkey.storage.keyMaterialDeleter
+import com.automatethethings.xkey.ui.UserKeyDelete
+import com.automatethethings.xkey.ui.deleteUserKey
 import io.mockk.coEvery
 import io.mockk.every
 import io.mockk.mockk
@@ -38,6 +42,7 @@ import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
@@ -67,6 +72,8 @@ class KeystoreManagerPqcLifecycleTest {
 
     @Before
     fun setUp() {
+        // Main's shared ML-DSA store is per process: each test starts with none.
+        com.automatethethings.xkey.crypto.PqcSoftwareKeyStore.clearSharedForTest()
         mockkStatic(Log::class)
         every { Log.d(any(), any<String>()) } returns 0
         every { Log.i(any(), any<String>()) } returns 0
@@ -104,6 +111,7 @@ class KeystoreManagerPqcLifecycleTest {
 
     @After
     fun tearDown() {
+        com.automatethethings.xkey.crypto.PqcSoftwareKeyStore.clearSharedForTest()
         PqcSoftwareKeyStore.clock = defaultClock
         unmockkAll()
     }
@@ -181,64 +189,76 @@ class KeystoreManagerPqcLifecycleTest {
 
         assertTrue(manager.keyMaterialExists("live"))
         assertFalse(manager.keyMaterialExists("gone"))
-        runBlocking { KeyStoreSyncManager(manager, credentialDao, keyDao).syncAll() }
+        runBlocking { KeyStoreSyncManager(manager, credentialDao, keyDao, FakeKeyPolicyTables().store()).syncAll() }
 
         assertEquals(listOf("gone"), deleted)
+    }
+
+    /** Deletes [keyId]'s key row through the app's one user key delete. */
+    private fun deleteRow(tables: FakeKeyPolicyTables, keyId: String, keystore: KeystoreManager = manager): UserKeyDelete =
+        runBlocking {
+            deleteUserKey(
+                tables.key(keyId)!!, tables.store(), keyMaterialDeleter(context, keystore, UserKeyKind.GENERAL)
+            )
+        }
+
+    private fun rowOf(tables: FakeKeyPolicyTables, keyId: String, spki: ByteArray) {
+        tables.addKey(keyId, SharingPolicyType.PRIVATE, keyType = "signing", publicKeyDer = spki, source = "local")
     }
 
     @Test
     fun `deleting the row of a software key deletes its record and it signs no more`() {
         val spki = generate("doomed", -1)
-        val keyDao = mockk<KeyDao>(relaxed = true)
-        coEvery { keyDao.deleteByKeyId(any()) } returns 1
-        val softwareKeys = mockk<SoftwareKeyStore>(relaxed = true)
-        every { softwareKeys.contains(any()) } returns false
+        val tables = FakeKeyPolicyTables()
+        rowOf(tables, "doomed", spki)
 
-        val deleted = runBlocking { keyDao.deleteKeyRow(row("doomed"), manager, softwareKeys) }
+        assertEquals(UserKeyDelete.DELETED, deleteRow(tables, "doomed"))
 
-        assertEquals(1, deleted)
+        assertNull(tables.key("doomed"))
+        assertTrue("no delete is left owed", tables.deletions.value.isEmpty())
         assertFalse(manager.pqcSoftwareKeyExists("doomed"))
         assertFalse(manager.generalKeyExists("doomed"))
         assertThrows(KeyNotFoundException::class.java) { signApproved("doomed", spki) }
     }
 
     @Test
-    fun `a software key whose record cannot be removed keeps its row and is not audited as deleted`() {
+    fun `a software key whose record cannot be removed stays owed and is never reported gone`() {
         val spki = generate("stuck", -1)
         store.removeFile = { false }
-        val keyDao = mockk<KeyDao>(relaxed = true)
-        coEvery { keyDao.deleteByKeyId(any()) } returns 1
-        val softwareKeys = mockk<SoftwareKeyStore>(relaxed = true)
-        every { softwareKeys.contains(any()) } returns false
+        val tables = FakeKeyPolicyTables()
+        rowOf(tables, "stuck", spki)
 
-        assertTrue(runCatching { runBlocking { keyDao.deleteKeyRow(row("stuck"), manager, softwareKeys) } }.isFailure)
+        deleteRow(tables, "stuck")
         assertTrue(runCatching { manager.deleteGeneralKey("stuck") }.isFailure)
-        assertTrue(runCatching { manager.deleteKey("stuck") }.isFailure)
+        assertEquals(GeneratedKeyDiscard.FAILED, manager.deleteKey("stuck", UserKeyKind.GENERAL))
 
-        io.mockk.coVerify(exactly = 0) { keyDao.deleteByKeyId(any()) }
-        verify(exactly = 0) { AuditLogger.logKeyDeleted(any(), any(), any()) }
+        // The record is left, so its delete stays owed until a replay removes it.
         assertTrue(manager.pqcSoftwareKeyExists("stuck"))
-        signApproved("stuck", spki)
+        assertTrue("the delete is not owed", "stuck" in tables.deletions.value)
+        assertTrue(runBlocking { tables.store().isDeletionPending("stuck") })
+
+        store.removeFile = { it.delete() }
+        runBlocking { tables.store().replayDeletions(keyMaterialDeleter(context, manager)) }
+        assertFalse(manager.pqcSoftwareKeyExists("stuck"))
+        assertTrue(tables.deletions.value.isEmpty())
+        assertThrows(KeyNotFoundException::class.java) { signApproved("stuck", spki) }
     }
 
     @Test
-    fun `no general-key delete path drops metadata or audits when the store delete throws`() {
-        generate("held", -1)
+    fun `no general-key delete path reports a key gone when the store delete throws`() {
+        val spki = generate("held", -1)
         val failing = io.mockk.spyk(store)
         every { failing.delete(any()) } throws java.io.IOException("Cannot delete ML-DSA key")
         val held = KeystoreManager(context, sdkInt = 34, pqcStore = failing)
-        val keyDao = mockk<KeyDao>(relaxed = true)
-        coEvery { keyDao.deleteByKeyId(any()) } returns 1
-        val softwareKeys = mockk<SoftwareKeyStore>(relaxed = true)
-        every { softwareKeys.contains(any()) } returns false
+        val tables = FakeKeyPolicyTables()
+        rowOf(tables, "held", spki)
 
-        assertTrue(runCatching { runBlocking { keyDao.deleteKeyRow(row("held"), held, softwareKeys) } }.isFailure)
+        deleteRow(tables, "held", held)
         assertTrue(runCatching { held.deleteGeneralKey("held") }.isFailure)
-        assertTrue(runCatching { held.deleteKey("held") }.isFailure)
+        assertEquals(GeneratedKeyDiscard.FAILED, held.deleteKey("held", UserKeyKind.GENERAL))
 
-        io.mockk.coVerify(exactly = 0) { keyDao.deleteByKeyId(any()) }
-        verify(exactly = 0) { AuditLogger.logKeyDeleted(any(), any(), any()) }
         assertTrue(held.pqcSoftwareKeyExists("held"))
+        assertTrue("the delete is not owed", "held" in tables.deletions.value)
     }
 
     @Test
@@ -247,9 +267,9 @@ class KeystoreManagerPqcLifecycleTest {
         every { keyStore.containsAlias(any()) } answers { firstArg<String>() in INTERNAL_ALIASES }
 
         for (alias in INTERNAL_ALIASES) {
-            assertNull(alias, manager.resolveKeystoreAlias(alias))
+            assertNull(alias, manager.resolveKeystoreAlias(alias, UserKeyKind.GENERAL))
             assertFalse(alias, manager.deleteByAlias(alias))
-            assertFalse(alias, manager.deleteKey(alias))
+            assertNotEquals(alias, GeneratedKeyDiscard.DELETED, manager.deleteKey(alias, UserKeyKind.GENERAL))
         }
 
         verify(exactly = 0) { keyStore.deleteEntry(any()) }
@@ -265,15 +285,15 @@ class KeystoreManagerPqcLifecycleTest {
         every { keyStore.containsAlias("xkey_key_a") } returns true
         every { keyStore.getCertificate("xkey_key_a") } returns certificate
 
-        assertEquals(KeystoreManager.generalKeyAlias("xkey_key_a"), manager.resolveKeystoreAlias("xkey_key_a"))
-        assertArrayEquals(spki, manager.getPublicKeyDER("xkey_key_a"))
-        assertEquals(KeySecurityLevel.SOFTWARE, manager.keySecurityLevel("xkey_key_a"))
+        assertEquals(KeystoreManager.generalKeyAlias("xkey_key_a"), manager.resolveKeystoreAlias("xkey_key_a", UserKeyKind.GENERAL))
+        assertArrayEquals(spki, manager.getPublicKeyDER("xkey_key_a", UserKeyKind.GENERAL))
+        assertEquals(KeySecurityLevel.SOFTWARE, manager.keySecurityLevel("xkey_key_a", UserKeyKind.GENERAL))
 
         assertTrue(manager.deleteGeneralKey("xkey_key_a"))
         verify(exactly = 0) { keyStore.deleteEntry("xkey_key_a") }
         assertFalse(manager.pqcSoftwareKeyExists("xkey_key_a"))
         assertTrue("key a is left", manager.generalKeyExists("a"))
-        assertArrayEquals(hardwareDer, manager.getPublicKeyDER("a"))
+        assertArrayEquals(hardwareDer, manager.getPublicKeyDER("a", UserKeyKind.GENERAL))
     }
 
     @Test
@@ -285,7 +305,8 @@ class KeystoreManagerPqcLifecycleTest {
         assertTrue("the resolver keeps its raw-alias fallback", checks.isNotEmpty())
         for (check in checks) {
             val owner = function.findAll(source.substring(0, check.range.first)).last().groupValues[1]
-            assertEquals("raw-alias check at offset ${check.range.first}", "resolveKeystoreAlias", owner)
+            // rawAlias is the one raw-alias probe the presence checks share (#255).
+            assertTrue("raw-alias check at offset ${check.range.first} in $owner", owner in setOf("resolveKeystoreAlias", "rawAlias"))
         }
     }
 

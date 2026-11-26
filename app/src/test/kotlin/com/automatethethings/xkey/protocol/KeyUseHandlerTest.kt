@@ -145,6 +145,11 @@ class KeyUseHandlerTest {
         ).forEach { entity -> coEvery { keyDao.getByKeyId(entity.keyId) } returns entity }
         val database = mockk<XKeyDatabase>(relaxed = true)
         every { database.keyDao() } returns keyDao
+        // No key here is deleted or carries a stored policy.
+        every { database.keyPolicyDao() } returns mockk<com.automatethethings.xkey.storage.dao.KeyPolicyDao>(relaxed = true) {
+            coEvery { deletion(any()) } returns null
+            coEvery { policyRow(any()) } returns null
+        }
         mockkObject(XKeyDatabase.Companion)
         every { XKeyDatabase.getInstance(any()) } returns database
 
@@ -203,15 +208,18 @@ class KeyUseHandlerTest {
         // hold, or one of another type (KeystoreManager casts the entry to
         // the key class the operation needs).
         keystore = mockk(relaxed = true)
+        // Every key here is a general key, never a credential.
+        every { keystore.exportKind(any()) } returns com.automatethethings.xkey.crypto.UserKeyKind.GENERAL
+        every { keystore.rowKeyKind(any(), any(), any(), any()) } returns com.automatethethings.xkey.crypto.UserKeyKind.GENERAL
         coEvery { keystore.rsaDecryptWithAlgorithm(any(), any()) } answers { throw KeyNotFoundException(firstArg()) }
         coEvery { keystore.symmetricEncrypt(any(), any(), any()) } answers { throw KeyNotFoundException(firstArg()) }
         coEvery { keystore.symmetricDecrypt(any(), any(), any()) } answers { throw KeyNotFoundException(firstArg()) }
         coEvery { keystore.computeHMACWithAlgorithm(any(), any()) } answers { throw KeyNotFoundException(firstArg()) }
         coEvery { keystore.performECDH(any(), any()) } answers { throw KeyNotFoundException(firstArg()) }
-        every { keystore.getPublicKeyDER(any()) } returns null
-        every { keystore.getPublicKeyPEM(any()) } returns null
-        every { keystore.getPublicKeySSH(any()) } returns null
-        every { keystore.getCOSEPublicKey(any()) } returns null
+        every { keystore.getPublicKeyDER(any(), any()) } returns null
+        every { keystore.getPublicKeyPEM(any(), any()) } returns null
+        every { keystore.getPublicKeySSH(any(), any()) } returns null
+        every { keystore.getCOSEPublicKey(any(), any()) } returns null
 
         coEvery { keystore.rsaDecryptWithAlgorithm(HW_RSA, any()) } returns
             DecryptResult(hwPlaintext, "RSA-OAEP-SHA-256-MGF1-SHA-1")
@@ -219,10 +227,10 @@ class KeyUseHandlerTest {
         coEvery { keystore.symmetricDecrypt(HW_AES, any(), any()) } returns hwPlaintext
         coEvery { keystore.computeHMACWithAlgorithm(HW_HMAC, any()) } returns HmacResult(hwMac, "HMAC-SHA256")
         coEvery { keystore.performECDH(HW_EC, any()) } returns sharedSecret
-        every { keystore.getPublicKeyDER(HW_EC) } returns publicDer
-        every { keystore.getPublicKeyPEM(HW_EC) } returns publicPem
-        every { keystore.getPublicKeySSH(HW_EC) } returns publicSsh
-        every { keystore.getCOSEPublicKey(HW_EC) } returns publicCose
+        every { keystore.getPublicKeyDER(HW_EC, any()) } returns publicDer
+        every { keystore.getPublicKeyPEM(HW_EC, any()) } returns publicPem
+        every { keystore.getPublicKeySSH(HW_EC, any()) } returns publicSsh
+        every { keystore.getCOSEPublicKey(HW_EC, any()) } returns publicCose
 
         handler = RequestHandler(
             context = context,
@@ -400,7 +408,7 @@ class KeyUseHandlerTest {
 
     @Test
     fun `getPublicKey answers EXPORT_FAILED when the keystore has no public key`() = runTest {
-        every { keystore.getPublicKeyDER(HW_EC) } returns null
+        every { keystore.getPublicKeyDER(HW_EC, any()) } returns null
         val response = call(MethodNames.LOCAL_GET_PUBLIC_KEY, """{"keyId":"$HW_EC","format":"der"}""")
         assertEquals(ErrorCodes.EXPORT_FAILED, errorCode(response))
     }
@@ -795,7 +803,7 @@ class KeyUseHandlerTest {
         io.mockk.coVerify(exactly = 0) { keystore.symmetricDecrypt(any(), any(), any()) }
         io.mockk.coVerify(exactly = 0) { keystore.computeHMACWithAlgorithm(any(), any()) }
         io.mockk.coVerify(exactly = 0) { keystore.performECDH(any(), any()) }
-        io.mockk.coVerify(exactly = 0) { keystore.getPublicKeyDER(any()) }
+        io.mockk.coVerify(exactly = 0) { keystore.getPublicKeyDER(any(), any()) }
         io.mockk.verify(exactly = 0) { anyConstructed<SoftwareKeyStore>().get(any()) }
         assertTrue("no key-use entry: $inserted", inserted.none { it.success && it.keyId != null })
     }

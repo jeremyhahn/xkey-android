@@ -120,6 +120,11 @@ class PasskeySignCounterHandlerTest {
         every { XKeyDatabase.getInstance(any()) } returns mockk(relaxed = true) {
             every { credentialMetadataDao() } returns credentialDao
             every { keyDao() } returns keyDao
+            // No key has a pending deletion or a policy row: the stored policy decides.
+            every { keyPolicyDao() } returns mockk<com.automatethethings.xkey.storage.dao.KeyPolicyDao>(relaxed = true) {
+                io.mockk.coEvery { deletion(any()) } returns null
+                io.mockk.coEvery { policyRow(any()) } returns null
+            }
         }
 
         context = mockk(relaxed = true)
@@ -129,13 +134,14 @@ class PasskeySignCounterHandlerTest {
             mockk<NotificationManager>(relaxed = true)
 
         keystoreManager = mockk(relaxed = true)
-        coEvery { keystoreManager.signWithoutBiometric(ID, any()) } answers {
-            signed += secondArg<ByteArray>()
+        every { keystoreManager.soleKind(ID) } returns com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL
+        coEvery { keystoreManager.signWithoutBiometric(ID, any(), any()) } answers {
+            signed += thirdArg<ByteArray>()
             SIGNATURE
         }
         // The phone backend signs the passkey the owner approved, under the
         // alias its approval read (#177): the same faked signer records it.
-        every { keystoreManager.resolveKeystoreAlias(ID) } returns ALIAS
+        every { keystoreManager.resolveKeystoreAlias(ID, any()) } returns ALIAS
         every { keystoreManager.publicKeyDERAt(ALIAS) } returns APPROVED_DER
         coEvery { keystoreManager.signApproved(ALIAS, APPROVED_DER, any(), any()) } answers {
             signed += thirdArg<ByteArray>()

@@ -124,7 +124,7 @@ class RequestHandlerBiometricGateTest {
                 val db = XKeyDatabase.getInstance(context)
                 val keystoreManager = KeystoreManager(context)
                 for (credentialId in createdCredentialIds) {
-                    runCatching { keystoreManager.deleteKey(credentialId) }
+                    runCatching { keystoreManager.deleteKey(credentialId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) }
                     runCatching { db.auditLogDao().deleteByKeyId(credentialId) }
                 }
                 val ids = createdKeyIds.toMutableSet()
