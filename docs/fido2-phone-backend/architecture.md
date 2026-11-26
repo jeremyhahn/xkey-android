@@ -21,8 +21,12 @@ GATT service 0xFFFD (see [ble-transport](../ble-transport/architecture.md))
 carries authenticatorGetInfo, authenticatorGetAssertion and
 authenticatorMakeCredential to `Ctap2Authenticator`, over the same passkey
 store, sign counter, sharing policy and user verification rules. See
-[CTAP2 over BLE](#ctap2-over-ble). It has not yet been verified on a device
-against a CTAP2 BLE client.
+[CTAP2 over BLE](#ctap2-over-ble). On a Pixel 9 Pro Fold
+(Android 17, API level 37), `Ctap2KeystoreRoundTripTest` passed (1 of 1
+test; the whole `com.automatethethings.xkey.ble.fido` instrumented package,
+1 of 1): MakeCredential, then allowList and discoverable GetAssertion,
+signed with the real AndroidKeyStore key. It has not yet been verified on a
+device against a CTAP2 BLE client.
 
 ## Components
 
@@ -256,8 +260,9 @@ Not implemented: clientPin, authenticatorGetNextAssertion,
 credential management, extensions, U2F, and silent (`up` false)
 assertions.
 
-Left: run `Ctap2KeystoreRoundTripTest` on a device, then check on a device
-against a CTAP2 BLE client and against `xkey fido2 --backend phone`.
+Done on a device: `Ctap2KeystoreRoundTripTest` passed on a Pixel 9 Pro Fold
+(Android 17, API level 37), 1 of 1 test. Left: check on a device against a
+CTAP2 BLE client and against `xkey fido2 --backend phone`.
 
 ## Tests
 
