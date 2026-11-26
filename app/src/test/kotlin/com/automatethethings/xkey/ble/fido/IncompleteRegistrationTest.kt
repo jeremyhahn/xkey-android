@@ -207,7 +207,7 @@ class IncompleteRegistrationTest {
         val firstId = b64(first.id)
         assertEquals(firstId, database.keyDao().getByKeyId(firstId)?.keyId)
         assertEquals(firstId, database.credentialMetadataDao().getByCredentialId(firstId)?.credentialId)
-        verify(exactly = 0) { keystore.deleteKey(firstId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) }
+        verify(exactly = 0) { keystore.deleteKey(firstId, any()) }
         assertTrue(backend().credentials(RP).any { b64(it.id) == firstId })
     }
 

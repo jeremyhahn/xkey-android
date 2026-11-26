@@ -139,7 +139,7 @@ class PasskeyCallerOriginTest {
     fun `a privileged browser on the relying party with its own hash is signed`() = runTest {
         assertion(browser("https://login.$RP_ID"))
 
-        coVerify(exactly = 1) { keystoreManager.signWithoutBiometric(CREDENTIAL_ID, any(), any()) }
+        coVerify(exactly = 1) { keystoreManager.signWithoutBiometric(CREDENTIAL_ID, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL, any()) }
     }
 
     // ---------------------------------------------------------------
