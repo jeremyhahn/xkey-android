@@ -120,6 +120,30 @@ class GateScopeScannerTest {
     }
 
     @Test
+    fun `a gate written as its name and a block scopes that block and names no key`() {
+        val source = """
+            fun interface CryptoObjectSigner {
+                fun sign(alias: String, bytes: ByteArray): ByteArray
+            }
+            fun use(id: String) {
+                val signer = CryptoObjectSigner { alias, bytes ->
+                    keystoreManager.sign(alias, bytes)
+                }
+                keystoreManager.sign(id, data)
+            }
+        """.trimIndent()
+
+        val scanner = GateScopeScanner(source, listOf("CryptoObjectSigner"))
+        val gate = scanner.gates.single()
+        assertEquals("", gate.keyId)
+        assertEquals(4, gate.line)
+        assertEquals(
+            mapOf(6 to true, 8 to false),
+            scanner.calls(crypto).associate { it.line + 1 to scanner.gatesAround(it.offset).isNotEmpty() }
+        )
+    }
+
+    @Test
     fun `the gate's key id is its first argument, trimmed, named or not`() {
         val source = """
             fun use(row: Row) {

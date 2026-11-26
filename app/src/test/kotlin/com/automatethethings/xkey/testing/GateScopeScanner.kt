@@ -20,10 +20,11 @@ package com.automatethethings.xkey.testing
  * block starts and ends, and which key it opened.
  *
  * A gate is a call of one of [gateNames] with a block: its trailing lambda,
- * or its last argument when that is a lambda. The block is found by matching
- * braces in the code with comments, strings and char literals blanked, so a
- * brace in any of them never ends it. The gate's key id is its first
- * argument, trimmed, with any `name =` dropped.
+ * or its last argument when that is a lambda, or a block straight after the
+ * name (`CryptoObjectSigner { ... }`, which names no key). The block is found
+ * by matching braces in the code with comments, strings and char literals
+ * blanked, so a brace in any of them never ends it. The gate's key id is its
+ * first argument, trimmed, with any `name =` dropped.
  *
  * A crypto call is gated only when it lies inside the block of a gate whose
  * key id matches the call's first argument. A call after a closed gate block,
@@ -122,8 +123,12 @@ class GateScopeScanner(private val source: String, gateNames: List<String>) {
     }
 
     private fun findGates(name: String): List<Gate> =
-        Regex("""\b${Regex.escape(name)}\s*(<[^(){}]*>)?\s*\(""").findAll(code).mapNotNull { m ->
+        Regex("""\b${Regex.escape(name)}\s*(<[^(){}]*>)?\s*[({]""").findAll(code).mapNotNull { m ->
             if (isDeclared(m.range.first)) return@mapNotNull null
+            val line = lineOf(m.range.first)
+            if (code[m.range.last] == '{') {
+                return@mapNotNull Gate(name, "", line, m.range.first, m.range.last..matchingBrace(m.range.last))
+            }
             val args = arguments(m.range.last)
             val after = nextOnLine(args.close + 1)
             val lastArg = args.ranges.lastOrNull()?.let { nextSpace(it.first) }
@@ -132,7 +137,7 @@ class GateScopeScanner(private val source: String, gateNames: List<String>) {
                 lastArg != null && code[lastArg] == '{' -> lastArg..matchingBrace(lastArg)
                 else -> return@mapNotNull null
             }
-            Gate(name, unnamed(args.ranges.firstOrNull()?.let(::text).orEmpty()), lineOf(m.range.first), m.range.first, body)
+            Gate(name, unnamed(args.ranges.firstOrNull()?.let(::text).orEmpty()), line, m.range.first, body)
         }.toList()
 
     private fun findFunctions(): List<Function> =
@@ -199,9 +204,10 @@ class GateScopeScanner(private val source: String, gateNames: List<String>) {
         return code.length - 1
     }
 
-    /** Whether the name at [start] is being declared (`fun name`, `fun <T> Recv.name`), not called. */
+    /** Whether the name at [start] is being declared (`fun name`, `fun <T> Recv.name`, `interface Name`), not called. */
     private fun isDeclared(start: Int): Boolean =
-        Regex("""\bfun\s+(<[^>]*>\s*)?([\w.<>?, ]+\.)?$""").containsMatchIn(code.substring(maxOf(0, start - 200), start))
+        Regex("""\b(fun|class|interface|object)\s+(<[^>]*>\s*)?([\w.<>?, ]+\.)?$""")
+            .containsMatchIn(code.substring(maxOf(0, start - 200), start))
 
     private fun nextOnLine(from: Int): Int {
         var i = from
