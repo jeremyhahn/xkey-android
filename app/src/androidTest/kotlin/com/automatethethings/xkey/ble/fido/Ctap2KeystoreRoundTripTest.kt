@@ -22,10 +22,12 @@ import com.automatethethings.xkey.credential.PasskeySignCounter
 import com.automatethethings.xkey.crypto.CborDecoder
 import com.automatethethings.xkey.crypto.CborEncoder
 import com.automatethethings.xkey.crypto.KeystoreManager
+import com.automatethethings.xkey.crypto.UserKeyKind
 import com.automatethethings.xkey.protocol.KeyTypes
 import com.automatethethings.xkey.protocol.SharePermission
 import com.automatethethings.xkey.settings.BiometricSettingsData
 import com.automatethethings.xkey.settings.PairedDeviceRepository
+import com.automatethethings.xkey.storage.KeyPolicyStore
 import com.automatethethings.xkey.storage.XKeyDatabase
 import kotlinx.coroutines.runBlocking
 import org.junit.After
@@ -97,7 +99,11 @@ class Ctap2KeystoreRoundTripTest {
             AndroidFidoCredentialBackend(
                 keyDao = db.keyDao(),
                 credentialDao = db.credentialMetadataDao(),
-                sharePermission = SharePermission(db.keySharingPolicyDao(), PairedDeviceRepository(context)),
+                sharePermission = SharePermission(
+                    db.keySharingPolicyDao(),
+                    PairedDeviceRepository(context),
+                    KeyPolicyStore.of(db, keystoreManager)
+                ),
                 signCounter = PasskeySignCounter(db.credentialMetadataDao(), db.keyDao()),
                 keystoreManager = keystoreManager,
                 userPrompt = prompt,
@@ -110,7 +116,7 @@ class Ctap2KeystoreRoundTripTest {
     @After
     fun tearDown() = runBlocking {
         for (row in db.keyDao().getFido2ByRpId(rpId)) {
-            runCatching { keystoreManager.deleteKey(row.keyId) }
+            runCatching { keystoreManager.deleteKey(row.keyId, UserKeyKind.CREDENTIAL) }
             runCatching { db.keySharingPolicyDao().clearPoliciesForKey(row.keyId) }
             runCatching { db.keyDao().deleteByKeyId(row.keyId) }
         }
