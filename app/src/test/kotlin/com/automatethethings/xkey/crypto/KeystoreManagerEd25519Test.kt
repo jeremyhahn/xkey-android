@@ -51,6 +51,8 @@ class KeystoreManagerEd25519Test {
     private val context = mockk<Context>(relaxed = true)
     private val requestedSpecs = mutableListOf<AlgorithmParameterSpec>()
     private val generator = mockk<KeyPairGenerator>(relaxed = true)
+    // The stand-in Keystore pair is made before KeyPairGenerator is mocked, so no call is recorded for it.
+    private val standInPair = KeyPairGenerator.getInstance("Ed25519").generateKeyPair()
 
     @Before
     fun setUp() {
@@ -88,7 +90,7 @@ class KeystoreManagerEd25519Test {
         every { anyConstructed<KeyGenParameterSpec.Builder>().build() } returns mockk()
 
         every { generator.initialize(any<AlgorithmParameterSpec>()) } returns Unit
-        every { generator.generateKeyPair() } answers { KeyPairGenerator.getInstance("Ed25519").generateKeyPair() }
+        every { generator.generateKeyPair() } returns standInPair
         mockkStatic(KeyPairGenerator::class)
         every { KeyPairGenerator.getInstance(any<String>(), "AndroidKeyStore") } returns generator
     }

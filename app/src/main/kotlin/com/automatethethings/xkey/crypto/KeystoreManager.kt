@@ -1041,7 +1041,7 @@ class KeystoreManager(
 
         val isEC = algorithm.startsWith("ES")
         val isRSA = algorithm.startsWith("RS")
-        val isEd25519 = algorithm == "Ed25519"
+        val isEd25519 = algorithm == "Ed25519" || algorithm == "EdDSA"
         if (!isEC && !isRSA && !isEd25519) {
             throw UnsupportedAlgorithmException(algorithm)
         }
@@ -1049,10 +1049,14 @@ class KeystoreManager(
         try {
             val keyPair = when {
                 isEd25519 -> {
-                    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+                    if (sdkInt < Build.VERSION_CODES.TIRAMISU) {
                         throw UnsupportedAlgorithmException("Ed25519 requires API 33+")
                     }
-                    generateEd25519KeyPair(alias, authDurationSeconds)
+                    // A legacy software Ed25519 key under the alias is deleted, never replaced.
+                    if (hasSoftwareEd25519Key(alias)) {
+                        throw KeyGenerationException("A legacy software Ed25519 key holds $keyId; delete it first")
+                    }
+                    generateKeystoreEd25519KeyPair(alias, authDurationSeconds)
                 }
                 isEC -> generateECKeyPair(alias, algorithm, authDurationSeconds, preferStrongBox)
                 else -> generateRSAKeyPair(alias, algorithm, authDurationSeconds, preferStrongBox, keySizeBits)
@@ -1257,55 +1261,24 @@ class KeystoreManager(
         }
     }
 
-    /**
-     * Generate an Ed25519 key pair using JCE software provider.
-     *
-     * Android Keystore does not support Ed25519, so the private key is stored
-     * in EncryptedSharedPreferences (AES-256-GCM encrypted).
-     */
-    @RequiresApi(Build.VERSION_CODES.TIRAMISU)
-    private fun generateEd25519KeyPair(
-        alias: String,
-        authDurationSeconds: Int
-    ): java.security.KeyPair {
-        val keyPairGenerator = KeyPairGenerator.getInstance("Ed25519")
-        val keyPair = withAliasGate(alias) { keyPairGenerator.generateKeyPair() }
-
-        // Store private key in EncryptedSharedPreferences since Android Keystore
-        // does not support Ed25519
-        val prefs = checkNotNull(ed25519Prefs())
-        // commit(), not apply(): a key is generated only once its write is
-        // durable; cached presence never stands in for it (#255 review).
-        val stored = prefs.edit()
-            .putString(alias, Base64.encodeToString(keyPair.private.encoded, Base64.NO_WRAP))
-            .commit()
-        if (!stored) throw KeyGenerationException("Could not store the Ed25519 key $alias")
-        // A new key under the alias replaces any removal of an older one that
-        // did not commit: retrying that removal would delete the new key.
-        uncommittedSoftwareRemovals.remove(alias)
-
-        return keyPair
+    /** An Ed25519 signing key in the Android Keystore (API 33+); StrongBox makes no Ed25519 keys. */
+    private fun generateKeystoreEd25519KeyPair(alias: String, authDurationSeconds: Int): java.security.KeyPair {
+        val specBuilder = KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_SIGN)
+            .setAlgorithmParameterSpec(ECGenParameterSpec("ed25519"))
+            .setDigests(KeyProperties.DIGEST_NONE)
+        applyAuthDuration(specBuilder, authDurationSeconds)
+        applyAttestationChallenge(specBuilder)
+        val keyPairGenerator = KeyPairGenerator.getInstance(KeyProperties.KEY_ALGORITHM_EC, KEYSTORE_PROVIDER)
+        keyPairGenerator.initialize(specBuilder.build())
+        return withAliasGate(alias) { keyPairGenerator.generateKeyPair() }.also { markStrongBoxSpec(alias, false) }
     }
 
     /**
-     * Whether this device can hold Ed25519 keys at all: they are generated
-     * and read only from API 33 ([getEd25519PrivateKey]), so below it no
-     * key under any id is one.
+     * Whether this device can hold Ed25519 keys at all: they exist only
+     * from API 33, so below it no key under any id is one.
      */
     @androidx.annotation.ChecksSdkIntAtLeast(api = Build.VERSION_CODES.TIRAMISU)
     fun holdsEd25519Keys(): Boolean = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
-
-    /**
-     * Retrieve an Ed25519 private key from EncryptedSharedPreferences.
-     */
-    @RequiresApi(Build.VERSION_CODES.TIRAMISU)
-    fun getEd25519PrivateKey(alias: String): PrivateKey? {
-        val prefs = ed25519Read(alias) { ed25519Prefs() } ?: return null
-        val encoded = ed25519Read(alias) { prefs.getString(alias, null) } ?: return null
-        val keyBytes = Base64.decode(encoded, Base64.NO_WRAP)
-        val keyFactory = KeyFactory.getInstance("Ed25519")
-        return keyFactory.generatePrivate(PKCS8EncodedKeySpec(keyBytes))
-    }
 
     /**
      * The one read of whether a software Ed25519 key is stored under [alias].
@@ -1708,7 +1681,11 @@ class KeystoreManager(
             verifier.update(data, 0, data.size)
             verifier.verifySignature(signature)
         } else {
-            val keyAlgorithm = if (jcaAlgorithm.uppercase().contains("RSA")) "RSA" else "EC"
+            val keyAlgorithm = when {
+                jcaAlgorithm == "Ed25519" -> "Ed25519"
+                jcaAlgorithm.uppercase().contains("RSA") -> "RSA"
+                else -> "EC"
+            }
             val publicKey = java.security.KeyFactory.getInstance(keyAlgorithm)
                 .generatePublic(java.security.spec.X509EncodedKeySpec(publicKeyDer))
             Signature.getInstance(jcaAlgorithm).run {
@@ -2130,21 +2107,11 @@ class KeystoreManager(
         val held = ownersOf(keyId, generation)
         if (held.isEmpty()) return userKeyKindOf(keyType)
         val row = publicKey()
-        // The row's key read in each encoding it holds ([matchRowPublicKey]).
-        // Each key's public half is read from the backend that stores it: a
-        // Keystore certificate, or an Ed25519 key's preferences entry, which
-        // has no certificate (#270 verify r3).
+        // The row's key read in each encoding it holds ([matchRowPublicKey]); a legacy software Ed25519 key's is never read.
         val rowPublicKeyMatch = { kind: UserKeyKind ->
             matchRowPublicKey(
                 row,
-                {
-                    runCatching { getPublicKeyDER(keyId, kind) }.getOrNull()
-                        ?: if (holdsEd25519Keys()) {
-                            getEd25519PrivateKey(userKeyAlias(keyId, kind))?.let { ed25519PublicKeyDer(it) }
-                        } else {
-                            null
-                        }
-                },
+                { runCatching { getPublicKeyDER(keyId, kind) }.getOrNull() },
                 { getCOSEPublicKey(keyId, kind) }
             )
         }
@@ -2164,7 +2131,15 @@ class KeystoreManager(
         val owners = if (row.isEmpty) emptyList() else UserKeyKind.entries.filter {
             rowPublicKeyMatch(it) == true
         }
-        return owners.singleOrNull() ?: throw KeyOwnershipUnknownException(keyId)
+        owners.singleOrNull()?.let { return it }
+        // A legacy software Ed25519 key owns the row when every other key's public half differs.
+        val legacy = held.filter { "$ED25519_ENTRY${userKeyAlias(keyId, it)}" in generation }
+        if (!row.isEmpty && owners.isEmpty() && legacy.size == 1 &&
+            held.all { it in legacy || rowPublicKeyMatch(it) == false }
+        ) {
+            return legacy.single()
+        }
+        throw KeyOwnershipUnknownException(keyId)
     }
 
 
@@ -3168,7 +3143,7 @@ class KeystoreManager(
         /**
          * The JCA signature algorithm a key of COSE/JOSE [algorithm] signs with.
          *
-         * @param algorithm "ES256", "ES384", "ES512", "RS256", "RS384", or "RS512".
+         * @param algorithm "ES256", "ES384", "ES512", "RS256", "RS384", "RS512", "EdDSA" or "Ed25519".
          * @throws SigningException if the algorithm is not supported.
          */
         fun jcaSignatureAlgorithm(algorithm: String): String =
@@ -3195,7 +3170,9 @@ class KeystoreManager(
             "ES512" to SIG_ALGORITHM_ES512,
             "RS256" to SIG_ALGORITHM_RS256,
             "RS384" to SIG_ALGORITHM_RS384,
-            "RS512" to SIG_ALGORITHM_RS512
+            "RS512" to SIG_ALGORITHM_RS512,
+            "EdDSA" to "Ed25519",
+            "Ed25519" to "Ed25519"
         )
 
         /** The JCA algorithm passkey assertions sign their hash with. */
@@ -3386,18 +3363,6 @@ class KeystoreManager(
                 byDer == false || byCose == false -> false
                 else -> null
             }
-        }
-
-        /**
-         * The SubjectPublicKeyInfo DER of an Ed25519 [privateKey]'s public
-         * half, derived from the PKCS#8 key the Ed25519 preferences store
-         * (they keep no public key or certificate).
-         */
-        fun ed25519PublicKeyDer(privateKey: java.security.PrivateKey): ByteArray {
-            val params = org.bouncycastle.crypto.util.PrivateKeyFactory.createKey(privateKey.encoded)
-                as org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters
-            return org.bouncycastle.crypto.util.SubjectPublicKeyInfoFactory
-                .createSubjectPublicKeyInfo(params.generatePublicKey()).encoded
         }
 
         /** Whether [generation] holds material of [keyId]'s [kind] key; a software key is a general key. */

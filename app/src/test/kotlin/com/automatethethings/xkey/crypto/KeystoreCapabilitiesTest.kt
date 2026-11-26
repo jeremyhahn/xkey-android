@@ -86,8 +86,11 @@ class KeystoreCapabilitiesTest {
                 algorithms.containsAll(KeystoreCapabilities.BASE_ALGORITHMS)
             )
         }
-        for (sdk in 28..37) {
+        for (sdk in 28..32) {
             assertEquals(KeystoreCapabilities.BASE_ALGORITHMS, KeystoreCapabilities.supportedAlgorithms(sdk))
+        }
+        for (sdk in 33..37) {
+            assertEquals(KeystoreCapabilities.BASE_ALGORITHMS + "EdDSA", KeystoreCapabilities.supportedAlgorithms(sdk))
         }
     }
 

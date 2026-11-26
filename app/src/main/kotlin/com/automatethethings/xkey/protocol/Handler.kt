@@ -1729,7 +1729,7 @@ class RequestHandler(
         // key with no readable size (EdDSA) falls back to the algorithm's own.
         keySizeBits = generatedKeySize(genParams, publicKeyDer)
             ?: genParams.resolvedKeySizeBits()
-            ?: CoseAlgorithms.getKeySizeBits(genParams.algorithm)
+            ?: if (genParams.algorithm == CoseAlgorithms.EDDSA) 256 else CoseAlgorithms.getKeySizeBits(genParams.algorithm)
         val level = generatedKeyLevel(
             genParams.keyId,
             read = { keystoreManager.generalKeySecurityLevel(genParams.keyId) },
@@ -2062,6 +2062,15 @@ class RequestHandler(
         // The requesting desktop, captured before anything can suspend.
         val caller = auditCaller()
 
+        // A legacy software Ed25519 key is listed and deleted only; it never signs.
+        if (!keystoreManager.generalKeyExists(signParams.keyId) &&
+            keystoreManager.hasSoftwareEd25519Key(com.automatethethings.xkey.crypto.KeystoreManager.generalKeyAlias(signParams.keyId))
+        ) {
+            throw ProtocolException(
+                "Key ${signParams.keyId} is a legacy software Ed25519 key, which cannot sign; delete it and create a new Ed25519 key",
+                errorCode = ErrorCodes.INVALID_ALGORITHM
+            )
+        }
         if (!keystoreManager.generalKeyExists(signParams.keyId)) {
             throw ProtocolException("Key not found: ${signParams.keyId}", errorCode = ErrorCodes.KEY_NOT_FOUND)
         }
