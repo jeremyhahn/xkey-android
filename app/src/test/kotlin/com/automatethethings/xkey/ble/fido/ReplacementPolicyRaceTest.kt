@@ -143,7 +143,7 @@ class ReplacementPolicyRaceTest {
             "the old passkey's metadata row must stay",
             database.credentialMetadataDao().getByCredentialId(oldKeyId)
         )
-        verify(exactly = 0) { keystore.deleteKey(oldKeyId, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL) }
+        verify(exactly = 0) { keystore.deleteKey(oldKeyId, any()) }
     }
 
     @Test
