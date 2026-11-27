@@ -1,5 +1,8 @@
-# ci-template: v1.54 — CI for a Kotlin/Gradle Android app, kept in step with a
+# ci-template: v1.61 — CI for a Kotlin/Gradle Android app, kept in step with a
 # shared template; change both together.
+# v1.61: each push to main runs in its own concurrency group, main-push-<sha>.
+# The concurrency block below already sets main-{event}-{sha} for main, which
+# is main-push-<sha> for a push, so no other line changes.
 # v1.54: preflight's runner selection balances each run between GitHub-hosted
 # runners and the self-hosted pools, whichever the repository uses less, with
 # limits from the repository variables CI_HOSTED_SHARE,
