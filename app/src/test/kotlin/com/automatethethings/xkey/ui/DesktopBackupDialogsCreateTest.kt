@@ -19,6 +19,7 @@ import androidx.appcompat.app.AlertDialog
 import com.automatethethings.xkey.R
 import com.automatethethings.xkey.remote.RemoteBackupClient
 import com.automatethethings.xkey.remote.RemoteBackupException
+import com.google.android.material.snackbar.Snackbar
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.confirmVerified
@@ -38,6 +39,8 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import java.io.IOException
+import java.lang.ref.Reference
+import java.lang.reflect.Proxy
 
 /**
  * Robolectric tests for the create half of [DesktopBackupDialogs]: the entry
@@ -274,6 +277,23 @@ class DesktopBackupDialogsCreateTest {
     }
 
     @Test
+    fun `a Snackbar left by an earlier screen does not hold back the timed-out text`() {
+        val stuck = leaveStuckSnackbar()
+        host.close()
+        System.gc()
+
+        host = DesktopBackupDialogsTestHost()
+        coEvery { host.gatt.createDesktopBackup(any(), any()) } throws
+            RemoteBackupException.TimedOut("remote.createBackup")
+
+        send("pass")
+
+        assertEquals(listOf(host.string(R.string.desktop_backup_error_timed_out)), host.snackbarTexts())
+        // Reachable until here, so garbage collection cannot drop it from the manager.
+        Reference.reachabilityFence(stuck)
+    }
+
+    @Test
     fun `a plain failure shows the generic text with its message`() {
         coEvery { host.gatt.createDesktopBackup(any(), any()) } throws IOException("link lost")
 
@@ -413,6 +433,31 @@ class DesktopBackupDialogsCreateTest {
         val fields = host.fields(dialog)
         fields[0].setText(password)
         fields[1].setText(confirm)
+    }
+
+    /**
+     * Makes the process-wide SnackbarManager hold, as its current Snackbar, one
+     * whose dismiss never reports back: the state a long Snackbar an earlier
+     * test left shown is in once the looper reset between tests has dropped
+     * its dismiss timer and its hide. Keep the result reachable: the manager
+     * holds it only weakly.
+     */
+    private fun leaveStuckSnackbar(): Any {
+        val manager = Class.forName("com.google.android.material.snackbar.SnackbarManager")
+        val callbackType = Class.forName("com.google.android.material.snackbar.SnackbarManager\$Callback")
+        val stuck = Proxy.newProxyInstance(callbackType.classLoader, arrayOf(callbackType)) { proxy, method, args ->
+            when (method.name) {
+                "equals" -> proxy === args?.get(0)
+                "hashCode" -> System.identityHashCode(proxy)
+                "toString" -> "stuck Snackbar"
+                else -> null // show() and dismiss(int) do nothing
+            }
+        }
+        val instance = manager.getDeclaredMethod("getInstance").apply { isAccessible = true }.invoke(null)
+        manager.getDeclaredMethod("show", Int::class.javaPrimitiveType, callbackType)
+            .apply { isAccessible = true }
+            .invoke(instance, Snackbar.LENGTH_INDEFINITE, stuck)
+        return stuck
     }
 
     /** Opens create, types [password] in both fields and sends it. */

@@ -82,6 +82,9 @@ class DesktopBackupDialogsTestHost {
 
     init {
         every { gatt.connectedDesktop() } answers { desktop }
+        // The SnackbarManager outlives each test: forget a Snackbar an earlier
+        // one left shown, or this screen's notices would queue behind it.
+        DesktopKeysTestService.resetSnackbars()
     }
 
     private val controller: ActivityController<HostActivity> =
@@ -107,6 +110,7 @@ class DesktopBackupDialogsTestHost {
 
     fun close() {
         controller.pause().stop().destroy()
+        DesktopKeysTestService.resetSnackbars()
     }
 
     fun string(@StringRes res: Int, vararg args: Any): String = activity.getString(res, *args)
