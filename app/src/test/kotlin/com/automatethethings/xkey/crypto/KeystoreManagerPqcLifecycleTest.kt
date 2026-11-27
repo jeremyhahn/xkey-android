@@ -174,7 +174,7 @@ class KeystoreManagerPqcLifecycleTest {
             val keyId = "bc_${set.name}"
             val spki = manager.generateMlDsaKey(keyId, set, PqcBacking.SOFTWARE, authDurationSeconds = -1)
 
-            assertArrayEquals(spki, manager.getPublicKeyDER(keyId))
+            assertArrayEquals(spki, manager.getPublicKeyDER(keyId, UserKeyKind.GENERAL))
             assertEquals(KeySecurityLevel.SOFTWARE, manager.generalKeySecurityLevel(keyId))
             val signature = runBlocking {
                 manager.signApprovedMlDsa(KeystoreManager.generalKeyAlias(keyId), spki, DATA, set, null)

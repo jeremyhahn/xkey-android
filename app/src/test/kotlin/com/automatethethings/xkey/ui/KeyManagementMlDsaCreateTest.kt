@@ -89,7 +89,7 @@ class KeyManagementMlDsaCreateTest {
     fun `closing the screen while an ML-DSA key is made leaves both the key and its row or neither`() {
         val entered = CountDownLatch(1)
         val release = CountDownLatch(1)
-        coEvery { keystore.generateMlDsaKey("c", any(), any(), any(), any()) } answers {
+        coEvery { keystore.generateMlDsaKey("c", set, any(), any(), any()) } answers {
             entered.countDown()
             release.await(10, TimeUnit.SECONDS)
             material += "c"
@@ -107,7 +107,7 @@ class KeyManagementMlDsaCreateTest {
 
     @Test
     fun `an ML-DSA key whose row cannot be stored is removed`() {
-        coEvery { keystore.generateMlDsaKey("f", any(), any(), any(), any()) } answers {
+        coEvery { keystore.generateMlDsaKey("f", set, any(), any(), any()) } answers {
             material += "f"
             spki
         }
@@ -121,7 +121,7 @@ class KeyManagementMlDsaCreateTest {
 
     @Test
     fun `a created ML-DSA key has its row`() {
-        coEvery { keystore.generateMlDsaKey("k", any(), any(), any(), any()) } answers {
+        coEvery { keystore.generateMlDsaKey("k", set, any(), any(), any()) } answers {
             material += "k"
             spki
         }

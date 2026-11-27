@@ -46,6 +46,7 @@ import io.mockk.slot
 import io.mockk.unmockkAll
 import io.mockk.verify
 import java.security.KeyStore
+import java.security.SecureRandom
 import java.util.Base64
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -58,6 +59,12 @@ import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import kotlinx.coroutines.withContext
+import org.bouncycastle.crypto.generators.MLDSAKeyPairGenerator
+import org.hamcrest.CoreMatchers.equalTo
+import org.bouncycastle.crypto.params.MLDSAKeyGenerationParameters
+import org.bouncycastle.crypto.params.MLDSAParameters
+import org.bouncycastle.crypto.params.MLDSAPublicKeyParameters
+import org.bouncycastle.crypto.util.SubjectPublicKeyInfoFactory
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
@@ -67,6 +74,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.ErrorCollector
 import org.junit.rules.TemporaryFolder
 
 /**
@@ -81,6 +89,9 @@ class LocalGenerateKeyMlDsaHandlerTest {
     @get:Rule
     val tmp = TemporaryFolder()
 
+    @get:Rule
+    val errors = ErrorCollector()
+
     private lateinit var handler: RequestHandler
     private lateinit var keystore: KeystoreManager
     private lateinit var keyDao: KeyDao
@@ -91,8 +102,10 @@ class LocalGenerateKeyMlDsaHandlerTest {
 
     /** The backing of every generateMlDsaKey call, in order. */
     private val backings = mutableListOf<PqcBacking>()
+    /** The parameter set of every generateMlDsaKey call, in order. */
+    private val sets = mutableListOf<MlDsaParameterSet>()
     private val stored = slot<KeyEntity>()
-    private val spki = ByteArray(MlDsaParameterSet.ML_DSA_65.publicKeyBytes + 22) { (it % 251).toByte() }
+    private val spki = SPKIS.getValue(MlDsaParameterSet.ML_DSA_65)
 
     @Before
     fun setUp() {
@@ -140,9 +153,12 @@ class LocalGenerateKeyMlDsaHandlerTest {
         every { KeyStore.getInstance("AndroidKeyStore") } returns mockk(relaxed = true)
 
         keystore = mockk(relaxed = true)
+        // Each call is recorded with the set it asked for and gets a real SPKI of that set.
         coEvery { keystore.generateMlDsaKey(any(), any(), any(), any(), any()) } answers {
+            val set = secondArg<MlDsaParameterSet>()
+            sets += set
             backings += thirdArg<PqcBacking>()
-            spki
+            SPKIS.getValue(set)
         }
         every { keystore.generalKeySecurityLevel(any()) } answers {
             if (backings.lastOrNull() == PqcBacking.HARDWARE) KeySecurityLevel.TEE else KeySecurityLevel.SOFTWARE
@@ -193,6 +209,7 @@ class LocalGenerateKeyMlDsaHandlerTest {
         val result = response.optJSONObject("result")
         assertTrue("ML-DSA-65 must succeed, got $response", result != null)
         assertEquals(listOf(PqcBacking.SOFTWARE), backings)
+        assertEquals(listOf(MlDsaParameterSet.ML_DSA_65), sets)
         assertEquals(MlDsaParameterSet.ML_DSA_65.publicKeyBytes * 8, result!!.getInt("keySizeBits"))
         assertEquals("ML-DSA-65", stored.captured.algorithm)
         assertEquals(MlDsaParameterSet.ML_DSA_65.publicKeyBytes * 8, stored.captured.keySizeBits)
@@ -204,7 +221,7 @@ class LocalGenerateKeyMlDsaHandlerTest {
         val material = java.util.Collections.synchronizedSet(mutableSetOf<String>())
         val entered = CountDownLatch(1)
         val release = CountDownLatch(1)
-        coEvery { keystore.generateMlDsaKey("c", any(), any(), any(), any()) } answers {
+        coEvery { keystore.generateMlDsaKey("c", MlDsaParameterSet.ML_DSA_65, any(), any(), any()) } answers {
             entered.countDown()
             release.await(10, TimeUnit.SECONDS)
             material += "c"
@@ -227,7 +244,7 @@ class LocalGenerateKeyMlDsaHandlerTest {
     @Test
     fun `an ML-DSA key whose row cannot be stored is removed and a retry succeeds`() = runTest {
         val material = mutableSetOf<String>()
-        coEvery { keystore.generateMlDsaKey("f", any(), any(), any(), any()) } answers {
+        coEvery { keystore.generateMlDsaKey("f", MlDsaParameterSet.ML_DSA_65, any(), any(), any()) } answers {
             material += "f"
             spki
         }
@@ -297,6 +314,7 @@ class LocalGenerateKeyMlDsaHandlerTest {
 
         assertFalse(response.toString(), response.has("error"))
         assertEquals(listOf(PqcBacking.HARDWARE), backings)
+        assertEquals(listOf(MlDsaParameterSet.ML_DSA_65), sets)
     }
 
     @Test
@@ -309,6 +327,7 @@ class LocalGenerateKeyMlDsaHandlerTest {
 
         assertFalse(response.toString(), response.has("error"))
         assertEquals(listOf(PqcBacking.SOFTWARE), backings)
+        assertEquals(listOf(MlDsaParameterSet.ML_DSA_65), sets)
     }
 
     @Test
@@ -467,21 +486,28 @@ class LocalGenerateKeyMlDsaHandlerTest {
 
     @Test
     fun `each set is made by name and by COSE id and returns its SPKI and a software level`() = runTest {
-        val expectedDer = Base64.getEncoder().encodeToString(spki)
         for (set in MlDsaParameterSet.entries) {
+            val expectedDer = Base64.getEncoder().encodeToString(SPKIS.getValue(set))
             for (algorithm in listOf("\"${set.wireName}\"", set.coseAlgorithm.toString())) {
                 backings.clear()
+                sets.clear()
                 val response = generate(
                     """{"keyId":"k","algorithm":$algorithm,"keyBacking":"software","requireUserVerification":false}"""
                 )
 
                 val result = response.optJSONObject("result")
                 assertTrue("$algorithm must succeed, got $response", result != null)
-                assertEquals(algorithm, listOf(PqcBacking.SOFTWARE), backings)
-                assertEquals(algorithm, set.wireName, result!!.getString("algorithm"))
-                assertEquals(algorithm, expectedDer, result.getString("publicKeyDer"))
-                assertEquals(algorithm, "software", result.getString("securityLevel"))
-                assertEquals(algorithm, set.wireName, stored.captured.algorithm)
+                // Every case is checked and reported, so one wrong set does not hide another.
+                errors.checkThat(algorithm, backings.toList(), equalTo(listOf(PqcBacking.SOFTWARE)))
+                errors.checkThat("$algorithm must ask the keystore for its own set", sets.toList(), equalTo(listOf(set)))
+                errors.checkThat(algorithm, result!!.getString("algorithm"), equalTo(set.wireName))
+                errors.checkThat(algorithm, result.getString("publicKeyDer"), equalTo(expectedDer))
+                val returned = org.bouncycastle.crypto.util.PublicKeyFactory.createKey(
+                    Base64.getDecoder().decode(result.getString("publicKeyDer"))
+                ) as MLDSAPublicKeyParameters
+                errors.checkThat("$algorithm returns an SPKI of its set", returned.parameters, equalTo(bcParameters(set)))
+                errors.checkThat(algorithm, result.getString("securityLevel"), equalTo("software"))
+                errors.checkThat(algorithm, stored.captured.algorithm, equalTo(set.wireName))
             }
         }
     }
@@ -559,6 +585,19 @@ class LocalGenerateKeyMlDsaHandlerTest {
 
     private companion object {
         const val PEER = "aa01"
+
+        fun bcParameters(set: MlDsaParameterSet): MLDSAParameters = when (set) {
+            MlDsaParameterSet.ML_DSA_44 -> MLDSAParameters.ml_dsa_44
+            MlDsaParameterSet.ML_DSA_65 -> MLDSAParameters.ml_dsa_65
+            MlDsaParameterSet.ML_DSA_87 -> MLDSAParameters.ml_dsa_87
+        }
+
+        /** A real SubjectPublicKeyInfo of each set, made once with Bouncy Castle. */
+        val SPKIS: Map<MlDsaParameterSet, ByteArray> = MlDsaParameterSet.entries.associateWith { set ->
+            val generator = MLDSAKeyPairGenerator()
+            generator.init(MLDSAKeyGenerationParameters(SecureRandom(), bcParameters(set)))
+            SubjectPublicKeyInfoFactory.createSubjectPublicKeyInfo(generator.generateKeyPair().public).encoded
+        }
         val binding = SessionBindingProvider {
             SessionBinding(ByteArray(32) { 3 }, ByteArray(32) { 4 }, ByteArray(0))
         }
