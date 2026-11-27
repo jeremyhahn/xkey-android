@@ -4,14 +4,25 @@ xKey makes ML-DSA-44, ML-DSA-65 and ML-DSA-87 (FIPS 204) signing keys. Each
 key has one of two backings:
 
 - **Software**: generated and used with Bouncy Castle, and stored only wrapped
-  by a non-exportable Android Keystore AES-256-GCM key. Every device has it.
+  by its own non-exportable Android Keystore AES-256-GCM key. Every device
+  has it.
 - **Hardware**: an Android Keystore key, on devices whose Keystore makes the
   parameter set in the TEE or StrongBox. The Keystore backend is described in
   [hardware.md](hardware.md).
 
 ML-KEM is out of scope: no app path decapsulates (`local.decrypt` is
 RSA-OAEP, `local.ecdh` is ECDH, `.xkeyenc` is ECIES), and a wire method only
-one side implements is a defect.
+one side implements is a defect. ML-KEM does not fit `local.decrypt`: that
+method takes an RSA-OAEP ciphertext and returns the plaintext, while ML-KEM
+decapsulation takes a KEM ciphertext and returns a shared secret, so it would
+be a new method with a new result. ML-KEM does not fit `local.ecdh` either:
+ECDH combines the phone's private key with a peer public key the caller
+sends, while ML-KEM decapsulation needs a ciphertext the peer encapsulated
+to the phone's key, not a peer public key.
+
+Hardware ML-DSA is confirmed only once `KeystorePqcBackendDeviceTest` runs
+on an API 37 device that makes ML-DSA keys; until then the JVM tests cover
+the backend through injected probes and generators.
 
 ## Parameter sets
 
@@ -32,29 +43,45 @@ over the message itself.
 
 `crypto/PqcSoftwareKeyStore.kt` keeps one file per Keystore-style alias:
 `filesDir/pqc_keys/<sha256-hex(alias)>.key`, written to a `.tmp` file and
-renamed into place.
+renamed into place. Beside it, `<sha256-hex(alias)>.gen` holds the alias's
+generation (an 8-byte long), which delete keeps and advances.
 
-The file is:
+The `.key` file is:
 
 ```
-"XPQ2" | UTF alias | UTF set name | int len | SPKI DER | int len | sealed
+"XPQ3" | UTF alias | UTF set name | int len | SPKI DER | UTF wrap key id | int len | sealed
 ```
 
-`sealed` is `KeystoreAeadCipher("xkey_pqc_wrap").encrypt(plaintext)`
-(AES-256-GCM, IV prepended), where the plaintext is
-`int len | alias | int len | set name | int auth policy | PKCS#8 private key`.
-The wrap key is non-exportable and lives in AndroidKeyStore. A record in the
-earlier `XPQ1` format, which had no auth policy, is refused, not migrated.
+The wrap key id is 32 lowercase hex characters (16 random bytes), fresh for
+each key. `sealed` is
+`KeystoreAeadCipher("xkey_pqc_wrap_" + wrap key id).encrypt(plaintext)`
+(AES-256-GCM, IV prepended): every record has its own non-exportable
+AndroidKeyStore wrap key (`KeystoreWrapKeyring`). The plaintext is
+`int len | alias | int len | set name | int len | SPKI DER | long generation | int auth policy | PKCS#8 private key`.
+Records in the earlier `XPQ1` and `XPQ2` formats (never released; `XPQ2`
+used one shared `xkey_pqc_wrap` key) do not open and are not migrated.
 
+- Deleting or replacing a key removes its `xkey_pqc_wrap_<id>` key first. A
+  record whose wrap key is gone is refused with `PqcKeyRecordException` ("ML-DSA
+  key was deleted") before any key is opened, so a copy of the old record put
+  back never signs. If the wrap key cannot be removed, the record is written
+  back and the delete fails with `IOException`, so the key stays usable.
+- A record whose sealed generation is below the alias's `.gen` value is
+  refused, as is a record with no `.gen` file.
+- `xkey_pqc_wrap` (`PqcSoftwareKeyStore.WRAP_KEY_ALIAS`) seals no record. It
+  stays in `KeystoreAeadCipher.INTERNAL_ALIASES`, so a key left under it by an
+  earlier build is never listed or deleted as a user key, and tests use it as
+  the single injected cipher. `xkey_pqc_wrap_<id>` aliases are internal too.
 - No private key byte is written unsealed or logged. Every plaintext copy the
   store makes (the PKCS#8 encoding, the sealed plaintext, the opened
   plaintext) is zeroed after use.
 - A record is read only under the alias it names. A file copied under another
   alias is ignored.
-- Before it signs, the store checks that the sealed alias and set match the
-  record and that the private key is an ML-DSA key of that set. A record that
-  holds another record's sealed blob is refused with `PqcKeyRecordException`.
-- The fields are capped at 64 KiB, and trailing bytes are refused.
+- Before it signs, the store checks that the sealed alias, set and public key
+  match the record and that the private key is an ML-DSA key of that set whose
+  public key is the record's. A record that holds another record's sealed blob
+  is refused with `PqcKeyRecordException`.
+- The size fields are capped at 64 KiB, and trailing bytes are refused.
 
 The auth policy is the `authDurationSeconds` the key was made with, sealed
 with the private key so no caller can drop it: -1 is no user authentication,

@@ -210,6 +210,109 @@ class PqcSoftwareKeyStoreTest {
         assertFalse(store.delete("xkey_key_absent"))
     }
 
+    @Test
+    fun `under a real AES-GCM seal no record file holds any run of its PKCS#8 bytes`() {
+        val aes = javax.crypto.spec.SecretKeySpec(ByteArray(32) { (it * 7).toByte() }, "AES")
+        val plaintexts = mutableListOf<ByteArray>()
+        val cipher = mockk<KeystoreAeadCipher>()
+        every { cipher.encrypt(any()) } answers {
+            val plaintext = firstArg<ByteArray>()
+            plaintexts += plaintext.copyOf()
+            val iv = ByteArray(12).also { java.security.SecureRandom().nextBytes(it) }
+            val gcm = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding")
+            gcm.init(javax.crypto.Cipher.ENCRYPT_MODE, aes, javax.crypto.spec.GCMParameterSpec(128, iv))
+            iv + gcm.doFinal(plaintext)
+        }
+        every { cipher.decrypt(any()) } answers {
+            val sealed = firstArg<ByteArray>()
+            val gcm = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding")
+            gcm.init(javax.crypto.Cipher.DECRYPT_MODE, aes, javax.crypto.spec.GCMParameterSpec(128, sealed, 0, 12))
+            gcm.doFinal(sealed, 12, sealed.size - 12)
+        }
+        val context = mockk<Context>(relaxed = true)
+        every { context.filesDir } returns tmp.newFolder("aes")
+        val aesStore = PqcSoftwareKeyStore(context, cipher)
+
+        for (set in MlDsaParameterSet.entries) {
+            val alias = "xkey_key_aes_${set.name}"
+            aesStore.generate(alias, set)
+            val pkcs8 = pkcs8Of(plaintexts.last())
+            assertTrue("${set.wireName} plaintext holds a PKCS#8 key", pkcs8.size > 32)
+            val onDisk = aesStore.fileFor(alias).readBytes() + aesStore.generationFileFor(alias).readBytes()
+
+            assertFalse("${set.wireName} PKCS#8 on disk", contains(onDisk, pkcs8))
+            val spki = aesStore.publicKeyDer(alias)!!
+            var secretWindows = 0
+            for (start in 0..pkcs8.size - 16 step 16) {
+                val window = pkcs8.copyOfRange(start, start + 16)
+                // The PKCS#8 encoding repeats public bytes (rho) that the clear SPKI holds.
+                if (contains(spki, window)) continue
+                secretWindows++
+                assertFalse(
+                    "${set.wireName} PKCS#8 bytes $start..${start + 15} on disk",
+                    contains(onDisk, window)
+                )
+            }
+            assertTrue("${set.wireName} PKCS#8 has secret bytes to check", secretWindows * 16 > pkcs8.size / 2)
+            assertEquals(set.signatureBytes, aesStore.sign(alias, set, byteArrayOf(1)).size)
+        }
+    }
+
+    @Test
+    fun `each key has its own wrap key and delete or replace removes it`() {
+        val sealedUnder = mutableListOf<String>()
+        val destroyed = mutableListOf<String>()
+        val keyring = object : PqcWrapKeyring {
+            private val live = mutableSetOf<String>()
+            override fun newId() = PqcWrapKeyring.randomId()
+            override fun seal(id: String, plaintext: ByteArray): ByteArray {
+                sealedUnder += id
+                live += id
+                return plaintext.reversedArray()
+            }
+            override fun open(id: String, sealed: ByteArray): ByteArray {
+                if (id !in live) throw PqcKeyRecordException("ML-DSA key was deleted")
+                return sealed.reversedArray()
+            }
+            override fun destroy(id: String) {
+                destroyed += id
+                live -= id
+            }
+        }
+        val context = mockk<Context>(relaxed = true)
+        every { context.filesDir } returns tmp.newFolder("ring")
+        val ringStore = PqcSoftwareKeyStore(context, keyring)
+
+        ringStore.generate("xkey_key_a", MlDsaParameterSet.ML_DSA_44)
+        ringStore.generate("xkey_key_b", MlDsaParameterSet.ML_DSA_44)
+        val a = PqcSoftwareKeyStore.Record.decode(ringStore.fileFor("xkey_key_a").readBytes())
+        val b = PqcSoftwareKeyStore.Record.decode(ringStore.fileFor("xkey_key_b").readBytes())
+        assertEquals(listOf(a.wrapId, b.wrapId), sealedUnder)
+        assertTrue("two keys never share a wrap key", a.wrapId != b.wrapId)
+
+        val saved = ringStore.fileFor("xkey_key_a").readBytes()
+        assertTrue(ringStore.delete("xkey_key_a"))
+        assertEquals(listOf(a.wrapId), destroyed)
+        ringStore.fileFor("xkey_key_a").writeBytes(saved)
+        assertThrows(PqcKeyRecordException::class.java) {
+            ringStore.sign("xkey_key_a", MlDsaParameterSet.ML_DSA_44, byteArrayOf(1))
+        }
+
+        ringStore.generate("xkey_key_b", MlDsaParameterSet.ML_DSA_44)
+        assertEquals(listOf(a.wrapId, b.wrapId), destroyed)
+        val b2 = PqcSoftwareKeyStore.Record.decode(ringStore.fileFor("xkey_key_b").readBytes())
+        assertTrue("a replacing key gets a fresh wrap key", b2.wrapId != b.wrapId)
+        ringStore.sign("xkey_key_b", MlDsaParameterSet.ML_DSA_44, byteArrayOf(1))
+    }
+
+    /** The PKCS#8 tail of a sealed plaintext: `len|alias|len|set|len|spki|generation|policy|pkcs8`. */
+    private fun pkcs8Of(plaintext: ByteArray): ByteArray {
+        val buffer = java.nio.ByteBuffer.wrap(plaintext)
+        repeat(3) { buffer.position(buffer.position() + 4 + buffer.getInt(buffer.position())) }
+        buffer.position(buffer.position() + 8 + 4)
+        return ByteArray(buffer.remaining()).also { buffer.get(it) }
+    }
+
     private fun contains(haystack: ByteArray, needle: ByteArray): Boolean =
         (0..haystack.size - needle.size).any { start ->
             needle.indices.all { haystack[start + it] == needle[it] }

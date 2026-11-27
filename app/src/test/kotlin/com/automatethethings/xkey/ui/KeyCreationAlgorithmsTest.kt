@@ -17,6 +17,8 @@ package com.automatethethings.xkey.ui
 import com.automatethethings.xkey.crypto.KeystoreManager
 import com.automatethethings.xkey.crypto.MlDsaParameterSet
 import com.automatethethings.xkey.crypto.PqcBacking
+import com.automatethethings.xkey.crypto.PqcHardware
+import com.automatethethings.xkey.crypto.PqcHardwareBackend
 import com.automatethethings.xkey.crypto.SoftwareKeyOps
 import com.automatethethings.xkey.storage.entity.KeyEntity
 import org.junit.Assert.assertEquals
@@ -115,6 +117,41 @@ class KeyCreationAlgorithmsTest {
             KeyCreationAlgorithms.storageOptions(set, setOf(MlDsaParameterSet.ML_DSA_44))
         )
         assertEquals(listOf(PqcBacking.SOFTWARE), KeyCreationAlgorithms.storageOptions(set, emptySet()))
+    }
+
+    @Test
+    fun `for every set and every backend report hardware is listed only for a reported set`() {
+        val saved = PqcHardware.backend
+        val all = MlDsaParameterSet.entries
+        try {
+            for (mask in 0 until (1 shl all.size)) {
+                val reported = all.filterIndexed { i, _ -> mask and (1 shl i) != 0 }.toSet()
+                PqcHardware.backend = object : PqcHardwareBackend {
+                    override fun supportedParameterSets() = reported
+                    override fun generate(
+                        alias: String,
+                        set: MlDsaParameterSet,
+                        authDurationSeconds: Int,
+                        preferStrongBox: Boolean
+                    ): ByteArray = throw UnsupportedOperationException()
+                    override fun jcaSignatureAlgorithm(set: MlDsaParameterSet) = set.wireName
+                }
+                for (set in all) {
+                    val expected = if (set in reported) {
+                        listOf(PqcBacking.HARDWARE, PqcBacking.SOFTWARE)
+                    } else {
+                        listOf(PqcBacking.SOFTWARE)
+                    }
+                    assertEquals("$set with $reported", expected, KeyCreationAlgorithms.storageOptions(set, PqcHardware.supported()))
+                }
+            }
+            PqcHardware.backend = null
+            for (set in all) {
+                assertEquals(listOf(PqcBacking.SOFTWARE), KeyCreationAlgorithms.storageOptions(set, PqcHardware.supported()))
+            }
+        } finally {
+            PqcHardware.backend = saved
+        }
     }
 
     private fun row(keyId: String, algorithm: String, keyType: String = "signing") = KeyEntity(

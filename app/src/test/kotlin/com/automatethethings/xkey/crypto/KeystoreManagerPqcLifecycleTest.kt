@@ -168,6 +168,49 @@ class KeystoreManagerPqcLifecycleTest {
         assertEquals(SET.signatureBytes, store.sign(alias, SET, DATA, userAuthenticatedAt = now).size)
     }
 
+    @Test
+    fun `each set's software signature verifies with Bouncy Castle against the key's public key`() {
+        for (set in MlDsaParameterSet.entries) {
+            val keyId = "bc_${set.name}"
+            val spki = manager.generateMlDsaKey(keyId, set, PqcBacking.SOFTWARE, authDurationSeconds = -1)
+
+            assertArrayEquals(spki, manager.getPublicKeyDER(keyId, UserKeyKind.GENERAL))
+            assertEquals(KeySecurityLevel.SOFTWARE, manager.generalKeySecurityLevel(keyId))
+            val signature = runBlocking {
+                manager.signApprovedMlDsa(KeystoreManager.generalKeyAlias(keyId), spki, DATA, set, null)
+            }
+            assertEquals(set.signatureBytes, signature.size)
+            val verifier = org.bouncycastle.crypto.signers.MLDSASigner()
+            verifier.init(false, org.bouncycastle.crypto.util.PublicKeyFactory.createKey(spki))
+            verifier.update(DATA, 0, DATA.size)
+            assertTrue("${set.wireName} signature must verify", verifier.verifySignature(signature))
+            val other = MlDsaParameterSet.entries.first { it != set }
+            assertThrows("${set.wireName} key never signs as ${other.wireName}", Exception::class.java) {
+                runBlocking { manager.signApprovedMlDsa(KeystoreManager.generalKeyAlias(keyId), spki, DATA, other, null) }
+            }
+        }
+    }
+
+    @Test
+    fun `deleting a software or a hardware ML-DSA key removes it and audits the delete`() {
+        generate("swdel", -1)
+        assertTrue(manager.deleteGeneralKey("swdel"))
+        assertFalse(manager.pqcSoftwareKeyExists("swdel"))
+        assertFalse(store.fileFor(KeystoreManager.generalKeyAlias("swdel")).exists())
+        verify(exactly = 1) { AuditLogger.logKeyDeleted("swdel", any(), any()) }
+
+        val hardwareAlias = KeystoreManager.generalKeyAlias("hwdel")
+        var present = true
+        every { keyStore.containsAlias(hardwareAlias) } answers { present }
+        every { keyStore.deleteEntry(hardwareAlias) } answers { present = false }
+        assertTrue(manager.deleteGeneralKey("hwdel"))
+        verify(exactly = 1) { keyStore.deleteEntry(hardwareAlias) }
+        verify(exactly = 1) { AuditLogger.logKeyDeleted("hwdel", any(), any()) }
+
+        assertFalse("a key that is gone is not deleted or audited again", manager.deleteGeneralKey("hwdel"))
+        verify(exactly = 1) { AuditLogger.logKeyDeleted("hwdel", any(), any()) }
+    }
+
     private fun row(keyId: String) = KeyEntity(
         keyId = keyId, keyType = "signing", algorithm = SET.wireName, label = keyId,
         keySizeBits = SET.publicKeyBytes * 8, source = "local"
