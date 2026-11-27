@@ -937,8 +937,9 @@ class KeystoreManager(
     /**
      * Reads the [KeyInfo] of the Keystore key held at an alias. Replaceable
      * so tests can make the read fail. A Keystore Ed25519 key names its
-     * algorithm "EdDSA", which has no AndroidKeyStore KeyFactory: its KeyInfo
-     * is read through the EC factory, as PivKeyManager reads it.
+     * algorithm "EdDSA", "Ed25519" or, on API 37, its OID 1.3.101.112, none
+     * of which has an AndroidKeyStore KeyFactory: its KeyInfo is read
+     * through the EC factory, as PivKeyManager reads it.
      */
     @VisibleForTesting
     internal var keyInfoReader: (alias: String, key: Key) -> KeyInfo = { _, key ->
@@ -946,7 +947,7 @@ class KeystoreManager(
             is PrivateKey -> runCatching {
                 KeyFactory.getInstance(key.algorithm, KEYSTORE_PROVIDER).getKeySpec(key, KeyInfo::class.java)
             }.recoverCatching { e ->
-                if (key.algorithm == "EdDSA" || key.algorithm == "Ed25519") {
+                if (key.algorithm in KEYSTORE_ED25519_KEY_ALGORITHMS) {
                     KeyFactory.getInstance(KeyProperties.KEY_ALGORITHM_EC, KEYSTORE_PROVIDER)
                         .getKeySpec(key, KeyInfo::class.java)
                 } else {
@@ -3280,6 +3281,12 @@ class KeystoreManager(
 
         /** Android Keystore provider name. */
         private const val KEYSTORE_PROVIDER = "AndroidKeyStore"
+
+        /**
+         * The algorithm names a Keystore Ed25519 private key reports: "EdDSA"
+         * or "Ed25519", or its OID 1.3.101.112 (seen on API 37).
+         */
+        private val KEYSTORE_ED25519_KEY_ALGORITHMS = setOf("EdDSA", "Ed25519", "1.3.101.112")
 
         /**
          * Prefix for all xKey credential key aliases. Code outside this class
