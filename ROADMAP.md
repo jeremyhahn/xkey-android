@@ -67,7 +67,7 @@ Release-readiness checklist for [Dev complete](../../milestone/23), done; none o
 
 - **fido2-phone-backend** — CTAP2 over BLE for `xkey fido2 --backend phone`; `local.listFido2Credentials` and `local.signFido2Assertion` over the paired Noise session ship today — [#281](../../issues/281) — in progress: CTAP2 over BLE built and unit tested, device verification left
 - **maintenance** — standing row for dependency updates and CI configuration; never gates a release (owner decision 1234) — [#317](../../issues/317)
-- **key-algorithm-parity** — PIV RSA 3072/4096, `keySizeBits` on `local.generateKey`, P-521, RSA 3072, AES-192 and HMAC-SHA384 in Key Management, and the matching capabilities list; post-quantum out of scope — [#333](../../issues/333) — in progress: built and unit tested, device verification left
+- **key-algorithm-parity** — PIV RSA 3072/4096, `keySizeBits` on `local.generateKey`, P-521, RSA 3072, AES-192 and HMAC-SHA384 in Key Management, and the matching capabilities list; post-quantum keys are the pqc-keys row — [#333](../../issues/333) — in progress: built and unit tested, device verification left
 - **pqc-keys** — post-quantum ML-DSA-44/65/87 signing keys, software-held (wrapped by a Keystore key) or Android Keystore hardware-backed, over `local.generateKey`, `local.sign`, `local.getPublicKey`, `local.deleteKey`, `local.getCapabilities`, `local.piv*` and the Key Management and PIV dialogs; ML-KEM out of scope — [#338](../../issues/338) — in progress: built and unit tested, device verification left
 
 ## Next
