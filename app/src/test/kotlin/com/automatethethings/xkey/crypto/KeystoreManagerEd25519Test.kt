@@ -262,6 +262,36 @@ class KeystoreManagerEd25519Test {
     }
 
     /**
+     * On an API 37 device a Keystore Ed25519 private key names its algorithm
+     * by its OID, 1.3.101.112, not "EdDSA"; AndroidKeyStore has no KeyFactory
+     * under that name either, so its KeyInfo is read through the EC factory
+     * too. Before this, local.generateKey EdDSA discarded the key it made and
+     * answered INTERNAL_ERROR (RequestHandlerErrorPathTest on the phone).
+     */
+    @Test
+    fun `a Keystore Ed25519 key named by its OID has its KeyInfo read through the EC KeyFactory`() {
+        val alias = "xkey_key_ed-oid"
+        val key = mockk<java.security.PrivateKey>(relaxed = true)
+        every { key.algorithm } returns "1.3.101.112"
+        every { keyStore.containsAlias(alias) } returns true
+        every { keyStore.getKey(alias, null) } returns key
+        val info = mockk<android.security.keystore.KeyInfo>(relaxed = true)
+        every { info.isUserAuthenticationRequired } returns true
+        every { info.userAuthenticationValidityDurationSeconds } returns 0
+        every { info.isInsideSecureHardware } returns true
+        val ecFactory = mockk<KeyFactory>(relaxed = true)
+        every { ecFactory.getKeySpec(key, android.security.keystore.KeyInfo::class.java) } returns info
+        mockkStatic(KeyFactory::class)
+        every { KeyFactory.getInstance("1.3.101.112", "AndroidKeyStore") } throws
+            java.security.NoSuchAlgorithmException("no such algorithm: 1.3.101.112 for provider AndroidKeyStore")
+        every { KeyFactory.getInstance(KeyProperties.KEY_ALGORITHM_EC, "AndroidKeyStore") } returns ecFactory
+        val manager = manager(37)
+
+        assertTrue("an OID-named Ed25519 key's KeyInfo is unread", manager.isPerOperationKey(alias))
+        org.junit.Assert.assertNotNull(manager.generalKeySecurityLevel("ed-oid"))
+    }
+
+    /**
      * A manager whose Keystore holds the per-operation Ed25519 key
      * [approved] under [alias]: its certificate carries the approved public
      * key and its KeyInfo (read through the EC factory) needs the user for
