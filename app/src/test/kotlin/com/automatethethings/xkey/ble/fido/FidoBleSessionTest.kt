@@ -15,15 +15,26 @@
 
 package com.automatethethings.xkey.ble.fido
 
+import com.automatethethings.xkey.testing.ThreadWait
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.util.Collections
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * The FIDO BLE request loop: reassemble the client's control point writes,
@@ -322,16 +333,51 @@ class FidoBleSessionTest {
     }
 
     /**
-     * Sends from real threads: the GATT callback thread for PING and the
-     * dispatcher's for KEEPALIVE and the MSG reply, with a slow [onSend].
+     * The threads a threaded session runs on: a pool the test owns, so a
+     * test can see each thread's state and wait until every coroutine the
+     * session launched has finished.
+     */
+    private class Threaded(size: Int) : AutoCloseable {
+        val threads: MutableList<Thread> = Collections.synchronizedList(mutableListOf())
+        private val executor = Executors.newFixedThreadPool(size) { task ->
+            Thread(task, "fido-session-test").also {
+                it.isDaemon = true
+                threads += it
+            }
+        }
+        private val job = SupervisorJob()
+        val scope = CoroutineScope(job + executor.asCoroutineDispatcher())
+
+        /** Waits until the session's coroutines (requests, keepalive loops) have all ended. */
+        fun awaitIdle() = runBlocking {
+            withTimeout(ThreadWait.HANG_GUARD_MILLIS) {
+                while (true) {
+                    val running = job.children.toList()
+                    if (running.isEmpty()) break
+                    running.forEach { it.join() }
+                }
+            }
+        }
+
+        override fun close() {
+            job.cancel()
+            executor.shutdownNow()
+        }
+    }
+
+    /**
+     * Sends from real threads: the test thread for PING, as the GATT
+     * callback thread does, and [threads] for KEEPALIVE and the MSG reply,
+     * with [onSend] called before each frame is recorded.
      */
     private fun threadedSession(
         handler: FidoMessageHandler,
         frames: MutableList<ByteArray>,
+        threads: Threaded,
         onSend: (ByteArray) -> Unit
     ) = FidoBleSession(
         handler = handler,
-        scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Default),
+        scope = threads.scope,
         send = { onSend(it); synchronized(frames) { frames += it } },
         maxFrameSize = { 20 },
         keepaliveIntervalMillis = 10
@@ -357,22 +403,36 @@ class FidoBleSessionTest {
     @Test
     fun `a KEEPALIVE never lands between the fragments of another reply`() {
         val frames = mutableListOf<ByteArray>()
-        var slowed = false
-        val session = threadedSession(GatedHandler(), frames) { frame ->
-            // Hold the PING reply after its first fragment, long enough for
-            // several keepalive intervals: its first continuation (the only
-            // ones sent while the MSG waits) is held before it is sent.
-            if (frame[0].toInt() and 0x80 == 0 && !slowed) {
-                slowed = true
-                Thread.sleep(150)
+        val firstKeepalive = CountDownLatch(1)
+        val keepaliveAfterHold = CountDownLatch(1)
+        val holding = AtomicBoolean(false)
+        val held = AtomicBoolean(false)
+        val keepaliveDuringHold = AtomicBoolean(false)
+        Threaded(1).use { threads ->
+            val session = threadedSession(GatedHandler(), frames, threads) { frame ->
+                if (frame[0] == FidoBle.CMD_KEEPALIVE) {
+                    if (holding.get()) keepaliveDuringHold.set(true)
+                    if (held.get()) keepaliveAfterHold.countDown()
+                    firstKeepalive.countDown()
+                } else if (frame[0].toInt() and 0x80 == 0 && holding.compareAndSet(false, true)) {
+                    // Hold the PING reply after its first fragment until a
+                    // keepalive contends for the send: its thread waits on
+                    // the send lock, or, were the lock missing, has sent.
+                    ThreadWait.until("a KEEPALIVE contends with the PING reply") {
+                        keepaliveDuringHold.get() || threads.threads.any { it.state == Thread.State.BLOCKED }
+                    }
+                    holding.set(false)
+                    held.set(true)
+                }
             }
-        }
-        FidoBle.fragment(FidoBle.CMD_MSG, byteArrayOf(0x02), 20).forEach { session.onControlPointWrite(it) }
-        Thread.sleep(50)
+            FidoBle.fragment(FidoBle.CMD_MSG, byteArrayOf(0x02), 20).forEach { session.onControlPointWrite(it) }
+            ThreadWait.await(firstKeepalive, "the MSG's keepalive loop sends")
 
-        FidoBle.fragment(FidoBle.CMD_PING, ByteArray(100) { 1 }, 20).forEach { session.onControlPointWrite(it) }
-        Thread.sleep(50)
-        session.close()
+            FidoBle.fragment(FidoBle.CMD_PING, ByteArray(100) { 1 }, 20).forEach { session.onControlPointWrite(it) }
+            ThreadWait.await(keepaliveAfterHold, "a KEEPALIVE goes once the PING reply is let through")
+            session.close()
+            threads.awaitIdle()
+        }
 
         val snapshot = synchronized(frames) { frames.toList() }
         assertTrue("fragments interleaved: ${snapshot.map { it[0] }}", wholeMessages(snapshot))
@@ -381,22 +441,44 @@ class FidoBleSessionTest {
     @Test
     fun `no KEEPALIVE follows the reply it was cancelled for`() {
         val frames = mutableListOf<ByteArray>()
-        val handler = GatedHandler()
-        var released = false
-        val session = threadedSession(handler, frames) { frame ->
-            // The reply becomes ready while a keepalive is being sent.
-            if (frame[0] == FidoBle.CMD_KEEPALIVE && !released) {
-                released = true
-                handler.gate.complete(ByteArray(60) { 0x55 })
-                Thread.sleep(100)
+        val gate = CompletableDeferred<ByteArray>()
+        val handlerThread = AtomicReference<Thread>()
+        val handlerResumed = CountDownLatch(1)
+        val handler = object : FidoMessageHandler {
+            override suspend fun handle(request: ByteArray, onUserActionNeeded: () -> Unit): ByteArray {
+                onUserActionNeeded()
+                val reply = gate.await()
+                handlerThread.set(Thread.currentThread())
+                handlerResumed.countDown()
+                return reply
             }
         }
-        FidoBle.fragment(FidoBle.CMD_MSG, byteArrayOf(0x02), 20).forEach { session.onControlPointWrite(it) }
-        Thread.sleep(400)
+        val replySent = CountDownLatch(1)
+        val released = AtomicBoolean(false)
+        Threaded(2).use { threads ->
+            val session = threadedSession(handler, frames, threads) { frame ->
+                // The reply becomes ready while a keepalive is being sent, and
+                // this send is held until the handler has returned and waits
+                // (for the keepalive loop to end, or for the send lock).
+                if (frame[0] == FidoBle.CMD_KEEPALIVE && released.compareAndSet(false, true)) {
+                    gate.complete(ByteArray(60) { 0x55 })
+                    ThreadWait.await(handlerResumed, "the handler resumes on the other thread")
+                    val waiting = setOf(Thread.State.WAITING, Thread.State.BLOCKED)
+                    ThreadWait.until("the handler's thread waits for the keepalive") {
+                        handlerThread.get().state in waiting
+                    }
+                }
+                if (frame[0] == FidoBle.CMD_MSG) replySent.countDown()
+            }
+            FidoBle.fragment(FidoBle.CMD_MSG, byteArrayOf(0x02), 20).forEach { session.onControlPointWrite(it) }
+            ThreadWait.await(replySent, "the MSG reply is sent")
+            // Every coroutine of the session has ended: nothing can be sent after this.
+            threads.awaitIdle()
+            session.close()
+        }
 
         val snapshot = synchronized(frames) { frames.toList() }
         assertTrue("fragments interleaved: ${snapshot.map { it[0] }}", wholeMessages(snapshot))
         assertEquals("the reply is the last frame sent", FidoBle.CMD_MSG, snapshot.last { it[0].toInt() and 0x80 != 0 }[0])
-        session.close()
     }
 }

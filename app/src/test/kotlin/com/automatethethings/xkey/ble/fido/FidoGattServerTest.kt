@@ -33,6 +33,7 @@ import io.mockk.every
 import io.mockk.mockk
 import io.mockk.slot
 import io.mockk.verify
+import kotlinx.coroutines.test.StandardTestDispatcher
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -76,6 +77,13 @@ class FidoGattServerTest {
 
     private lateinit var server: FidoGattServer
 
+    /**
+     * Every server here runs its retries, failure closes and sessions on
+     * this dispatcher: nothing runs until the test drives [scheduler].
+     */
+    private val dispatcher = StandardTestDispatcher()
+    private val scheduler get() = dispatcher.scheduler
+
     /** getInfo only: the backend is never reached for anything else here. */
     private val backend = object : FidoCredentialBackend {
         override val userVerificationAvailable = true
@@ -108,7 +116,7 @@ class FidoGattServerTest {
             responses += arg<Int>(2) to arg<ByteArray?>(4)
             true
         }
-        server = FidoGattServer(context, Ctap2Authenticator(backend))
+        server = FidoGattServer(context, Ctap2Authenticator(backend), dispatcher = dispatcher)
         assertTrue(server.start())
         callback.captured.onConnectionStateChange(device, BluetoothGatt.GATT_SUCCESS, BluetoothProfile.STATE_CONNECTED)
     }
@@ -140,19 +148,30 @@ class FidoGattServerTest {
         }
     }
 
-    /** Release notifications until a whole non-KEEPALIVE reply has arrived. */
-    private fun awaitReply(timeoutMillis: Long = 5_000): FidoBleReassembler.Result.Complete {
-        val deadline = System.currentTimeMillis() + timeoutMillis
-        while (System.currentTimeMillis() < deadline) {
+    /**
+     * Runs the work the server has scheduled on [dispatcher]: every notify
+     * retry and its last attempt's failure close, then whatever that started.
+     * Short of the session's keepalive interval and reassembly timeout, as
+     * the real-time waits it replaces were.
+     */
+    private fun drain() {
+        scheduler.advanceTimeBy(DRAIN_MILLIS)
+        scheduler.runCurrent()
+    }
+
+    /** Release notifications, running the server's scheduled work, until a whole non-KEEPALIVE reply has arrived. */
+    private fun awaitReply(): FidoBleReassembler.Result.Complete {
+        repeat(MAX_REPLY_STEPS) {
+            scheduler.runCurrent()
             release()
             val r = FidoBleReassembler()
             var result: FidoBleReassembler.Result = FidoBleReassembler.Result.Incomplete
             synchronized(notified) { notified.filter { it[0] != FidoBle.CMD_KEEPALIVE } }
                 .forEach { result = r.accept(it) }
             if (result is FidoBleReassembler.Result.Complete) return result
-            Thread.sleep(10)
+            scheduler.advanceTimeBy(REPLY_STEP_MILLIS)
         }
-        throw AssertionError("no reply within $timeoutMillis ms; frames: ${notified.size}")
+        throw AssertionError("no reply after ${MAX_REPLY_STEPS * REPLY_STEP_MILLIS} ms of scheduler time; frames: ${notified.size}")
     }
 
     @Test
@@ -220,7 +239,7 @@ class FidoGattServerTest {
     fun `a device connected before the server starts is admitted at start`() {
         server.destroy()
         every { manager.getConnectedDevices(BluetoothProfile.GATT_SERVER) } returns listOf(device)
-        server = FidoGattServer(context, Ctap2Authenticator(backend))
+        server = FidoGattServer(context, Ctap2Authenticator(backend), dispatcher = dispatcher)
         assertTrue(server.start())
 
         assertEquals(1, clientCount())
@@ -319,7 +338,8 @@ class FidoGattServerTest {
         // The second frame is refused, so its retry waits.
         callback.captured.onNotificationSent(device, BluetoothGatt.GATT_SUCCESS)
         unsubscribe()
-        Thread.sleep(300)
+        // The retry has run, and found the client unsubscribed.
+        drain()
         release()
 
         assertEquals("nothing after the unsubscribe", 1, notified.size)
@@ -346,6 +366,8 @@ class FidoGattServerTest {
 
         // The stack never reports a notification sent, so every reply queues.
         repeat(5_000) { send(FidoBle.CMD_PING, byteArrayOf(it.toByte())) }
+        // The overflow's session close has run.
+        drain()
         release()
 
         assertTrue("queued ${notified.size} frames", notified.size <= MAX_EXPECTED_FRAMES)
@@ -401,8 +423,11 @@ class FidoGattServerTest {
 
         send(FidoBle.CMD_PING, fiftyBytes)
         callback.captured.onNotificationSent(device, BluetoothGatt.GATT_SUCCESS)
+        // Every retry, then the failure close.
+        drain()
 
-        verify(timeout = 5_000) { stack.cancelConnection(device) }
+        verify(exactly = MAX_NOTIFY_ATTEMPTS + 1) { stack.notifyCharacteristicChanged(any(), any(), any(), any<ByteArray>()) }
+        verify(exactly = 1) { stack.cancelConnection(device) }
         val frames = notified.size
         send(FidoBle.CMD_PING, byteArrayOf(1))
         release()
@@ -417,8 +442,10 @@ class FidoGattServerTest {
         send(FidoBle.CMD_PING, fiftyBytes)
         callback.captured.onNotificationSent(device, BluetoothGatt.GATT_SUCCESS)
         repeat(10) { callback.captured.onNotificationSent(device, BluetoothGatt.GATT_FAILURE) }
+        // The failure close.
+        drain()
 
-        verify(timeout = 5_000) { stack.cancelConnection(device) }
+        verify(exactly = 1) { stack.cancelConnection(device) }
         val frames = notified.size
         send(FidoBle.CMD_PING, byteArrayOf(1))
         release()
@@ -458,9 +485,10 @@ class FidoGattServerTest {
         reconnectDuringFirstNotify { it == 1 }
 
         send(FidoBle.CMD_PING, fiftyBytes)
-        Thread.sleep(300)
+        // The old connection's retry has run, and whatever it sent is reported sent.
+        drain()
         release()
-        Thread.sleep(300)
+        drain()
         release()
 
         assertEquals("the new connection has one client", 1, clientCount())
@@ -475,7 +503,8 @@ class FidoGattServerTest {
         reconnectDuringFirstNotify { true }
 
         send(FidoBle.CMD_PING, fiftyBytes)
-        Thread.sleep(500)
+        // Every retry the old connection scheduled has run, and any failure close after it.
+        drain()
 
         verify(exactly = 0) { stack.cancelConnection(device) }
         assertEquals("the new connection has one client", 1, clientCount())
@@ -488,7 +517,9 @@ class FidoGattServerTest {
         // then notified. Client B's reply is forced in while client A's
         // notification is still in the stack.
         server.destroy()
-        server = FidoGattServer(context, Ctap2Authenticator(backend), sdkInt = Build.VERSION_CODES.S_V2)
+        server = FidoGattServer(
+            context, Ctap2Authenticator(backend), sdkInt = Build.VERSION_CODES.S_V2, dispatcher = dispatcher
+        )
         assertTrue(server.start())
         val other = mockk<BluetoothDevice>(relaxed = true)
         every { other.address } returns "02:00:00:00:00:02"
@@ -537,7 +568,7 @@ class FidoGattServerTest {
     private fun recordingServer(): RecordingHandler {
         server.destroy()
         val handler = RecordingHandler()
-        server = FidoGattServer(context, handler)
+        server = FidoGattServer(context, handler, dispatcher = dispatcher)
         assertTrue(server.start())
         callback.captured.onConnectionStateChange(device, BluetoothGatt.GATT_SUCCESS, BluetoothProfile.STATE_CONNECTED)
         return handler
@@ -561,7 +592,7 @@ class FidoGattServerTest {
         }
 
         send(FidoBle.CMD_MSG, byteArrayOf(Ctap2.CMD_GET_INFO.toByte()))
-        Thread.sleep(300)
+        drain()
 
         assertEquals("no client outlives stop()", 0, clientCount())
         assertTrue("no request reaches the handler after stop()", handler.requests.isEmpty())
@@ -579,7 +610,7 @@ class FidoGattServerTest {
 
         send(FidoBle.CMD_MSG, byteArrayOf(Ctap2.CMD_GET_INFO.toByte()))
         callback.captured.onMtuChanged(device, 185)
-        Thread.sleep(300)
+        drain()
 
         assertEquals("no client outlives its disconnect", 0, clientCount())
         assertTrue("no request reaches the handler after the disconnect", handler.requests.isEmpty())
@@ -611,14 +642,14 @@ class FidoGattServerTest {
         FidoBle.fragment(FidoBle.CMD_MSG, byteArrayOf(Ctap2.CMD_GET_INFO.toByte()), 20).forEach {
             callback.captured.onCharacteristicWriteRequest(other, 2, cp, false, true, 0, it)
         }
-        Thread.sleep(300)
+        drain()
 
         assertEquals("no client outlives its disconnect", 0, clientCount())
         // Whatever the write reached, the disconnect closed it: a later
         // frame on that connection reaches nothing.
         val before = handler.requests.size
         send(FidoBle.CMD_MSG, byteArrayOf(Ctap2.CMD_GET_INFO.toByte()))
-        Thread.sleep(300)
+        drain()
         assertEquals("no request reaches the handler after the disconnect", before, handler.requests.size)
         assertEquals("no client outlives its disconnect", 0, clientCount())
     }
@@ -633,7 +664,7 @@ class FidoGattServerTest {
         gatt.onCharacteristicReadRequest(device, 3, 0, characteristic(FidoBle.CONTROL_POINT_LENGTH_UUID))
         subscribe()
         send(FidoBle.CMD_MSG, byteArrayOf(Ctap2.CMD_GET_INFO.toByte()))
-        Thread.sleep(300)
+        drain()
 
         assertEquals(0, clientCount())
         assertTrue(handler.requests.isEmpty())
@@ -656,5 +687,19 @@ class FidoGattServerTest {
     private companion object {
         /** One largest reply at the smallest frame size, with room to spare. */
         const val MAX_EXPECTED_FRAMES = 2 * (FidoBle.MAX_MESSAGE_SIZE / 17 + 2)
+
+        /** The server's sends of one frame, the first and its retries, before the connection ends. */
+        const val MAX_NOTIFY_ATTEMPTS = 3
+
+        /**
+         * The server's notify retry delay (50 ms) times its attempts per
+         * frame (3), plus one: every retry and the failure after the last
+         * one have run. Below the session's 400 ms keepalive interval.
+         */
+        const val DRAIN_MILLIS = 50L * MAX_NOTIFY_ATTEMPTS + 1
+
+        /** One notify retry delay per step of [awaitReply]. */
+        const val REPLY_STEP_MILLIS = 50L
+        const val MAX_REPLY_STEPS = 100
     }
 }

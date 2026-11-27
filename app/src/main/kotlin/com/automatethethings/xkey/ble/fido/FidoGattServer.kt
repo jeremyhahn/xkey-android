@@ -39,6 +39,7 @@ import com.automatethethings.xkey.crypto.BiometricLockoutException
 import com.automatethethings.xkey.crypto.UserCancelledException
 import com.automatethethings.xkey.crypto.XKeyCryptoException
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -66,9 +67,11 @@ class FidoGattServer(
     private val context: Context,
     private val handler: FidoMessageHandler,
     /** The API level whose notify call is used; tests pick the pre-33 path. */
-    private val sdkInt: Int = Build.VERSION.SDK_INT
+    private val sdkInt: Int = Build.VERSION.SDK_INT,
+    /** Runs the retries, failure closes and sessions; tests pass a dispatcher they drive. */
+    dispatcher: CoroutineDispatcher = Dispatchers.Default
 ) {
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val scope = CoroutineScope(SupervisorJob() + dispatcher)
     private val clients = ConcurrentHashMap<String, Client>()
 
     @Volatile

@@ -36,6 +36,8 @@ import com.automatethethings.xkey.credential.handler.GetCredentialHandler
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.storage.dao.CredentialMetadataDao
 import com.automatethethings.xkey.storage.dao.KeyDao
+import com.automatethethings.xkey.testing.ThreadWait
+import com.automatethethings.xkey.testing.WatchedDispatcher
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
@@ -47,8 +49,8 @@ import io.mockk.unmockkAll
 import io.mockk.verify
 import java.security.KeyStore
 import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -56,8 +58,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
-import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.android.controller.ServiceController
 import org.robolectric.annotation.Config
 
 /**
@@ -81,6 +83,9 @@ class XKeyCredentialServiceTest {
     private val createEntry = mockk<CreateEntry>()
     private val passkeyEntry = mockk<PublicKeyCredentialEntry>()
 
+    /** The service's request work runs here, so a test can wait for it to end. */
+    private val serviceWork = WatchedDispatcher(Dispatchers.IO)
+
     private lateinit var service: XKeyCredentialService
 
     @Before
@@ -101,7 +106,7 @@ class XKeyCredentialServiceTest {
         coEvery { anyConstructed<GetCredentialHandler>().handleBeginGetCredential(any()) } returns
             BeginGetCredentialResponse(credentialEntries = listOf(passkeyEntry))
 
-        service = Robolectric.buildService(XKeyCredentialService::class.java).create().get()
+        service = ServiceController.of(XKeyCredentialService(serviceWork), null).create().get()
     }
 
     @After
@@ -340,11 +345,11 @@ class XKeyCredentialServiceTest {
     }
 
     /**
-     * Records every callback. [await] waits for the first, then a moment
-     * longer, so a second callback (which would break the receiver's
-     * contract) is counted too.
+     * Records every callback. [await] waits for the first, then for the
+     * service's work to end, so a second callback (which would break the
+     * receiver's contract) is counted too.
      */
-    private class Recorder<R, E : Throwable>(
+    private inner class Recorder<R, E : Throwable>(
         /** Throw from [onResult] after recording it, as a receiver whose caller has gone may. */
         private val throwOnResult: Boolean = false,
     ) : OutcomeReceiver<R, E> {
@@ -366,12 +371,8 @@ class XKeyCredentialServiceTest {
         }
 
         fun await() {
-            assertTrue("the callback never fired", first.await(5, TimeUnit.SECONDS))
-            Thread.sleep(SETTLE_MILLIS)
+            ThreadWait.await(first, "the callback never fired")
+            serviceWork.awaitIdle("the service's work for the request never ended")
         }
-    }
-
-    private companion object {
-        const val SETTLE_MILLIS = 200L
     }
 }
