@@ -22,6 +22,7 @@ import android.util.Log
 import com.automatethethings.xkey.ble.NoiseSession
 import com.automatethethings.xkey.protocol.RequestHandler
 import com.automatethethings.xkey.remote.sendOnBoundSession
+import com.automatethethings.xkey.testing.ThreadWait
 import io.mockk.coEvery
 import io.mockk.every
 import io.mockk.mockk
@@ -44,6 +45,7 @@ import org.junit.Test
 import java.io.File
 import java.io.IOException
 import java.io.RandomAccessFile
+import java.util.concurrent.CountDownLatch
 
 /**
  * Unit tests for [UsbAccessoryServer]'s lifecycle and failure handling.
@@ -157,8 +159,14 @@ class UsbAccessoryServerTest {
      */
     private fun holdSessionsOpen() {
         mockkConstructor(NoiseSession::class)
-        coEvery { anyConstructed<NoiseSession>().loadStaticKey(any()) } coAnswers { awaitCancellation() }
+        coEvery { anyConstructed<NoiseSession>().loadStaticKey(any()) } coAnswers {
+            sessionHeld.countDown()
+            awaitCancellation()
+        }
     }
+
+    /** Counted down when a session held open by [holdSessionsOpen] reaches its key load. */
+    private val sessionHeld = CountDownLatch(1)
 
     /** Waits up to [timeoutMs] for [condition], polling. */
     private fun awaitTrue(timeoutMs: Long = 5_000, condition: () -> Boolean): Boolean {
@@ -298,7 +306,7 @@ class UsbAccessoryServerTest {
         attach()
         val job = server.sessionJob
         assertNotNull(job)
-        Thread.sleep(100)
+        ThreadWait.await(sessionHeld, "the session never reached its key load")
         assertTrue("the session ended before the detach", job!!.isActive && server.isOpen)
 
         watcher.detach(accessory)
@@ -335,8 +343,10 @@ class UsbAccessoryServerTest {
         every { usbManager.openAccessory(accessory) } answers {
             val callback = watcher.onDetach
             assertNotNull("the open ran with no detach receiver", callback)
-            detacher = Thread { callback!!(accessory) }.also { it.start() }
-            Thread.sleep(50)
+            val thread = Thread { callback!!(accessory) }.also { it.start() }
+            detacher = thread
+            // The open holds the server's lock, so the detach lands while it runs.
+            ThreadWait.untilBlocked(thread, "the detach waits on the open's lock")
             pfd
         }
 
