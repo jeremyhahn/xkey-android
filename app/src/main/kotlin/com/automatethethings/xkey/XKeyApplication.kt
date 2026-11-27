@@ -13,12 +13,14 @@ import com.automatethethings.xkey.crypto.PqcHardware
 import com.automatethethings.xkey.crypto.PqcSoftwareKeyStore
 import com.automatethethings.xkey.settings.PairedDeviceGrantCleanup
 import com.automatethethings.xkey.settings.PairedDeviceRepository
+import com.automatethethings.xkey.storage.KeyPolicyStore
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.ui.ClipboardFocusRetry
 import com.automatethethings.xkey.ui.PromptActivityTracker
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 /**
  * xKey Application class.
@@ -41,6 +43,22 @@ class XKeyApplication : Application() {
         registerActivityLifecycleCallbacks(ClipboardFocusRetry)
         // Media signatures the app may not write into the file (API 30+).
         com.automatethethings.xkey.media.XmpMetadataHelper.usePrivateStore(this)
+        replayOwedKeyDeletions()
+    }
+
+    /**
+     * Key material whose delete failed, or whose process died after its key
+     * row was deleted, keeps a tombstone; it is deleted here, at start-up
+     * (#193 r9).
+     */
+    private fun replayOwedKeyDeletions() {
+        val app = this
+        CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
+            replayOwedKeyDeletionsAtStartup(
+                openStore = { KeyPolicyStore.of(XKeyDatabase.getInstance(app), com.automatethethings.xkey.crypto.KeystoreManager(app)) },
+                replay = { store -> com.automatethethings.xkey.storage.replayKeyDeletions(app, store) }
+            )
+        }
     }
 
     /**
@@ -142,4 +160,29 @@ class XKeyApplication : Application() {
             PqcSoftwareKeyStore.registerShared(context)
         }
     }
+}
+
+/**
+ * The start-up replay of owed key deletes (#193 r9), safe to run on a bare
+ * coroutine: opening the store ([openStore]: the database and the Keystore)
+ * may throw, and such a failure is logged, never thrown, so it cannot crash
+ * the process. Nothing is replayed then, and the owed deletes stay recorded
+ * for the next start (Codex round 3 on #270).
+ *
+ * @return Whether the store opened and [replay] ran.
+ */
+internal suspend fun replayOwedKeyDeletionsAtStartup(
+    openStore: () -> KeyPolicyStore,
+    replay: suspend (KeyPolicyStore) -> Unit
+): Boolean {
+    val store = try {
+        openStore()
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        android.util.Log.e("XKeyApplication", "Opening the key store for the delete replay failed; replayed next start", e)
+        return false
+    }
+    replay(store)
+    return true
 }

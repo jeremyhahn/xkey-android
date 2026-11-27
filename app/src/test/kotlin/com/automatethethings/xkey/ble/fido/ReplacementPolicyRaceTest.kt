@@ -120,7 +120,11 @@ class ReplacementPolicyRaceTest {
         val backend = AndroidFidoCredentialBackend(
             keyDao = changingAfterEachRead(policy),
             credentialDao = database.credentialMetadataDao(),
-            sharePermission = SharePermission(database.keySharingPolicyDao(), null),
+            sharePermission = SharePermission(
+                database.keySharingPolicyDao(),
+                null,
+                com.automatethethings.xkey.storage.KeyPolicyStore.of(database, keystore)
+            ),
             signCounter = mockk<PasskeySignCounter>(relaxed = true),
             keystoreManager = keystore,
             userPrompt = null,
@@ -139,7 +143,7 @@ class ReplacementPolicyRaceTest {
             "the old passkey's metadata row must stay",
             database.credentialMetadataDao().getByCredentialId(oldKeyId)
         )
-        verify(exactly = 0) { keystore.deleteKey(oldKeyId) }
+        verify(exactly = 0) { keystore.deleteKey(oldKeyId, any()) }
     }
 
     @Test

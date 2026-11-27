@@ -17,7 +17,11 @@ package com.automatethethings.xkey.ble
 
 import android.Manifest
 import android.bluetooth.BluetoothDevice
+import android.bluetooth.BluetoothGatt
+import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothManager
+import android.bluetooth.BluetoothProfile
+import android.os.Build
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -94,8 +98,9 @@ import org.junit.runner.RunWith
  * holding an IDevID certificate this phone issued, recorded against the key the
  * Noise transcript authenticated.
  *
- * The outbound half is a sink: `sendResponse` returns early without an open
- * GATT server, so each request is registered with the router and then dropped.
+ * The outbound half is refused without a subscribed peer, so a case that
+ * needs a request to go out first connects and subscribes its peer through
+ * [connectAndSubscribe], and the frame is taken by a stand-in server handle.
  * Replies are therefore injected through the router the same way the message
  * loop would deliver them — see [answer]. Request ids are deterministic
  * (3_000_000 upwards, in their own range so they cannot collide with the
@@ -225,6 +230,7 @@ class GattServerEnrollmentTest {
      */
     @Test
     fun aRemoteErrorAbortsEnrollmentWithoutIssuingAnything(): Unit = runBlocking {
+        connectAndSubscribe("Broken Laptop")
         val enrollment = peerScope.async {
             probe.performPostPairingEnrollment(peerKeyHex, "Broken Laptop")
         }
@@ -385,6 +391,7 @@ class GattServerEnrollmentTest {
     /** A reply the peer answers is handed back as its result object. */
     @Test
     fun anAnsweredRequestReturnsItsResult(): Unit = runBlocking {
+        connectAndSubscribe("Answering Laptop")
         val call = peerScope.async {
             probe.sendRequestAndWaitForResponse("local.getIAKPublicKey", JSONObject())
         }
@@ -458,6 +465,68 @@ class GattServerEnrollmentTest {
         val authenticated = responder.getRemoteStaticKey()!!.toHex()
         target.authenticatedPeerKeyHex = authenticated
         if (!::peerKeyHex.isInitialized) peerKeyHex = authenticated
+    }
+
+    /**
+     * Opens the way out for a request the phone sends to [device], as a
+     * desktop does before it expects any reply, and pairs its key as
+     * [deviceName].
+     *
+     * The server refuses a send that no subscribed peer receives, so the
+     * server is started, [device] is connected through the callback,
+     * negotiates [PEER_MTU] and writes the CCCD enable, and the open handle is replaced by an
+     * [AcceptingServerHandle]: [device] never really connected, so the stack
+     * would refuse its notifications, and a refused frame abandons the
+     * session. The connect adopts [device] on a fresh link and ends the
+     * session [setUp] installed, so a new one is established on it and its
+     * key becomes [peerKeyHex]. Replies still come in through [router].
+     */
+    private suspend fun connectAndSubscribe(deviceName: String) {
+        assumeTrue(
+            "mocking the final server handle needs API 28",
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.P
+        )
+        assumeTrue("the local stack would not open a GATT server", server.start())
+        probe.gattCallback.onConnectionStateChange(
+            device, BluetoothGatt.GATT_SUCCESS, BluetoothProfile.STATE_CONNECTED
+        )
+        val deadline = System.currentTimeMillis() + REPLY_TIMEOUT_MS
+        while (!(probe.connectedDevice?.address == device.address &&
+                server.connectionState.value == ConnectionState.Connecting)
+        ) {
+            if (System.currentTimeMillis() > deadline) {
+                throw AssertionError("the device was never adopted")
+            }
+            delay(POLL_MS)
+        }
+        // The default MTU leaves no room for a fragment, so negotiate one the
+        // way a desktop does; the change is queued behind the connect.
+        probe.gattCallback.onMtuChanged(device, PEER_MTU)
+        while (probe.deviceMtu[device.address] != PEER_MTU) {
+            if (System.currentTimeMillis() > deadline) {
+                throw AssertionError("the MTU never became $PEER_MTU")
+            }
+            delay(POLL_MS)
+        }
+        probe.gattCallback.onDescriptorWriteRequest(
+            device, 1,
+            BluetoothGattDescriptor(
+                GattServer.CCCD_UUID,
+                BluetoothGattDescriptor.PERMISSION_READ or BluetoothGattDescriptor.PERMISSION_WRITE
+            ),
+            false, false, 0,
+            BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+        )
+        assertEquals(true, probe.notificationEnabled[device.address])
+
+        val handle = AcceptingServerHandle(
+            probe.bluetoothGattServer!!, probe.responseCharacteristic!!, holdFirstFragment = false
+        )
+        probe.bluetoothGattServer = handle.server
+
+        establishSession(probe)
+        peerKeyHex = probe.authenticatedPeerKeyHex!!
+        pairedDevices.addDevice(peerKeyHex, deviceName, device.address)
     }
 
     private fun iakResult(): JSONObject = LocalGetIAKPublicKeyResult(
@@ -552,6 +621,9 @@ class GattServerEnrollmentTest {
 
         private const val REPLY_TIMEOUT_MS = 20_000L
         private const val POLL_MS = 20L
+
+        /** The MTU the subscribed peer negotiates, as a desktop does. */
+        private const val PEER_MTU = 517
 
         private val ROOT_SUBJECT = CASubject(
             cn = "xKey Enrollment Test Root CA",

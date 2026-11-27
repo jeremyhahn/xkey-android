@@ -1,0 +1,227 @@
+/*
+ * Copyright (c) 2025 Jeremy Hahn
+ * Copyright (c) 2025 Automate The Things, LLC
+ *
+ * This file is part of xKey.
+ *
+ * xKey is dual-licensed:
+ *
+ * 1. GNU Affero General Public License v3.0 (AGPL-3.0)
+ *    See LICENSE file or visit https://www.gnu.org/licenses/agpl-3.0.html
+ *
+ * 2. Commercial License
+ *    Contact licensing@automatethethings.com for commercial licensing options.
+ */
+
+package com.automatethethings.xkey.ui
+
+import com.automatethethings.xkey.storage.InternalKeyException
+import com.automatethethings.xkey.storage.KeyMaterial
+import com.automatethethings.xkey.storage.KeyPolicyStore
+import com.automatethethings.xkey.storage.KeyStoreSyncManager
+import com.automatethethings.xkey.storage.dao.KeyPolicyDao
+import com.automatethethings.xkey.storage.entity.KeyDeletionEntity
+import com.automatethethings.xkey.storage.entity.KeyEntity
+import io.mockk.coEvery
+import io.mockk.coVerify
+import io.mockk.every
+import io.mockk.mockk
+import kotlinx.coroutines.test.runTest
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertTrue
+import org.junit.Test
+import java.io.File
+
+/**
+ * The app's own Keystore keys are never offered as deletable user keys, and
+ * a delete of one is refused without a crash (#255 review): the sync lists
+ * every alias outside a user key's namespace as a system key, and every
+ * delete screen deletes through [deleteUserKey], which turns the store's
+ * [InternalKeyException] refusal into [UserKeyDelete.PROTECTED].
+ */
+class UserKeyDeleteTest {
+
+    private val dao = mockk<KeyPolicyDao>(relaxed = true) {
+        // No earlier delete of any id is owed.
+        coEvery { deletion(any()) } returns null
+    }
+    private val store = KeyPolicyStore(dao, object : KeyPolicyStore.Transactor {
+        override suspend fun <T> run(block: suspend () -> T): T = block()
+    })
+
+    private fun key(keyId: String, system: Boolean = false) = mockk<KeyEntity> {
+        every { this@mockk.keyId } returns keyId
+        every { id } returns 1L
+        every { isSystemKey } returns system
+    }
+
+    /** Refuses as the app's deleter does for a key whose material is internal. */
+    private val internal = mockk<KeyMaterial>(relaxed = true) {
+        coEvery { generation(any(), any()) } answers { throw InternalKeyException(firstArg<KeyPolicyStore.KeyMaterialHeld>().keyId) }
+        coEvery { generation(any(), any(), any()) } answers { throw InternalKeyException(firstArg<KeyPolicyStore.KeyMaterialHeld>().keyId) }
+    }
+
+    @Test
+    fun anInternalKeyDeleteIsRefusedWithNothingDeleted() = runTest {
+        coEvery { dao.keyInstance(any()) } returns 1L
+
+        assertEquals(UserKeyDelete.PROTECTED, deleteUserKey(key("xkey_seal_store_key"), store, internal))
+        coVerify(exactly = 0) { dao.putDeletion(any<KeyDeletionEntity>()) }
+        coVerify(exactly = 0) { dao.deleteKey(any()) }
+    }
+
+    /**
+     * #255 verify r3: a key store that cannot be read, or fails, refuses the
+     * delete with the screen's message, nothing deleted, never an exception
+     * out of the screen's coroutine.
+     */
+    @Test
+    fun aDeleteThatCannotReadTheKeyStoreIsRefused() = runTest {
+        coEvery { dao.keyInstance(any()) } returns 1L
+        for ((failure, message) in listOf(
+            com.automatethethings.xkey.crypto.KeyPresenceUnreadableException("k", null) to com.automatethethings.xkey.R.string.key_store_unreadable,
+            java.security.KeyStoreException("keystore") to com.automatethethings.xkey.R.string.key_delete_failed
+        )) {
+            val failing = mockk<KeyMaterial>(relaxed = true) {
+                coEvery { generation(any(), any()) } throws failure
+                coEvery { generation(any(), any(), any()) } throws failure
+            }
+            val outcome = deleteUserKey(key("k"), store, failing)
+            assertTrue("$failure: $outcome", outcome is UserKeyDelete.Refused && outcome.message == message)
+            assertEquals(message, outcome.refusal)
+        }
+        coVerify(exactly = 0) { dao.putDeletion(any<KeyDeletionEntity>()) }
+        coVerify(exactly = 0) { dao.deleteKey(any()) }
+    }
+
+    /**
+     * #270 review: a general key whose same-id credential's material delete
+     * is still owed is not deleted (the owed delete is settled first), and
+     * the screens are told so: a refusal they show, never the "already
+     * gone" outcome that reads as a delete and closes the key's screen.
+     */
+    @Test
+    fun aDeleteBlockedByAnUnsettledEarlierDeleteIsRefusedNotGone() = runTest {
+        val tables = com.automatethethings.xkey.storage.FakeKeyPolicyTables()
+        val store = tables.store()
+        val instance = tables.addKey("k", com.automatethethings.xkey.storage.entity.SharingPolicyType.SELECTED_PEERS)
+        assertEquals(
+            KeyPolicyStore.MaterialDelete.DELETED,
+            store.deleteMaterial("k", owing("credential"), besideRow = instance)
+        )
+
+        val outcome = deleteUserKey(tables.key("k")!!, store, owing("general"))
+
+        assertTrue("a blocked delete was reported as a gone key", outcome != UserKeyDelete.GONE && outcome != UserKeyDelete.DELETED)
+        assertNotNull("a blocked delete shows no refusal", outcome.refusal)
+        assertEquals(UserKeyDelete.PENDING, outcome)
+        assertEquals(com.automatethethings.xkey.R.string.key_delete_pending, outcome.refusal)
+        assertEquals("the general key's row was deleted", instance, store.instance("k"))
+        val owed = mutableListOf<String?>()
+        store.replayDeletions(com.automatethethings.xkey.storage.tombstoneDelete { _, tombstone -> owed += tombstone.generation; false })
+        assertEquals("the owed material was dropped", listOf<String?>("credential"), owed)
+    }
+
+    /** A [KeyMaterial] of generation [generation] whose every delete fails, so its tombstone stays owed. */
+    private fun owing(generation: String): KeyMaterial = object : KeyMaterial {
+        override suspend fun generation(held: KeyPolicyStore.KeyMaterialHeld, source: String?): String = generation
+
+        override suspend fun delete(held: KeyPolicyStore.KeyMaterialHeld, tombstone: KeyDeletionEntity): Boolean = false
+    }
+
+    /**
+     * Bypass guard (#270 review): no caller reads a key delete's result as a
+     * Boolean, which cannot tell a blocked delete from a gone key. The
+     * result's type makes such a read a compile error too.
+     */
+    @Test
+    fun noKeyDeleteResultIsReadAsABoolean() {
+        val root = listOf(File("src"), File("app/src")).first { it.isDirectory }
+        val boolean = Regex("""(!\s*(KeySharingPeers\.)?forgetKey\(|!\s*\w+\.deleteKey\(\w+, \w+(\.id)?, |(forgetKey|store\(?\)?\.deleteKey)\([^)]*\)\)?\s*(==|!=)\s*(true|false)|assert(True|False)\(("[^"]*",\s*)?((KeySharingPeers\.)?forgetKey|store\(?\)?\.deleteKey)\()""")
+        val hits = root.walkTopDown()
+            .filter { it.isFile && it.extension == "kt" && "/androidTest/" !in it.path }
+            .flatMap { file ->
+                file.readLines().mapIndexedNotNull { i, line ->
+                    if (boolean.containsMatchIn(line.substringBefore("//"))) "${file.name}:${i + 1}" else null
+                }
+            }
+            .toList()
+        assertEquals("a key delete's result read as a Boolean", emptyList<String>(), hits)
+    }
+
+    @Test
+    fun aSystemKeyIsRefusedBeforeTheStore() = runTest {
+        assertEquals(UserKeyDelete.PROTECTED, deleteUserKey(key("xkey_password_encryption_key", system = true), store, internal))
+        coVerify(exactly = 0) { internal.generation(any(), any()) }
+        coVerify(exactly = 0) { internal.generation(any(), any(), any()) }
+        coVerify(exactly = 0) { dao.keyInstance(any()) }
+    }
+
+    @Test
+    fun theAppsOwnAliasesAreProtectedAndUserKeysAreNot() {
+        for (alias in listOf("xkey_seal_store_key", "xkey_password_encryption_key", "xkey_root_ca", "_androidx_security_master_key_", "other")) {
+            assertTrue("$alias listed as a deletable user key", KeyStoreSyncManager.isProtectedAlias(alias))
+        }
+        for (alias in listOf("xkey_key_k", "xkey_credential_c")) {
+            assertFalse("$alias listed as a system key", KeyStoreSyncManager.isProtectedAlias(alias))
+        }
+    }
+
+    /** Bypass guard: no screen deletes a key around [deleteUserKey]. */
+    @Test
+    fun everyUiKeyDeleteGoesThroughDeleteUserKey() {
+        val root = listOf(File("src/main/kotlin"), File("app/src/main/kotlin")).first { it.isDirectory }
+        val calls = File(root, "com/automatethethings/xkey/ui").walkTopDown()
+            .filter { it.isFile && it.extension == "kt" && it.name != "KeySharingPeers.kt" }
+            .flatMap { file ->
+                file.readLines().mapIndexedNotNull { i, line ->
+                    if ("forgetKey(" in line.substringBefore("//")) "${file.name}:${i + 1}" else null
+                }
+            }
+            .toList()
+        assertEquals("a UI key delete outside deleteUserKey", 1, calls.size)
+        val helper = File(root, "com/automatethethings/xkey/ui/KeyManagementActivity.kt").readText()
+            .substringAfter("internal suspend fun deleteUserKey(")
+        assertTrue("forgetKey(" in helper.substringBefore("\n}"))
+        // Both delete screens show the helper's refusal (#255 verify r3).
+        for (screen in listOf("KeyManagementActivity.kt", "KeyDetailActivity.kt")) {
+            val body = File(root, "com/automatethethings/xkey/ui/$screen").readText()
+                .substringAfter("private fun deleteKey(key: KeyEntity)").substringBefore("\n    }\n")
+            assertTrue("$screen shows a refused delete", "outcome.refusal" in body)
+        }
+    }
+
+    /**
+     * Bypass guard (#255 review): every user key delete names which key of
+     * its id it deletes, so a credential and a general key sharing an id
+     * never lose each other's material. A deleter built for a delete with
+     * no kind would delete both. A screen's deleter names the key row it
+     * deletes, and resolves the row's kind from it (#270 review).
+     */
+    @Test
+    fun everyUserKeyDeleteNamesTheKeyItDeletes() {
+        val root = listOf(File("src/main/kotlin"), File("app/src/main/kotlin")).first { it.isDirectory }
+        val missing = root.walkTopDown()
+            .filter { it.isFile && it.extension == "kt" }
+            .flatMap { file ->
+                val lines = file.readLines()
+                lines.mapIndexedNotNull { i, line ->
+                    val code = line.substringBefore("//")
+                    // A delete's deleter: on a deleteUserKey( line or the next.
+                    val deleting = "deleteUserKey(" in code || i > 0 && "deleteUserKey(" in lines[i - 1] ||
+                        i > 0 && "deleteMaterial(" in lines[i - 1]
+                    // A screen names its key row (row = ...): the deleter resolves its kind (#270 review).
+                    val named = code + lines.getOrElse(i + 1) { "" }
+                    if (deleting && "keyMaterialDeleter(" in code && "kind" !in named && "row = " !in named) "${file.name}:${i + 1}" else null
+                }
+            }
+            .toList()
+        assertEquals("a user key delete that does not name its key", emptyList<String>(), missing)
+        val handler = File(root, "com/automatethethings/xkey/protocol/Handler.kt").readText()
+            .substringAfter("private suspend fun deleteUserKey(").substringBefore("\n    }\n")
+        assertTrue("the RPC delete builds its deleter without a kind", "keyMaterialDeleter(context, keystoreManager, kind = kind)" in handler)
+        assertTrue("deleteMaterial(keyId, material, besideRow = entity?.id.takeIf { besideRow })" in handler)
+    }
+}

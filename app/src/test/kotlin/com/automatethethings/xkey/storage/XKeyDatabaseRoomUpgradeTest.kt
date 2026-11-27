@@ -27,19 +27,18 @@ import org.junit.Test
  * On open, Room compares the identity hash stored in the device's
  * `room_master_table` with the one compiled into `XKeyDatabase_Impl`, and
  * throws "Room cannot verify the data integrity" when they differ
- * (room-runtime 2.8.5, RoomConnectionManager.kt:287). Since #42 the database
- * is version 12: a v12 database written by a 2.7.0 build (main after #42)
- * holds [V12_IDENTITY_HASH], the hash in the committed `app/schemas/.../12.json`
- * that build exported. If the 2.8.5 processor computed a different hash from
- * the same entities (its identityHash inputs: room-compiler vo/Database.kt,
- * Entity, Property, Index, PrimaryKey), every v12 device would fail to open
- * its database. Below v12, the app has no `fallbackToDestructiveMigration*`
- * (XKeyDatabase.buildDatabase), so a device on an older version needs a
- * migration path to 12, or the open throws "A migration from x to 12 was
- * required but not found". Both are checked here against the jars CI builds
- * with, at the current version: v13 (#178) adds the keys table's policy
- * revision and v14 the password and OATH delete records, so the compiled hash is now the
- * committed 14.json's, and every stored version from 1 to 13 needs a path to 14. The type converter is covered by [AuditOperationTypeConverterTest];
+ * (room-runtime 2.8.5, RoomConnectionManager.kt:287). The database is
+ * version 16: v13 (#178) adds the keys table's policy revision, v14 the
+ * password and OATH delete records, v15 `key_policies` and v16
+ * `key_deletions` (#193). Its identity hash is [CURRENT_IDENTITY_HASH], the
+ * hash in the committed `app/schemas/.../16.json` this build exports; if the
+ * processor computed another from the same entities (its identityHash
+ * inputs: room-compiler vo/Database.kt, Entity, Property, Index,
+ * PrimaryKey), a v16 device would fail to open its database. The app has no
+ * `fallbackToDestructiveMigration*` (XKeyDatabase.buildDatabase), so every
+ * stored version from 1 to 15 needs a migration path to 16, or the open
+ * throws "A migration from x to 16 was required but not found". Both are
+ * checked here against the jars CI builds with. The type converter is covered by [AuditOperationTypeConverterTest];
  * the migrations' SQL is covered on a device by the instrumented
  * `XKeyDatabaseMigrationTest`.
  */
@@ -47,7 +46,7 @@ class XKeyDatabaseRoomUpgradeTest {
 
     /**
      * Turns red if room-compiler 2.8.5 computes a different identity hash or
-     * version for `@Database(version = 12)` than 2.7.0 did: the generated
+     * version for `@Database(version = 16)` than the committed 16.json: the generated
      * `createOpenDelegate()` (room-compiler DatabaseWriter.kt:448-470,
      * OpenDelegateWriter.kt:52-58) passes both to the `RoomOpenDelegate`
      * the runtime checks at open. Read by reflection because
@@ -76,7 +75,7 @@ class XKeyDatabaseRoomUpgradeTest {
     /**
      * Turns red if Room 2.8.5's migration path search
      * (`RoomDatabase.MigrationContainer.findMigrationPath`) no longer finds
-     * the app's step-by-step chain from a stored version to 12. With no
+     * the app's step-by-step chain from a stored version to 16. With no
      * destructive fallback, a device on that version would then fail to open
      * its database instead of migrating.
      */
@@ -99,16 +98,17 @@ class XKeyDatabaseRoomUpgradeTest {
 
     private companion object {
         /** The version `@Database` declares. */
-        const val CURRENT_VERSION = 14
+        const val CURRENT_VERSION = 16
 
         /**
-         * `identityHash` of the committed 14.json (v14 adds `password_deletions`
-         * and `oath_deletions`;
-         * 13.json holds e02480570d8c7a895d2410493d8e9e08). (12.json, written by Room
+         * `identityHash` of the committed 16.json (#193: `key_policies` at 15,
+         * `key_deletions` at 16, on main's 14, which adds `password_deletions`
+         * and `oath_deletions`; 14.json holds 3b471be17fd6159b87f6cac1077041a7,
+         * 13.json e02480570d8c7a895d2410493d8e9e08). (12.json, written by Room
          * 2.7.0 in #42, holds 346118e31d0992f85496533bbc1b5d5b, which 2.8.5
          * reproduced for the v12 entities.)
          */
-        const val CURRENT_IDENTITY_HASH = "3b471be17fd6159b87f6cac1077041a7"
+        const val CURRENT_IDENTITY_HASH = "db510d02efb77c153a089a78d67cf232"
 
         /** The migrations `XKeyDatabase.buildDatabase` registers, in its order. */
         val APP_MIGRATIONS = listOf(
@@ -124,7 +124,9 @@ class XKeyDatabaseRoomUpgradeTest {
             XKeyDatabase.MIGRATION_10_11,
             XKeyDatabase.MIGRATION_11_12,
             XKeyDatabase.MIGRATION_12_13,
-            XKeyDatabase.MIGRATION_13_14
+            XKeyDatabase.MIGRATION_13_14,
+            XKeyDatabase.MIGRATION_14_15,
+            XKeyDatabase.MIGRATION_15_16
         )
     }
 }

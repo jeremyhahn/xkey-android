@@ -304,7 +304,12 @@ class CreateCredentialHandler(
             credentialDao.insert(credentialMetadata)
         } catch (e: Exception) {
             // Clean up the key if metadata storage fails
-            keystoreManager.deleteKey(credentialIdBase64)
+            val discarded = keystoreManager.deleteKey(credentialIdBase64, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL)
+            if (discarded == com.automatethethings.xkey.crypto.GeneratedKeyDiscard.FAILED) {
+                // No row points at it, so no reader offers it; it is left
+                // under its alias, never reported as cleaned up.
+                Log.w(TAG, "The new credential's Keystore key could not be deleted after its metadata failed")
+            }
             throw CredentialCreationException("Failed to store credential metadata", e)
         }
 
@@ -350,7 +355,7 @@ class CreateCredentialHandler(
         )
 
         // Get DER-encoded (SPKI) public key for WebAuthn Level 3 response
-        val publicKeyDer = keystoreManager.getPublicKey(credentialIdBase64)?.encoded
+        val publicKeyDer = keystoreManager.getPublicKey(credentialIdBase64, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL)?.encoded
             ?: throw CredentialCreationException("Failed to retrieve public key after generation")
         Log.i(TAG, "DER publicKey size=${publicKeyDer.size} (COSE=${publicKeyCose.size})")
 

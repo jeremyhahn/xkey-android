@@ -364,7 +364,11 @@ class MediaSigningService : Service() {
         // on every later MediaStore event would fail the same way, and a
         // log line alone leaves the user believing the capture is signed.
         val where = try {
-            val data = signContentHash(keyId, keyEntity, contentHash)
+            // Under the material-use lock and its deleted-key recheck (#255 review).
+            val data = com.automatethethings.xkey.storage.KeyPolicyStore.of(db, keystoreManager)
+                .withUsableKey(keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL) {
+                    signContentHash(keyId, keyEntity, contentHash)
+                }
             XmpMetadataHelper.persistSignature(data) { writeIntoMedia(uri, filePath, hashType, data) }
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e

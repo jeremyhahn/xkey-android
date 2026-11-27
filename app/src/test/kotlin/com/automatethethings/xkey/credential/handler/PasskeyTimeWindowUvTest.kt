@@ -70,8 +70,8 @@ class PasskeyTimeWindowUvTest {
         every { KeyStore.getInstance("AndroidKeyStore") } returns mockk(relaxed = true)
         keystoreManager = mockk(relaxed = true)
         // The key is inside its auth window: Keystore signs with no prompt.
-        coEvery { keystoreManager.sign(any(), any(), any(), any(), any(), any()) } answers {
-            signedFlags = secondArg<ByteArray>()[32].toInt() and 0xFF
+        coEvery { keystoreManager.sign(any(), any(), any(), any(), any(), any(), any()) } answers {
+            signedFlags = thirdArg<ByteArray>()[32].toInt() and 0xFF
             ByteArray(8)
         }
         helper = mockk(relaxed = true)
@@ -91,6 +91,12 @@ class PasskeyTimeWindowUvTest {
         val database = mockk<XKeyDatabase>(relaxed = true)
         every { database.credentialMetadataDao() } returns credentialDao
         every { database.keyDao() } returns keyDao
+        // No key has a pending deletion or a policy row.
+        every { database.keyPolicyDao() } returns mockk<com.automatethethings.xkey.storage.dao.KeyPolicyDao>(relaxed = true) {
+            coEvery { deletion(any()) } returns null
+            coEvery { policyRow(any()) } returns null
+        }
+        every { keystoreManager.soleKind(CREDENTIAL_ID) } returns com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL
         mockkObject(XKeyDatabase.Companion)
         every { XKeyDatabase.getInstance(any()) } returns database
         mockkObject(AuditLogger)
@@ -117,7 +123,7 @@ class PasskeyTimeWindowUvTest {
         assertion("preferred")
 
         coVerify(exactly = 0) { helper.authenticateWithoutCrypto(any(), any(), any(), any(), any()) }
-        coVerify(exactly = 1) { keystoreManager.sign(CREDENTIAL_ID, any(), helper, any(), any(), any()) }
+        coVerify(exactly = 1) { keystoreManager.sign(CREDENTIAL_ID, com.automatethethings.xkey.crypto.UserKeyKind.CREDENTIAL, any(), helper, any(), any(), any()) }
         assertEquals(UV or UP, signedFlags and (UV or UP))
     }
 

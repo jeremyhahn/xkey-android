@@ -101,6 +101,8 @@ class FidoBleRegistrationMetadataTest {
         }
 
         val database = mockk<XKeyDatabase>(relaxed = true)
+        // No key has a pending deletion.
+        every { database.keyPolicyDao() } returns mockk<com.automatethethings.xkey.storage.dao.KeyPolicyDao>(relaxed = true) { coEvery { deletion(any()) } returns null }
         every { database.keyDao() } returns keyDao
         mockkObject(XKeyDatabase.Companion)
         every { XKeyDatabase.getInstance(any()) } returns database

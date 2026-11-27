@@ -59,7 +59,7 @@ class KeystoreManagerTest {
         // Clean up any test keys
         testCredentialIds.forEach { credentialId ->
             try {
-                keystoreManager.deleteKey(credentialId)
+                keystoreManager.deleteKey(credentialId, UserKeyKind.CREDENTIAL)
             } catch (e: Exception) {
                 // Ignore cleanup errors
             }
@@ -121,7 +121,7 @@ class KeystoreManagerTest {
     fun keyExists_returnsFalseForNonexistent() {
         val credentialId = "nonexistent_credential_${System.currentTimeMillis()}"
 
-        val exists = keystoreManager.keyExists(credentialId)
+        val exists = keystoreManager.keyExists(credentialId, UserKeyKind.CREDENTIAL)
 
         assertFalse("Non-existent key should return false", exists)
     }
@@ -130,9 +130,9 @@ class KeystoreManagerTest {
     fun deleteKey_returnsFalseForNonexistent() {
         val credentialId = "nonexistent_credential_${System.currentTimeMillis()}"
 
-        val deleted = keystoreManager.deleteKey(credentialId)
+        val deleted = keystoreManager.deleteKey(credentialId, UserKeyKind.CREDENTIAL)
 
-        assertFalse("Deleting non-existent key should return false", deleted)
+        assertEquals("Deleting a non-existent key reports it absent", GeneratedKeyDiscard.ABSENT, deleted)
     }
 
     @Test
@@ -143,12 +143,12 @@ class KeystoreManagerTest {
             credentialId = credentialId,
             requireBiometric = false
         )
-        assertTrue("Key should exist before deletion", keystoreManager.keyExists(credentialId))
+        assertTrue("Key should exist before deletion", keystoreManager.keyExists(credentialId, UserKeyKind.CREDENTIAL))
 
-        val deleted = keystoreManager.deleteKey(credentialId)
+        val deleted = keystoreManager.deleteKey(credentialId, UserKeyKind.CREDENTIAL)
 
-        assertTrue("Delete should return true", deleted)
-        assertFalse("Key should not exist after deletion", keystoreManager.keyExists(credentialId))
+        assertEquals("Delete reports the key deleted", GeneratedKeyDiscard.DELETED, deleted)
+        assertFalse("Key should not exist after deletion", keystoreManager.keyExists(credentialId, UserKeyKind.CREDENTIAL))
 
         // Remove from cleanup list since it's already deleted
         testCredentialIds.remove(credentialId)
@@ -159,7 +159,7 @@ class KeystoreManagerTest {
     fun getPublicKey_returnsNullForNonexistent() {
         val credentialId = "nonexistent_credential_${System.currentTimeMillis()}"
 
-        val publicKey = keystoreManager.getPublicKey(credentialId)
+        val publicKey = keystoreManager.getPublicKey(credentialId, UserKeyKind.CREDENTIAL)
 
         assertNull("Non-existent key should return null", publicKey)
     }
@@ -173,7 +173,7 @@ class KeystoreManagerTest {
             requireBiometric = false
         )
 
-        val publicKey = keystoreManager.getPublicKey(credentialId)
+        val publicKey = keystoreManager.getPublicKey(credentialId, UserKeyKind.CREDENTIAL)
 
         assertNotNull("Public key should not be null", publicKey)
         assertEquals("Key should be EC", "EC", publicKey?.algorithm)
@@ -188,7 +188,7 @@ class KeystoreManagerTest {
             requireBiometric = false
         )
 
-        val retrievedKey = keystoreManager.getCOSEPublicKey(credentialId)
+        val retrievedKey = keystoreManager.getCOSEPublicKey(credentialId, UserKeyKind.CREDENTIAL)
 
         assertNotNull("Retrieved COSE key should not be null", retrievedKey)
         assertTrue(
@@ -207,7 +207,7 @@ class KeystoreManagerTest {
         )
 
         val dataHash = ByteArray(32) { it.toByte() }
-        val signature = keystoreManager.signWithoutBiometric(credentialId, dataHash)
+        val signature = keystoreManager.signWithoutBiometric(credentialId, UserKeyKind.CREDENTIAL, dataHash)
 
         // DER-encoded ECDSA signature starts with 0x30 (SEQUENCE)
         assertEquals("Signature should start with DER SEQUENCE tag", 0x30.toByte(), signature[0])
@@ -239,13 +239,13 @@ class KeystoreManagerTest {
         keystoreManager.generateKey(credentialId2, requireBiometric = false)
 
         // Delete first key
-        keystoreManager.deleteKey(credentialId1)
+        keystoreManager.deleteKey(credentialId1, UserKeyKind.CREDENTIAL)
         testCredentialIds.remove(credentialId1)
 
         // Second key should still work
-        assertTrue("Second key should still exist", keystoreManager.keyExists(credentialId2))
+        assertTrue("Second key should still exist", keystoreManager.keyExists(credentialId2, UserKeyKind.CREDENTIAL))
         val dataHash = ByteArray(32)
-        val signature = keystoreManager.signWithoutBiometric(credentialId2, dataHash)
+        val signature = keystoreManager.signWithoutBiometric(credentialId2, UserKeyKind.CREDENTIAL, dataHash)
         assertNotNull("Second key should still sign", signature)
     }
 }

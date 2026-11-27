@@ -77,7 +77,8 @@ class LocalGenerateKeyRsaSizeHandlerTest {
 
     /** The keySizeBits argument of every generateKeyForAlgorithm call, in order. */
     private val forwarded = Collections.synchronizedList(ArrayList<Int?>())
-    private val stored = slot<KeyEntity>()
+    /** The key store's tables; generation writes the key row here. */
+    private val tables = com.automatethethings.xkey.storage.FakeKeyPolicyTables()
 
     @Before
     fun setUp() {
@@ -95,7 +96,6 @@ class LocalGenerateKeyRsaSizeHandlerTest {
         keystore = mockk(relaxed = true)
         every { keystore.generalKeySecurityLevel(any()) } returns KeySecurityLevel.TEE
         keyDao = mockk(relaxed = true)
-        coEvery { keyDao.insert(capture(stored)) } returns 1L
     }
 
     @After
@@ -134,7 +134,7 @@ class LocalGenerateKeyRsaSizeHandlerTest {
         assertNotNull("RS256 must succeed, got $response", result)
         assertEquals(listOf<Int?>(null), forwarded.toList())
         assertEquals(2048, result!!.getInt("keySizeBits"))
-        assertEquals(2048, stored.captured.keySizeBits)
+        assertEquals(2048, tables.key("rsa-default")!!.keySizeBits)
         assertEquals(2048, modulusBits(result.getString("publicKeyDer")))
     }
 
@@ -148,7 +148,7 @@ class LocalGenerateKeyRsaSizeHandlerTest {
         assertNotNull("ES256 must succeed, got $response", result)
         assertEquals(listOf<Int?>(null), forwarded.toList())
         assertEquals(256, result!!.getInt("keySizeBits"))
-        assertEquals(256, stored.captured.keySizeBits)
+        assertEquals(256, tables.key("ec-default")!!.keySizeBits)
     }
 
     /**
@@ -168,8 +168,8 @@ class LocalGenerateKeyRsaSizeHandlerTest {
         assertNull("a 2048-bit key for a 4096 request must not succeed, got $response", response.optJSONObject("result"))
         assertEquals(ErrorCodes.INTERNAL_ERROR, response.getJSONObject("error").getInt("code"))
         assertEquals(listOf<Int?>(4096), forwarded.toList())
-        verify { keystore.deleteGeneralKey("rsa-ignored") }
-        coVerify(exactly = 0) { keyDao.insert(any()) }
+        verify { keystore.discardGeneratedKey(KeystoreManager.userKeyAlias("rsa-ignored", com.automatethethings.xkey.crypto.UserKeyKind.GENERAL)) }
+        assertNull(tables.key("rsa-ignored"))
     }
 
     private fun assertRsaSize(requested: Int) = runBlocking<Unit> {
@@ -183,9 +183,9 @@ class LocalGenerateKeyRsaSizeHandlerTest {
         assertEquals("the size must reach the key generator", listOf<Int?>(requested), forwarded.toList())
         assertEquals(requested, modulusBits(result!!.getString("publicKeyDer")))
         assertEquals(requested, result.getInt("keySizeBits"))
-        assertTrue("the key must be stored", stored.isCaptured)
-        assertEquals(keyId, stored.captured.keyId)
-        assertEquals(requested, stored.captured.keySizeBits)
+        val stored = tables.key(keyId)
+        assertNotNull("the key must be stored", stored)
+        assertEquals(requested, stored!!.keySizeBits)
     }
 
     private suspend fun generate(keyId: String, algorithm: String, keySizeBits: Int?): JSONObject {
@@ -206,6 +206,9 @@ class LocalGenerateKeyRsaSizeHandlerTest {
         every { Looper.getMainLooper() } returns mockk(relaxed = true)
         val database = mockk<XKeyDatabase>(relaxed = true)
         every { database.keyDao() } returns keyDao
+        every { database.keyPolicyDao() } returns tables
+        mockkObject(com.automatethethings.xkey.storage.KeyPolicyStore.Companion)
+        every { com.automatethethings.xkey.storage.KeyPolicyStore.of(any(), any()) } answers { tables.store() }
         mockkObject(XKeyDatabase.Companion)
         every { XKeyDatabase.getInstance(any()) } returns database
         every { context.getSystemService(Context.KEYGUARD_SERVICE) } returns mockk<KeyguardManager>(relaxed = true)

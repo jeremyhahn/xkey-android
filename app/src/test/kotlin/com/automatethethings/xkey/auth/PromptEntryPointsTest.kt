@@ -213,10 +213,12 @@ class PromptEntryPointsTest {
             "useApprovedKey does not recheck under the key's lock",
             choke.indexOf("withKeyLock(keyLockId(") in 0 until choke.indexOf("revalidateApprovedKey(")
         )
-        val delete = code.substringAfter("fun handleLocalDeleteKey(", "").substringBefore("\n    }")
+        val localDelete = code.substringAfter("fun handleLocalDeleteKey(", "").substringBefore("\n    }")
+        assertTrue("local.deleteKey deletes past the one RPC key delete", "deleteUserKey(request, keyId)" in localDelete)
+        val delete = code.substringAfter("fun deleteUserKey(", "").substringBefore("\n\n")
         assertTrue(
             "local.deleteKey deletes outside the key's lock",
-            delete.indexOf("withKeyLock(keyLockId(") in 0 until delete.indexOf("deleteKeyAndMaterial(")
+            delete.indexOf("withKeyLock(keyLockId(") in 0 until delete.indexOf("deleteUserKeyRevoked(")
         )
         assertTrue(
             "local.generateKey does not reserve the key's lock",

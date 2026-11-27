@@ -375,7 +375,11 @@ class XKeyGattService : Service(), PairingConfirmationCallback {
                 AndroidFidoCredentialBackend(
                     keyDao = db.keyDao(),
                     credentialDao = db.credentialMetadataDao(),
-                    sharePermission = SharePermission(db.keySharingPolicyDao(), pairedDeviceRepository),
+                    sharePermission = SharePermission(
+                        db.keySharingPolicyDao(),
+                        pairedDeviceRepository,
+                        com.automatethethings.xkey.storage.KeyPolicyStore.of(db, keystoreManager!!)
+                    ),
                     signCounter = PasskeySignCounter(db.credentialMetadataDao(), db.keyDao()),
                     keystoreManager = keystoreManager!!,
                     userPrompt = BiometricFidoUserPrompt(this) { biometricLauncher },

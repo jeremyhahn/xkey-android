@@ -18,6 +18,7 @@ package com.automatethethings.xkey.ble
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGattCharacteristic
 import android.bluetooth.BluetoothGattServer
+import android.bluetooth.BluetoothGattServerCallback
 import com.automatethethings.xkey.ca.EnrollmentRefusal
 import java.lang.reflect.InvocationTargetException
 import java.lang.reflect.Method
@@ -58,9 +59,18 @@ class GattServerOutboundProbe(val server: GattServer) {
     // State the outbound path reads
     // -----------------------------------------------------------------
 
-    /** The open server handle; null until [GattServer.start] succeeds. */
-    val bluetoothGattServer: BluetoothGattServer?
+    /**
+     * The open server handle; null until [GattServer.start] succeeds.
+     * Replacing it lets a test stand in for a stack that accepts
+     * notifications for a peer that never connected.
+     */
+    var bluetoothGattServer: BluetoothGattServer?
         get() = read("gattServer") as BluetoothGattServer?
+        set(value) = write("gattServer", value)
+
+    /** The callback object the Bluetooth stack owns. */
+    val gattCallback: BluetoothGattServerCallback
+        get() = read("gattCallback") as BluetoothGattServerCallback
 
     var isStarting: Boolean
         get() = read("isStarting") as Boolean

@@ -167,6 +167,56 @@ class KeyCreationAlgorithmsTest {
         assertEquals(listOf("ec", "rsa"), fileSigningKeys(keys).map { it.keyId })
     }
 
+    /** PR #400 review: the media verifier checks ES and RS signatures only, so no picker offers an Ed25519 key. */
+    @Test
+    fun `the media and file signing pickers drop EdDSA and Ed25519 keys`() {
+        val keys = listOf(row("ec", "ES256"), row("ed", "EdDSA"), row("rsa", "RS256", "fido2"), row("ed-ui", "Ed25519"))
+
+        assertEquals(listOf("ec", "rsa"), mediaSigningKeys(keys).map { it.keyId })
+        assertEquals(listOf("ec", "rsa"), fileSigningKeys(keys).map { it.keyId })
+        // A co-signature is a media signature: co-signing selection drops them too.
+        assertEquals(listOf("ec", "rsa"), KeystoreManager.jcaSigningKeys(keys, listOf("signing", "fido2")).map { it.keyId })
+    }
+
+    /** Every algorithm a signing picker offers makes signatures SignatureVerifier accepts. */
+    @Test
+    fun `every algorithm the signing pickers offer is one the media verifier verifies`() {
+        io.mockk.mockkStatic(android.util.Log::class)
+        io.mockk.every { android.util.Log.w(any(), any<String>(), any()) } returns 0
+        try {
+            val candidates = listOf("ES256", "ES384", "ES512", "RS256", "RS384", "RS512", "EdDSA", "Ed25519") +
+                MlDsaParameterSet.entries.map { it.wireName }
+            val offered = candidates.filter { algorithm ->
+                val keys = listOf(row(algorithm, algorithm))
+                fileSigningKeys(keys).isNotEmpty() || mediaSigningKeys(keys).isNotEmpty()
+            }
+            assertTrue("the pickers offer no ES256 key", "ES256" in offered)
+            val data = "media content hash".toByteArray()
+            for (algorithm in offered) {
+                val pair = keyPairFor(algorithm)
+                val signature = java.security.Signature.getInstance(KeystoreManager.jcaSignatureAlgorithm(algorithm)).run {
+                    initSign(pair.private)
+                    update(data)
+                    sign()
+                }
+                assertTrue(
+                    "$algorithm is offered but SignatureVerifier cannot verify it",
+                    com.automatethethings.xkey.media.SignatureVerifier.verify(pair.public.encoded, data, signature, algorithm)
+                )
+            }
+        } finally {
+            io.mockk.unmockkStatic(android.util.Log::class)
+        }
+    }
+
+    private fun keyPairFor(algorithm: String): java.security.KeyPair = when {
+        algorithm.startsWith("ES") -> java.security.KeyPairGenerator.getInstance("EC").apply {
+            initialize(java.security.spec.ECGenParameterSpec(mapOf("ES256" to "secp256r1", "ES384" to "secp384r1", "ES512" to "secp521r1").getValue(algorithm)))
+        }.generateKeyPair()
+        algorithm.startsWith("RS") -> java.security.KeyPairGenerator.getInstance("RSA").apply { initialize(2048) }.generateKeyPair()
+        else -> java.security.KeyPairGenerator.getInstance("Ed25519").generateKeyPair()
+    }
+
     @Test
     fun `every algorithm with a JCA signature maps to one and no ML-DSA name has one`() {
         val candidates = listOf("ES256", "ES384", "ES512", "RS256", "RS384", "RS512", "Ed25519", "EdDSA") +

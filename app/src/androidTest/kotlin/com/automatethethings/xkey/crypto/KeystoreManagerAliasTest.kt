@@ -83,13 +83,12 @@ class KeystoreManagerAliasTest {
     fun tearDown() {
         val dao = XKeyDatabase.getInstance(context).auditLogDao()
         (credentialIds + generalKeyIds).forEach { keyId ->
-            runCatching { keystoreManager.deleteKey(keyId) }
+            UserKeyKind.entries.forEach { kind -> runCatching { keystoreManager.deleteKey(keyId, kind) } }
             runCatching { keystoreManager.deleteGeneralKey(keyId) }
             runCatching { runBlocking { dao.deleteByKeyId(keyId) } }
         }
         rawAliases.forEach { alias -> runCatching { keyStore.deleteEntry(alias) } }
-        // Ed25519 private keys are held in EncryptedSharedPreferences, not the
-        // Keystore, so deleting the alias above would not remove them.
+        // Legacy software Ed25519 keys live in EncryptedSharedPreferences, not the Keystore.
         runCatching {
             val prefs = EncryptedSharedPreferences.create(
                 context,
@@ -157,30 +156,44 @@ class KeystoreManagerAliasTest {
     fun resolvesACredentialKeyInTheFido2Namespace() {
         val credentialId = credentialKey("resolve")
 
-        assertEquals("xkey_credential_$credentialId", keystoreManager.resolveKeystoreAlias(credentialId))
+        assertEquals(
+            "xkey_credential_$credentialId",
+            keystoreManager.resolveKeystoreAlias(credentialId, UserKeyKind.CREDENTIAL)
+        )
+        assertNull(keystoreManager.resolveKeystoreAlias(credentialId, UserKeyKind.GENERAL))
     }
 
     @Test
     fun resolvesAGeneralKeyInTheProtocolNamespace() {
         val (keyId, _) = generalKey("ES256", "resolve")
 
-        assertEquals("xkey_key_$keyId", keystoreManager.resolveKeystoreAlias(keyId))
+        assertEquals("xkey_key_$keyId", keystoreManager.resolveKeystoreAlias(keyId, UserKeyKind.GENERAL))
+        assertNull(keystoreManager.resolveKeystoreAlias(keyId, UserKeyKind.CREDENTIAL))
     }
 
+    /** A bare alias xKey did not namespace is seen by presence checks but never read as a user key. */
     @Test
-    fun resolvesAnAliasThatXkeyDidNotNamespace() {
+    fun anAliasThatXkeyDidNotNamespaceIsNeverResolvedAsAUserKey() {
         val alias = rawKeystoreAlias("resolve")
 
-        assertEquals(alias, keystoreManager.resolveKeystoreAlias(alias))
+        UserKeyKind.entries.forEach { kind ->
+            assertNull(kind.name, keystoreManager.resolveKeystoreAlias(alias, kind))
+        }
+        assertTrue(keystoreManager.holdsAnyKey(alias))
+        assertNull(keystoreManager.soleKind(alias))
     }
 
     @Test
     fun resolvesNothingForAnIdentifierWithNoKey() {
-        assertNull(keystoreManager.resolveKeystoreAlias("missing-${System.nanoTime()}"))
+        val missing = "missing-${System.nanoTime()}"
+        UserKeyKind.entries.forEach { kind ->
+            assertNull(kind.name, keystoreManager.resolveKeystoreAlias(missing, kind))
+        }
     }
 
+    /** An id held in both namespaces resolves each kind to its own key, and has no sole kind. */
     @Test
-    fun theCredentialNamespaceIsTriedBeforeTheGeneralOne() {
+    fun eachNamespaceResolvesItsOwnKeyWhenBothShareAnId() {
         val sharedId = "shared-${System.nanoTime()}"
         credentialIds.add(sharedId)
         generalKeyIds.add(sharedId)
@@ -189,7 +202,9 @@ class KeystoreManagerAliasTest {
             keystoreManager.generateKey(sharedId, requireBiometric = false)
         }
 
-        assertEquals("xkey_credential_$sharedId", keystoreManager.resolveKeystoreAlias(sharedId))
+        assertEquals("xkey_credential_$sharedId", keystoreManager.resolveKeystoreAlias(sharedId, UserKeyKind.CREDENTIAL))
+        assertEquals("xkey_key_$sharedId", keystoreManager.resolveKeystoreAlias(sharedId, UserKeyKind.GENERAL))
+        assertNull(keystoreManager.soleKind(sharedId))
     }
 
     // -------------------------------------------- exports across both spaces
@@ -200,7 +215,7 @@ class KeystoreManagerAliasTest {
         // so local.getPublicKey with format=cose failed for every protocol key.
         val (keyId, _) = generalKey("ES256", "cose")
 
-        val cose = keystoreManager.getCOSEPublicKey(keyId)
+        val cose = keystoreManager.getCOSEPublicKey(keyId, UserKeyKind.GENERAL)
 
         assertNotNull(cose)
         assertTrue(cose!!.isNotEmpty())
@@ -208,7 +223,10 @@ class KeystoreManagerAliasTest {
 
     @Test
     fun returnsNoCoseKeyForAnUnknownIdentifier() {
-        assertNull(keystoreManager.getCOSEPublicKey("missing-${System.nanoTime()}"))
+        val missing = "missing-${System.nanoTime()}"
+        UserKeyKind.entries.forEach { kind ->
+            assertNull(kind.name, keystoreManager.getCOSEPublicKey(missing, kind))
+        }
     }
 
     @Test
@@ -218,7 +236,7 @@ class KeystoreManagerAliasTest {
         val (keyId, der) = generalKey("ES256", "sign")
         val payload = "protocol-signed payload".toByteArray()
 
-        val signature = runBlocking { keystoreManager.signWithoutBiometric(keyId, payload) }
+        val signature = runBlocking { keystoreManager.signWithoutBiometric(keyId, UserKeyKind.GENERAL, payload) }
 
         val verifier = Signature.getInstance("SHA256withECDSA").apply {
             initVerify(KeyFactory.getInstance("EC").generatePublic(X509EncodedKeySpec(der)))
@@ -229,28 +247,28 @@ class KeystoreManagerAliasTest {
 
     @Test
     fun signingWithoutABiometricRejectsAnUnknownIdentifier() {
-        assertThrows(KeyNotFoundException::class.java) {
-            runBlocking {
-                keystoreManager.signWithoutBiometric("missing-${System.nanoTime()}", ByteArray(32))
+        val missing = "missing-${System.nanoTime()}"
+        UserKeyKind.entries.forEach { kind ->
+            assertThrows(KeyNotFoundException::class.java) {
+                runBlocking { keystoreManager.signWithoutBiometric(missing, kind, ByteArray(32)) }
             }
         }
     }
 
     /**
-     * Every accessor resolves both alias namespaces. `getPublicKey` used to
-     * build the FIDO2-only alias, so a key created through
-     * `generateKeyForAlgorithm` was invisible to it while every other export
-     * found it — the same defect that broke COSE export and prompt-backed
-     * signing for desktop-created passkeys.
+     * `getPublicKey` used to build the FIDO2-only alias, so a key created
+     * through `generateKeyForAlgorithm` was invisible to it. Each accessor
+     * now reads the namespace its caller names, and only that one.
      */
     @Test
-    fun getPublicKeyResolvesBothNamespaces() {
+    fun getPublicKeyReadsTheNamespaceItIsGiven() {
         val (keyId, der) = generalKey("ES256", "public-key-namespace")
 
-        assertNotNull("the DER export resolves both namespaces", keystoreManager.getPublicKeyDER(keyId))
-        val publicKey = keystoreManager.getPublicKey(keyId)
-        assertNotNull("getPublicKey must resolve them too", publicKey)
+        assertNotNull("the DER export reads the general namespace", keystoreManager.getPublicKeyDER(keyId, UserKeyKind.GENERAL))
+        val publicKey = keystoreManager.getPublicKey(keyId, UserKeyKind.GENERAL)
+        assertNotNull("getPublicKey reads it too", publicKey)
         assertArrayEquals(der, publicKey!!.encoded)
+        assertNull(keystoreManager.getPublicKey(keyId, UserKeyKind.CREDENTIAL))
     }
 
     // ---------------------------------------------------------- key material
@@ -259,15 +277,15 @@ class KeystoreManagerAliasTest {
     fun exportsThePublicKeyAsDer() {
         val (keyId, der) = generalKey("ES256", "der")
 
-        assertArrayEquals(der, keystoreManager.getPublicKeyDER(keyId))
-        assertNull(keystoreManager.getPublicKeyDER("missing-${System.nanoTime()}"))
+        assertArrayEquals(der, keystoreManager.getPublicKeyDER(keyId, UserKeyKind.GENERAL))
+        assertNull(keystoreManager.getPublicKeyDER("missing-${System.nanoTime()}", UserKeyKind.GENERAL))
     }
 
     @Test
     fun exportsThePublicKeyAsPem() {
         val (keyId, der) = generalKey("ES256", "pem")
 
-        val pem = keystoreManager.getPublicKeyPEM(keyId)!!
+        val pem = keystoreManager.getPublicKeyPEM(keyId, UserKeyKind.GENERAL)!!
         val lines = pem.lines()
 
         assertEquals("-----BEGIN PUBLIC KEY-----", lines.first())
@@ -279,7 +297,7 @@ class KeystoreManagerAliasTest {
 
     @Test
     fun returnsNoPemForAnUnknownIdentifier() {
-        assertNull(keystoreManager.getPublicKeyPEM("missing-${System.nanoTime()}"))
+        assertNull(keystoreManager.getPublicKeyPEM("missing-${System.nanoTime()}", UserKeyKind.GENERAL))
     }
 
     @Test
@@ -288,7 +306,7 @@ class KeystoreManagerAliasTest {
             .forEach { (algorithm, curve) ->
                 val (keyId, _) = generalKey(algorithm, "ssh-$curve")
 
-                val authorizedKey = keystoreManager.getPublicKeySSH(keyId)!!
+                val authorizedKey = keystoreManager.getPublicKeySSH(keyId, UserKeyKind.GENERAL)!!
                 val (keyType, encoded) = authorizedKey.split(" ", limit = 2)
                 val blob = readSshBlob(Base64.getDecoder().decode(encoded))
 
@@ -304,7 +322,7 @@ class KeystoreManagerAliasTest {
     fun exportsAnRsaKeyInOpensshWireFormat() {
         val (keyId, _) = generalKey("RS256", "ssh-rsa")
 
-        val authorizedKey = keystoreManager.getPublicKeySSH(keyId)!!
+        val authorizedKey = keystoreManager.getPublicKeySSH(keyId, UserKeyKind.GENERAL)!!
         val (keyType, encoded) = authorizedKey.split(" ", limit = 2)
         val blob = readSshBlob(Base64.getDecoder().decode(encoded))
 
@@ -316,7 +334,7 @@ class KeystoreManagerAliasTest {
 
     @Test
     fun returnsNoSshKeyForAnUnknownIdentifier() {
-        assertNull(keystoreManager.getPublicKeySSH("missing-${System.nanoTime()}"))
+        assertNull(keystoreManager.getPublicKeySSH("missing-${System.nanoTime()}", UserKeyKind.GENERAL))
     }
 
     /** Splits an SSH blob into its length-prefixed fields. */
@@ -395,7 +413,7 @@ class KeystoreManagerAliasTest {
         }
 
         assertTrue(keystoreManager.deleteGeneralKey(sharedId))
-        assertTrue(keystoreManager.keyExists(sharedId))
+        assertTrue(keystoreManager.keyExists(sharedId, UserKeyKind.CREDENTIAL))
     }
 
     // ----------------------------------------------------------- attestation
@@ -404,7 +422,7 @@ class KeystoreManagerAliasTest {
     fun attestsAGeneralKeyThroughItsResolvedAlias() {
         val (keyId, _) = generalKey("ES256", "attestation")
 
-        val chain = keystoreManager.getAttestationChain(keyId)
+        val chain = keystoreManager.getAttestationChain(keyId, UserKeyKind.GENERAL)
 
         assertNotNull(chain)
         assertTrue(chain!!.isNotEmpty())
@@ -412,7 +430,7 @@ class KeystoreManagerAliasTest {
 
     @Test
     fun returnsNoAttestationChainForAnUnknownIdentifier() {
-        assertNull(keystoreManager.getAttestationChain("missing-${System.nanoTime()}"))
+        assertNull(keystoreManager.getAttestationChain("missing-${System.nanoTime()}", UserKeyKind.GENERAL))
     }
 
     @Test
@@ -441,15 +459,15 @@ class KeystoreManagerAliasTest {
 
         val level = keystoreManager.credentialSecurityLevel(credentialId)
         assertNotNull(level)
-        assertEquals(level == KeySecurityLevel.STRONGBOX, keystoreManager.isKeyStrongBoxBacked(credentialId))
+        assertEquals(level == KeySecurityLevel.STRONGBOX, keystoreManager.isKeyStrongBoxBacked(credentialId, UserKeyKind.CREDENTIAL))
         if (!keystoreManager.isStrongBoxAvailable()) {
-            assertFalse(keystoreManager.isKeyStrongBoxBacked(credentialId))
+            assertFalse(keystoreManager.isKeyStrongBoxBacked(credentialId, UserKeyKind.CREDENTIAL))
         } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             val inStrongBox = keyInfoOf("xkey_credential_$credentialId").securityLevel ==
                 KeyProperties.SECURITY_LEVEL_STRONGBOX
-            assertEquals(inStrongBox, keystoreManager.isKeyStrongBoxBacked(credentialId))
+            assertEquals(inStrongBox, keystoreManager.isKeyStrongBoxBacked(credentialId, UserKeyKind.CREDENTIAL))
         }
-        assertFalse(keystoreManager.isKeyStrongBoxBacked("missing-${System.nanoTime()}"))
+        assertFalse(keystoreManager.isKeyStrongBoxBacked("missing-${System.nanoTime()}", UserKeyKind.GENERAL))
     }
 
     /**
@@ -475,7 +493,7 @@ class KeystoreManagerAliasTest {
         val level = keystoreManager.credentialSecurityLevel(credentialId)
         assertNotNull(level)
         assertFalse(level == KeySecurityLevel.STRONGBOX)
-        assertFalse(keystoreManager.isKeyStrongBoxBacked(credentialId))
+        assertFalse(keystoreManager.isKeyStrongBoxBacked(credentialId, UserKeyKind.CREDENTIAL))
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
             keyInfoOf(alias).securityLevel == KeyProperties.SECURITY_LEVEL_TRUSTED_ENVIRONMENT
         ) {
@@ -499,8 +517,8 @@ class KeystoreManagerAliasTest {
         }
 
         assertTrue(cose.isNotEmpty())
-        assertTrue(keystoreManager.keyExists(credentialId))
-        assertNotNull(keystoreManager.getPublicKey(credentialId))
+        assertTrue(keystoreManager.keyExists(credentialId, UserKeyKind.CREDENTIAL))
+        assertNotNull(keystoreManager.getPublicKey(credentialId, UserKeyKind.CREDENTIAL))
     }
 
     @Test
@@ -522,11 +540,11 @@ class KeystoreManagerAliasTest {
                 keystoreManager.generateKeyWithAuthDuration(credentialId, -1, requireStrongBox = true)
             }
         }
-        assertFalse(keystoreManager.keyExists(credentialId))
+        assertFalse(keystoreManager.keyExists(credentialId, UserKeyKind.CREDENTIAL))
     }
 
     @Test
-    fun ed25519KeysLiveOutsideTheAndroidKeystore() {
+    fun ed25519KeysLiveInTheAndroidKeystoreOnApi33() {
         val keyId = newGeneralKeyId("ed25519")
 
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
@@ -536,21 +554,15 @@ class KeystoreManagerAliasTest {
             return
         }
 
-        val der = try {
-            runBlocking { keystoreManager.generateKeyForAlgorithm(keyId, "Ed25519", -1, false) }
-        } catch (e: KeyGenerationException) {
-            // Ed25519 is a JCE provider capability, not a Keystore one. A device
-            // without it must fail cleanly rather than leave a half-made key.
-            assertFalse(keystoreManager.generalKeyExists(keyId))
-            return
-        }
+        val der = runBlocking { keystoreManager.generateKeyForAlgorithm(keyId, "Ed25519", -1, false) }
 
         assertTrue(der.isNotEmpty())
-        assertFalse("no Keystore entry is created for Ed25519", keystoreManager.generalKeyExists(keyId))
+        assertTrue("an Ed25519 key is a Keystore entry on API 33+", keyStore.containsAlias("xkey_key_$keyId"))
+        assertTrue(keystoreManager.generalKeyExists(keyId))
         assertEquals(
-            "a software Ed25519 key resolves to the general alias (callers use it as a Keystore alias; #186)",
+            "an Ed25519 key resolves to the general alias (#186)",
             "xkey_key_$keyId",
-            keystoreManager.resolveKeystoreAlias(keyId)
+            keystoreManager.resolveKeystoreAlias(keyId, UserKeyKind.GENERAL)
         )
     }
 

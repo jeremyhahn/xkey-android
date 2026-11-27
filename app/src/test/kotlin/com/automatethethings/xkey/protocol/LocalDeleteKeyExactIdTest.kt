@@ -15,222 +15,188 @@
 
 package com.automatethethings.xkey.protocol
 
-import android.app.KeyguardManager
-import android.app.NotificationManager
 import android.content.Context
-import android.os.Looper
+import android.content.SharedPreferences
 import android.util.Log
+import com.automatethethings.xkey.crypto.KeystoreAeadCipher
 import com.automatethethings.xkey.crypto.KeystoreManager
+import com.automatethethings.xkey.crypto.SoftwareKey
 import com.automatethethings.xkey.crypto.SoftwareKeyStore
-import com.automatethethings.xkey.storage.XKeyDatabase
-import com.automatethethings.xkey.storage.dao.KeyDao
-import io.mockk.coEvery
-import io.mockk.coVerify
+import com.automatethethings.xkey.crypto.UserKeyKind
+import com.automatethethings.xkey.storage.KeyPolicyStore
+import com.automatethethings.xkey.storage.deleteKeyMaterial
+import com.automatethethings.xkey.storage.entity.KeyDeletionEntity
+import com.automatethethings.xkey.storage.isInternalKey
+import com.automatethethings.xkey.storage.keyMaterialGeneration
+import com.automatethethings.xkey.storage.readKeyMaterialGeneration
 import io.mockk.every
-import io.mockk.just
 import io.mockk.mockk
 import io.mockk.mockkConstructor
-import io.mockk.mockkObject
 import io.mockk.mockkStatic
-import io.mockk.runs
+import io.mockk.spyk
 import io.mockk.unmockkAll
-import io.mockk.verify
-import java.nio.file.Files
-import java.security.KeyStore
-import kotlinx.coroutines.runBlocking
-import org.json.JSONObject
 import org.junit.After
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import java.io.File
+import java.security.KeyStore
+import java.security.cert.Certificate
+import java.util.Date
+import kotlin.random.Random
 
 /**
- * `local.deleteKey` deletes the key the request names. An ID that is itself
- * a recorded or software key is that key, even when it also has the raw
- * alias form (`xkey_key_<id>`) of another key's Keystore entry.
+ * `local.deleteKey` deletes the key the request names, by this branch's
+ * alias rule (#255): an id is the user key it names, whose aliases are
+ * `xkey_credential_<id>` and `xkey_key_<id>`, never read as another key's
+ * raw alias. A raw alias with no user key under it is an internal key and
+ * is refused ([isInternalKey]) before anything is touched; with a
+ * credential and a general key under one id, `local.deleteKey` names the
+ * general key ([KeystoreManager.deleteTarget]). Each case runs the
+ * handler's own steps against a real [KeystoreManager] and
+ * [SoftwareKeyStore], with the Android Keystore, the Ed25519 preferences
+ * and the software store's cipher as in-memory fakes.
  */
 class LocalDeleteKeyExactIdTest {
 
-    private val context = mockk<Context>(relaxed = true)
+    /** Keystore entries: alias to (creation date, certificate bytes). */
+    private val entries = HashMap<String, Pair<Date, ByteArray?>>()
+    private val ed25519 = HashMap<String, String>()
+    private lateinit var context: Context
+    private lateinit var keystore: KeystoreManager
+    private var clock = 1_000L
 
     @Before
     fun setUp() {
+        // Main's shared ML-DSA store is per process: each test starts with none.
+        com.automatethethings.xkey.crypto.PqcSoftwareKeyStore.clearSharedForTest()
         mockkStatic(Log::class)
         every { Log.d(any(), any<String>()) } returns 0
         every { Log.i(any(), any<String>()) } returns 0
         every { Log.w(any(), any<String>()) } returns 0
-        every { Log.e(any(), any<String>()) } returns 0
         every { Log.w(any(), any<String>(), any()) } returns 0
         every { Log.e(any(), any<String>(), any()) } returns 0
+
+        val platform = mockk<KeyStore>(relaxed = true)
+        every { platform.containsAlias(any()) } answers { firstArg<String>() in entries }
+        every { platform.getCreationDate(any()) } answers { entries[firstArg()]?.first }
+        every { platform.getCertificate(any()) } answers {
+            entries[firstArg()]?.second?.let { bytes -> mockk<Certificate> { every { encoded } returns bytes } }
+        }
+        every { platform.deleteEntry(any()) } answers { entries.remove(firstArg<String>()); Unit }
+        mockkStatic(KeyStore::class)
+        every { KeyStore.getInstance(any<String>()) } returns platform
+
+        mockkConstructor(KeystoreAeadCipher::class)
+        every { anyConstructed<KeystoreAeadCipher>().encrypt(any()) } answers { Random.nextBytes(12) + firstArg<ByteArray>() }
+        every { anyConstructed<KeystoreAeadCipher>().decrypt(any()) } answers {
+            firstArg<ByteArray>().copyOfRange(12, firstArg<ByteArray>().size)
+        }
+
+        val files: File = java.nio.file.Files.createTempDirectory("software-keys").toFile().apply { deleteOnExit() }
+        context = mockk(relaxed = true)
+        every { context.applicationContext } returns context
+        every { context.filesDir } returns files
+
+        val prefs = mockk<SharedPreferences>()
+        every { prefs.getString(any(), any()) } answers { ed25519[firstArg()] ?: secondArg() }
+        every { prefs.contains(any()) } answers { firstArg<String>() in ed25519 }
+        every { prefs.edit() } answers {
+            val editor = mockk<SharedPreferences.Editor>()
+            every { editor.remove(any()) } answers { ed25519.remove(firstArg<String>()); editor }
+            every { editor.commit() } returns true
+            editor
+        }
+        keystore = spyk(KeystoreManager(context))
+        every { keystore.ed25519Prefs() } returns prefs
     }
 
     @After
     fun tearDown() {
+        com.automatethethings.xkey.crypto.PqcSoftwareKeyStore.clearSharedForTest()
         unmockkAll()
+    }
+
+    private fun keystoreKey(alias: String) {
+        entries[alias] = Date(clock++) to Random.nextBytes(64)
+    }
+
+    private fun softwareKey(id: String) =
+        SoftwareKeyStore(context).put(SoftwareKey(id, "AES256-GCM", "symmetric", 256, true, true, Random.nextBytes(32)))
+
+    /**
+     * `local.deleteKey` of [keyId] with no key row, as the handler runs it:
+     * null when it is refused as an internal key, else whether the material
+     * of the key [KeystoreManager.deleteTarget] names was deleted.
+     */
+    private fun rpcDelete(keyId: String): Boolean? {
+        if (isInternalKey(keyId, keystore)) return null
+        val generation = keyMaterialGeneration(context, keyId, keystore).keys
+        val kind = KeystoreManager.deleteTarget(keyId, com.automatethethings.xkey.crypto.UserKeyKind.GENERAL, generation, legacy = false)
+        val held = KeyPolicyStore.KeyMaterialHeld(keyId)
+        val tombstone = readKeyMaterialGeneration(context, held, "android", keystore, kind)
+        return deleteKeyMaterial(context, held, KeyDeletionEntity(keyId, 1L, "android", tombstone), keystore)
     }
 
     /**
      * Software key `xkey_key_a` is generated, then hardware key `a`, whose
      * Keystore entry is `xkey_key_a`. Deleting `xkey_key_a` deletes the
-     * software key only: hardware key `a`'s entry and row remain.
+     * software key only: hardware key `a`'s entry remains.
      */
     @Test
-    fun deletingASoftwareKeyNamedLikeAHardwareAliasLeavesTheHardwareKey() = runBlocking<Unit> {
-        val software = "xkey_key_a"
-        val hardware = "a"
-        val keyDao = mockk<KeyDao>(relaxed = true)
-        coEvery { keyDao.exists(software) } returns true
-        coEvery { keyDao.exists(hardware) } returns true
-        val keystore = mockk<KeystoreManager>(relaxed = true)
-        // Hardware key `a` lives at Keystore alias `xkey_key_a`.
-        every { keystore.resolveKeystoreAlias(any()) } answers {
-            when (firstArg<String>()) {
-                hardware, software -> software
-                else -> null
-            }
-        }
-        mockkConstructor(SoftwareKeyStore::class)
-        every { anyConstructed<SoftwareKeyStore>().contains(any()) } answers { firstArg<String>() == software }
-        every { anyConstructed<SoftwareKeyStore>().delete(any()) } just runs
+    fun deletingASoftwareKeyNamedLikeAHardwareAliasLeavesTheHardwareKey() {
+        softwareKey("xkey_key_a")
+        keystoreKey("xkey_key_a")
 
-        val request = JSONObject().put("jsonrpc", "2.0").put("id", 1).put("method", MethodNames.LOCAL_DELETE_KEY)
-            .put("params", JSONObject().put("keyId", software))
-        val response = JSONObject(String(realHandler(keyDao, keystore).handleRawRequest(request.toString().toByteArray())))
-
-        assertTrue(
-            "the delete must succeed, got $response",
-            response.optJSONObject("result")?.optBoolean("deleted") == true
-        )
-        verify { anyConstructed<SoftwareKeyStore>().delete(software) }
-        coVerify { keyDao.deleteByKeyId(software) }
-        verify(exactly = 0) { keystore.deleteGeneralKey(hardware) }
-        verify(exactly = 0) { anyConstructed<SoftwareKeyStore>().delete(hardware) }
-        coVerify(exactly = 0) { keyDao.deleteByKeyId(hardware) }
+        assertEquals(true, rpcDelete("xkey_key_a"))
+        assertFalse("the software key must be deleted", SoftwareKeyStore(context).contains("xkey_key_a"))
+        assertEquals("hardware key a must survive", setOf("xkey_key_a"), entries.keys)
+        assertTrue("hardware key a is still a user key", keystore.userKeyIdInUse("a"))
     }
 
     /**
-     * The raw alias of a key with no record or software key of that ID still
-     * names the key itself: deleting `xkey_key_b` deletes hardware key `b`.
+     * The raw alias of a key with no user key of that id never names the key
+     * behind it: deleting `xkey_key_b` is refused as an internal key, and
+     * hardware key `b` stays.
      */
     @Test
-    fun aRawAliasWithNoKeyOfItsOwnStillDeletesItsKey() = runBlocking<Unit> {
-        val keyDao = mockk<KeyDao>(relaxed = true)
-        coEvery { keyDao.exists("b") } returns true
-        val keystore = mockk<KeystoreManager>(relaxed = true)
-        every { keystore.resolveKeystoreAlias(any()) } answers {
-            firstArg<String>().takeIf { it == "xkey_key_b" || it == "b" }?.let { "xkey_key_b" }
-        }
-        mockkConstructor(SoftwareKeyStore::class)
-        every { anyConstructed<SoftwareKeyStore>().contains(any()) } returns false
-        every { anyConstructed<SoftwareKeyStore>().delete(any()) } just runs
+    fun aRawAliasWithNoKeyOfItsOwnIsRefusedAndLeavesItsKey() {
+        keystoreKey("xkey_key_b")
 
-        val request = JSONObject().put("jsonrpc", "2.0").put("id", 2).put("method", MethodNames.LOCAL_DELETE_KEY)
-            .put("params", JSONObject().put("keyId", "xkey_key_b"))
-        realHandler(keyDao, keystore).handleRawRequest(request.toString().toByteArray())
-
-        verify { keystore.deleteGeneralKey("b") }
-        coVerify { keyDao.deleteByKeyId("b") }
-        coVerify(exactly = 0) { keyDao.deleteByKeyId("xkey_key_b") }
+        assertEquals("a raw alias is refused before any delete", null, rpcDelete("xkey_key_b"))
+        assertEquals(setOf("xkey_key_b"), entries.keys)
+        assertTrue(keystore.userKeyIdInUse("b"))
     }
 
     /**
-     * Raw credential alias `xkey_credential_k`, with no row or software key of
-     * its own, names key `k`: deleting it deletes that credential's private
-     * key, the Keystore entry itself, and answers deleted=true only once it
-     * is gone. General key `xkey_key_k`, which discovery also maps to `k`,
-     * survives.
+     * Raw credential alias `xkey_credential_k` names no user key of its own:
+     * its delete is refused, and both credential `k` and general key
+     * `xkey_key_k` survive it.
      */
     @Test
-    fun aRawCredentialAliasDeletesThatCredentialAndLeavesTheGeneralKey() = runBlocking<Unit> {
-        val credential = "xkey_credential_k"
-        val general = "xkey_key_k"
-        val aliases = java.util.Collections.synchronizedSet(hashSetOf(credential, general))
-        val keyDao = mockk<KeyDao>(relaxed = true)
-        val keystore = mockk<KeystoreManager>(relaxed = true)
-        every { keystore.resolveKeystoreAlias(any()) } answers {
-            val id = firstArg<String>()
-            listOf("xkey_credential_$id", "xkey_key_$id", id).firstOrNull { it in aliases }
-        }
-        every { keystore.deleteByAlias(any()) } answers { aliases.remove(firstArg<String>()) }
-        every { keystore.deleteGeneralKey(any()) } answers { aliases.remove("xkey_key_${firstArg<String>()}") }
-        every { keystore.deleteKey(any()) } answers {
-            keystore.resolveKeystoreAlias(firstArg())?.let { aliases.remove(it) } ?: false
-        }
-        mockkConstructor(SoftwareKeyStore::class)
-        every { anyConstructed<SoftwareKeyStore>().contains(any()) } returns false
-        every { anyConstructed<SoftwareKeyStore>().delete(any()) } just runs
+    fun aRawCredentialAliasIsRefusedAndLeavesBothKeysOfItsId() {
+        keystoreKey("xkey_credential_k")
+        keystoreKey("xkey_key_k")
 
-        val request = JSONObject().put("jsonrpc", "2.0").put("id", 3).put("method", MethodNames.LOCAL_DELETE_KEY)
-            .put("params", JSONObject().put("keyId", credential))
-        val response = JSONObject(String(realHandler(keyDao, keystore).handleRawRequest(request.toString().toByteArray())))
-
-        assertTrue("the credential's private key must be deleted, left $aliases", credential !in aliases)
-        assertTrue("the general key must survive, left $aliases", general in aliases)
-        assertTrue(
-            "the delete must succeed once the key is gone, got $response",
-            response.optJSONObject("result")?.optBoolean("deleted") == true
-        )
-        coVerify { keyDao.deleteByKeyId("k") }
-
-        // Deleting it again finds no key: nothing is reported deleted.
-        val again = JSONObject(String(realHandler(keyDao, keystore).handleRawRequest(request.toString().toByteArray())))
-        assertTrue(
-            "a delete that removes nothing must not report deleted=true, got $again",
-            again.optJSONObject("result")?.optBoolean("deleted") != true
-        )
-        assertTrue("the general key must survive a second delete, left $aliases", general in aliases)
+        assertEquals(null, rpcDelete("xkey_credential_k"))
+        assertEquals(setOf("xkey_credential_k", "xkey_key_k"), entries.keys)
     }
 
     /**
-     * Canonical ID `k` with both a credential `xkey_credential_k` and a general
-     * key `xkey_key_k` names the general key, as `local.deleteKey` always did:
-     * deleting `k` deletes `xkey_key_k` and leaves the credential usable.
+     * Canonical id `k` with both a credential `xkey_credential_k` and a
+     * general key `xkey_key_k` and no row names the general key, as
+     * `local.deleteKey` always did: deleting `k` deletes `xkey_key_k` and
+     * leaves the credential usable.
      */
     @Test
-    fun aCanonicalIdWithBothAliasesDeletesTheGeneralKeyAndLeavesTheCredential() = runBlocking<Unit> {
-        val credential = "xkey_credential_k"
-        val general = "xkey_key_k"
-        val aliases = java.util.Collections.synchronizedSet(hashSetOf(credential, general))
-        val keyDao = mockk<KeyDao>(relaxed = true)
-        coEvery { keyDao.exists("k") } returns true
-        val keystore = mockk<KeystoreManager>(relaxed = true)
-        every { keystore.resolveKeystoreAlias(any()) } answers {
-            val id = firstArg<String>()
-            listOf("xkey_credential_$id", "xkey_key_$id", id).firstOrNull { it in aliases }
-        }
-        every { keystore.deleteByAlias(any()) } answers { aliases.remove(firstArg<String>()) }
-        every { keystore.deleteGeneralKey(any()) } answers { aliases.remove("xkey_key_${firstArg<String>()}") }
-        mockkConstructor(SoftwareKeyStore::class)
-        every { anyConstructed<SoftwareKeyStore>().contains(any()) } returns false
-        every { anyConstructed<SoftwareKeyStore>().delete(any()) } just runs
+    fun aCanonicalIdWithBothAliasesDeletesTheGeneralKeyAndLeavesTheCredential() {
+        keystoreKey("xkey_credential_k")
+        keystoreKey("xkey_key_k")
 
-        val request = JSONObject().put("jsonrpc", "2.0").put("id", 4).put("method", MethodNames.LOCAL_DELETE_KEY)
-            .put("params", JSONObject().put("keyId", "k"))
-        val response = JSONObject(String(realHandler(keyDao, keystore).handleRawRequest(request.toString().toByteArray())))
-
-        assertTrue("the general key must be deleted, left $aliases", general !in aliases)
-        assertTrue("the credential must survive, left $aliases", credential in aliases)
-        assertTrue(
-            "the delete must succeed once the general key is gone, got $response",
-            response.optJSONObject("result")?.optBoolean("deleted") == true
-        )
-        verify(exactly = 0) { keystore.deleteByAlias(credential) }
-    }
-
-    /** The real [RequestHandler] with only its Android and storage edges mocked. */
-    private fun realHandler(keyDao: KeyDao, keystore: KeystoreManager): RequestHandler {
-        mockkStatic(Looper::class)
-        every { Looper.getMainLooper() } returns mockk(relaxed = true)
-        val database = mockk<XKeyDatabase>(relaxed = true)
-        every { database.keyDao() } returns keyDao
-        mockkObject(XKeyDatabase.Companion)
-        every { XKeyDatabase.getInstance(any()) } returns database
-        every { context.getSystemService(Context.KEYGUARD_SERVICE) } returns mockk<KeyguardManager>(relaxed = true)
-        mockkStatic(KeyStore::class)
-        every { KeyStore.getInstance("AndroidKeyStore") } returns mockk(relaxed = true)
-        every { context.filesDir } returns Files.createTempDirectory("xkey-files").toFile().apply { deleteOnExit() }
-        every { context.getSystemService(NotificationManager::class.java) } returns
-            mockk<NotificationManager>(relaxed = true)
-        return RequestHandler(context, keystore, biometricLauncher = null, sessionAuthManager = null)
+        assertEquals(true, rpcDelete("k"))
+        assertEquals("the credential must survive", setOf("xkey_credential_k"), entries.keys)
+        assertTrue(keystore.keyExists("k", UserKeyKind.CREDENTIAL))
     }
 }

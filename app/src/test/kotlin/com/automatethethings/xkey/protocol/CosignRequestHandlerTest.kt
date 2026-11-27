@@ -104,6 +104,8 @@ class CosignRequestHandlerTest {
 
     @Before
     fun setUp() {
+        // Main's shared ML-DSA store is per process: each test starts with none.
+        com.automatethethings.xkey.crypto.PqcSoftwareKeyStore.clearSharedForTest()
         mockkStatic(Log::class)
         every { Log.v(any(), any<String>()) } returns 0
         every { Log.d(any(), any<String>()) } returns 0
@@ -119,6 +121,10 @@ class CosignRequestHandlerTest {
         keyDao = mockk(relaxed = true)
         val database = mockk<XKeyDatabase>(relaxed = true)
         every { database.keyDao() } returns keyDao
+        // No key has a pending deletion.
+        every { database.keyPolicyDao() } returns mockk<com.automatethethings.xkey.storage.dao.KeyPolicyDao>(relaxed = true) {
+            io.mockk.coEvery { deletion(any()) } returns null
+        }
         mockkObject(XKeyDatabase.Companion)
         every { XKeyDatabase.getInstance(any()) } returns database
 
@@ -139,6 +145,10 @@ class CosignRequestHandlerTest {
         every { BiometricNotificationHelper.intentData(any()) } returns mockk(relaxed = true)
 
         keystoreManager = mockk(relaxed = true)
+        // Each key here is a general key: the use gate resolves the id's key
+        // from its row and material (#270 verify r4).
+        every { keystoreManager.exportKind(any()) } returns com.automatethethings.xkey.crypto.UserKeyKind.GENERAL
+        every { keystoreManager.rowKeyKind(any(), any(), any(), any()) } returns com.automatethethings.xkey.crypto.UserKeyKind.GENERAL
         coEvery { keystoreManager.signApproved(any(), any(), any(), any()) } returns signature
         every { keystoreManager.publicKeyDERAt(any()) } returns publicKeyDer
 
@@ -153,6 +163,7 @@ class CosignRequestHandlerTest {
 
     @After
     fun tearDown() {
+        com.automatethethings.xkey.crypto.PqcSoftwareKeyStore.clearSharedForTest()
         PromptOwnership.process.forgetSettled()
         Dispatchers.resetMain()
         unmockkAll()
@@ -454,6 +465,25 @@ class CosignRequestHandlerTest {
             ErrorCodes.OPERATION_DENIED,
             handler().handleRequest(request(keyId = fido2Key.keyId))
         )
+        assertNothingSigned()
+    }
+
+    /**
+     * PR #400 review (P1, left open in round 1): a co-signature is a media
+     * signature, which SignatureVerifier cannot verify under EdDSA; a
+     * signing key named by id goes through the same offersSigning check the
+     * auto-select uses, so a named Ed25519 key is refused and signs nothing.
+     */
+    @Test
+    fun `a named Ed25519 signing key answers OPERATION_DENIED and signs nothing`() = runTest {
+        for (algorithm in listOf("EdDSA", "Ed25519")) {
+            val ed = key("cosign-ed-$algorithm", "signing").copy(algorithm = algorithm)
+            coEvery { keyDao.getByKeyId(ed.keyId) } returns ed
+            assertError(
+                ErrorCodes.OPERATION_DENIED,
+                handler(withLauncher = false).handleRequest(request(keyId = ed.keyId))
+            )
+        }
         assertNothingSigned()
     }
 
@@ -902,7 +932,7 @@ class CosignRequestHandlerTest {
     private fun servedByRealKeystore(entries: MutableMap<String, java.security.KeyPair>): KeystoreManager {
         val real = realKeystoreOver(entries)
         every { keystoreManager.publicKeyDERAt(any()) } answers { real.publicKeyDERAt(firstArg()) }
-        every { keystoreManager.getPublicKeyDER(any()) } answers { real.getPublicKeyDER(firstArg()) }
+        every { keystoreManager.getPublicKeyDER(any(), any()) } answers { real.getPublicKeyDER(firstArg(), secondArg()) }
         coEvery { keystoreManager.signApproved(any(), any(), any(), any()) } coAnswers {
             real.signApproved(arg(0), arg(1), arg(2), arg(3))
         }
@@ -984,7 +1014,7 @@ class CosignRequestHandlerTest {
                 if (alias == signingAlias && ++signerAliasReads == 2) entries[signingAlias] = swapped
             }
         }
-        every { keystoreManager.getPublicKeyDER(any()) } answers { real.getPublicKeyDER(firstArg()) }
+        every { keystoreManager.getPublicKeyDER(any(), any()) } answers { real.getPublicKeyDER(firstArg(), secondArg()) }
         coEvery { keystoreManager.signApproved(any(), any(), any(), any()) } coAnswers {
             real.signApproved(arg(0), arg(1), arg(2), arg(3))
         }
