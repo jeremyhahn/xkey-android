@@ -69,6 +69,9 @@ class MainActivitySyncNowTest {
 
     @Before
     fun setUp() {
+        // The SnackbarManager outlives each test: forget a long Snackbar an
+        // earlier one left shown, or this test's notices would queue behind it.
+        DesktopKeysTestService.resetSnackbars()
         FakeAndroidKeyStore.install()
         database = Room.inMemoryDatabaseBuilder(app, XKeyDatabase::class.java)
             .allowMainThreadQueries()
@@ -89,6 +92,7 @@ class MainActivitySyncNowTest {
     @After
     fun tearDown() {
         XKeyDatabase.closeAndClear()
+        DesktopKeysTestService.resetSnackbars()
     }
 
     /** Makes [db] the instance [XKeyDatabase.getInstance] returns. */

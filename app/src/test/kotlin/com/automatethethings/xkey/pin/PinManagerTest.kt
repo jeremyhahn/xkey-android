@@ -111,8 +111,8 @@ class PinManagerTest {
         pinManager = PinManager(pinSettingsRepo, clock)
     }
 
-    /** The lockout's clocks; the wall clock starts at the real time the epoch-field tests use. */
-    private val clock = FakeLockoutClock(wall = System.currentTimeMillis())
+    /** The lockout's clocks, the only clocks these tests read: the epoch-field deadlines come from [FakeLockoutClock.wall]. */
+    private val clock = FakeLockoutClock(wall = 1_700_000_000_000L)
 
     @After
     fun tearDown() {
@@ -239,7 +239,7 @@ class PinManagerTest {
             soPinSaltBase64 = encodedSalt(),
             failedSoPinAttempts = 5,
             maxPinAttempts = 5,
-            soPinLockedUntil = System.currentTimeMillis() + 300_000L
+            soPinLockedUntil = clock.wall + 300_000L
         )
 
         pinManager.verifySOPIN("correct-so-pin")
@@ -360,7 +360,7 @@ class PinManagerTest {
             soPinLockedUntil = 0,
             userPinSet = true,
             failedUserPinAttempts = 5,
-            userPinLockedUntil = System.currentTimeMillis() + 300_000L
+            userPinLockedUntil = clock.wall + 300_000L
         )
 
         pinManager.resetLockout(soPIN = "correct-so-pin")
@@ -412,7 +412,7 @@ class PinManagerTest {
 
     @Test
     fun `getLockoutStatus returns locked when lockout in the future`() = runTest {
-        val futureTime = System.currentTimeMillis() + 120_000L
+        val futureTime = clock.wall + 120_000L
         currentSettings = PinSettingsData(
             failedSoPinAttempts = 5,
             maxPinAttempts = 5,
@@ -433,13 +433,47 @@ class PinManagerTest {
         currentSettings = PinSettingsData(
             failedUserPinAttempts = 5,
             maxPinAttempts = 5,
-            userPinLockedUntil = System.currentTimeMillis() - 1000L // in the past
+            userPinLockedUntil = clock.wall - 1000L // in the past
         )
 
         val status = pinManager.getLockoutStatus(PinType.USER_PIN)
 
         assertFalse(status.isLocked)
         assertEquals(0, status.recoverySeconds)
+    }
+
+    @Test
+    fun `getLockoutStatus returns not locked when lockout ends exactly now`() = runTest {
+        currentSettings = PinSettingsData(
+            failedUserPinAttempts = 5,
+            maxPinAttempts = 5,
+            userPinLockedUntil = clock.wall
+        )
+
+        val status = pinManager.getLockoutStatus(PinType.USER_PIN)
+
+        assertFalse(status.isLocked)
+        assertEquals(0, status.recoverySeconds)
+    }
+
+    @Test
+    fun `getLockoutStatus returns locked one millisecond before the lockout ends`() = runTest {
+        currentSettings = PinSettingsData(
+            failedUserPinAttempts = 5,
+            maxPinAttempts = 5,
+            userPinLockedUntil = clock.wall + 1
+        )
+
+        val locked = pinManager.getLockoutStatus(PinType.USER_PIN)
+
+        assertTrue(locked.isLocked)
+        assertEquals(1, locked.recoverySeconds)
+
+        clock.advance(1)
+        val expired = pinManager.getLockoutStatus(PinType.USER_PIN)
+
+        assertFalse(expired.isLocked)
+        assertEquals(0, expired.recoverySeconds)
     }
 
     // -------------------------------------------------------------------------
