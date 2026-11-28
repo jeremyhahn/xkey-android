@@ -21,6 +21,8 @@ import com.automatethethings.xkey.protocol.AttestTranscript
 import com.automatethethings.xkey.protocol.MethodNames
 import com.automatethethings.xkey.protocol.SasTestVectors
 import com.automatethethings.xkey.protocol.SessionBindingProvider
+import com.automatethethings.xkey.testing.ThreadWait
+import com.automatethethings.xkey.testing.WatchedDispatcher
 import io.mockk.every
 import io.mockk.mockkStatic
 import io.mockk.unmockkAll
@@ -33,7 +35,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
@@ -80,11 +82,22 @@ class BleClientPhoneInitiatedSasTest {
         unmockkAll()
     }
 
+    /**
+     * The client's own work runs here. When it is idle, a request the desktop
+     * sent has reached its worker and the worker its wait for the user's
+     * answer (or served it, were that wait missing), and a teardown launched
+     * has run.
+     */
+    private val clientWork = WatchedDispatcher()
+
     private fun harness(
         handler: PhoneInitiatedRequestHandler?,
         confirmation: PairingConfirmationCallback?
-    ): BleClientHarness =
-        BleClientHarness(inboundRequests = handler, pairingConfirmation = confirmation).also { harness = it }
+    ): BleClientHarness = BleClientHarness(
+        inboundRequests = handler,
+        pairingConfirmation = confirmation,
+        dispatcher = clientWork
+    ).also { harness = it }
 
     /** The code the client shows is the shared vector's for the shared binding. */
     @Test
@@ -118,7 +131,7 @@ class BleClientPhoneInitiatedSasTest {
         lateinit var h: BleClientHarness
         val confirmation = RecordingConfirmation {
             h.desktopSends(attestRequest(id = 7))
-            delay(200)
+            clientWork.awaitIdle("the request reaches its worker before the answer")
             false
         }
         h = harness(handler, confirmation)
@@ -130,7 +143,8 @@ class BleClientPhoneInitiatedSasTest {
             // expected
         }
 
-        delay(200)
+        // The rejected session's worker and teardown have run.
+        clientWork.awaitIdle("the rejected session's work ends")
         assertEquals(1, confirmation.asked.size)
         assertTrue("nothing may be served on a rejected session", handler.requests.isEmpty())
         assertTrue("nothing may be answered on a rejected session", h.receivedResponses.isEmpty())
@@ -146,7 +160,7 @@ class BleClientPhoneInitiatedSasTest {
         var servedBeforeTheAnswer = -1
         val confirmation = RecordingConfirmation {
             h.desktopSends(attestRequest(id = 9))
-            delay(300)
+            clientWork.awaitIdle("the request reaches its worker before the answer")
             servedBeforeTheAnswer = handler.requests.size
             true
         }
@@ -186,7 +200,7 @@ class BleClientPhoneInitiatedSasTest {
             h.gatt, BluetoothGatt.GATT_SUCCESS, BluetoothProfile.STATE_DISCONNECTED
         )
 
-        assertFalse("a session whose link dropped must not be reported up", withTimeout(5_000) { connecting.await() })
+        assertFalse("a session whose link dropped must not be reported up", withTimeout(ThreadWait.HANG_GUARD_MILLIS) { connecting.await() })
         assertTrue("the disconnect must end the prompt", prompt.cancelled.await())
         assertFalse(h.client.isConnected())
     }
@@ -201,8 +215,8 @@ class BleClientPhoneInitiatedSasTest {
         prompt.awaitShown()
         h.client.disconnect()
 
-        assertFalse(withTimeout(5_000) { connecting.await() })
-        assertTrue("disconnect() must end the prompt", withTimeout(5_000) { prompt.cancelled.await() })
+        assertFalse(withTimeout(ThreadWait.HANG_GUARD_MILLIS) { connecting.await() })
+        assertTrue("disconnect() must end the prompt", withTimeout(ThreadWait.HANG_GUARD_MILLIS) { prompt.cancelled.await() })
         assertFalse(h.client.isConnected())
     }
 
@@ -224,10 +238,10 @@ class BleClientPhoneInitiatedSasTest {
         // timeout around it could not end a destroy() that hangs.
         val destroyed = CompletableDeferred<Unit>()
         CoroutineScope(Dispatchers.Default).launch { h.client.destroy(); destroyed.complete(Unit) }
-        withTimeout(5_000) { destroyed.await() }
+        withTimeout(ThreadWait.HANG_GUARD_MILLIS) { destroyed.await() }
 
-        assertTrue("destroy() must end the prompt", withTimeout(5_000) { prompt.cancelled.await() })
-        assertFalse(withTimeout(5_000) { connecting.await() })
+        assertTrue("destroy() must end the prompt", withTimeout(ThreadWait.HANG_GUARD_MILLIS) { prompt.cancelled.await() })
+        assertFalse(withTimeout(ThreadWait.HANG_GUARD_MILLIS) { connecting.await() })
         assertFalse(h.client.isConnected())
     }
 
@@ -248,13 +262,13 @@ class BleClientPhoneInitiatedSasTest {
         h = harness(handler, confirmation)
 
         val connecting = async { h.client.connect(h.address, randomKey()) }
-        withTimeout(5_000) { shown.await() }
+        withTimeout(ThreadWait.HANG_GUARD_MILLIS) { shown.await() }
         h.client.disconnect()
-        delay(300)
+        clientWork.awaitIdle("the disconnect's teardown runs")
         allow.complete(Unit)
 
-        assertFalse("an Allow for a retired session must not report it up", withTimeout(5_000) { connecting.await() })
-        delay(200)
+        assertFalse("an Allow for a retired session must not report it up", withTimeout(ThreadWait.HANG_GUARD_MILLIS) { connecting.await() })
+        clientWork.awaitIdle("the retired session's work ends")
         assertFalse(h.client.isConnected())
         assertTrue("nothing may be served on a retired session", handler.requests.isEmpty())
         assertTrue("nothing may be answered on a retired session", h.receivedResponses.isEmpty())
@@ -298,10 +312,10 @@ class BleClientPhoneInitiatedSasTest {
             holdUntilFinishedOrWaitingForTheTrustStep(dropping)
         }
 
-        val connected = withTimeout(5_000) { h.client.connect(h.address, randomKey()) }
+        val connected = withTimeout(ThreadWait.HANG_GUARD_MILLIS) { h.client.connect(h.address, randomKey()) }
 
         val dropping = drop.get() ?: throw AssertionError("the seam was never reached")
-        withContext(Dispatchers.IO) { dropping.join(5_000) }
+        withContext(Dispatchers.IO) { dropping.join(ThreadWait.HANG_GUARD_MILLIS) }
         assertFalse("the drop must finish", dropping.isAlive)
         val retired = published.get()!!
         assertEquals("nothing may be trusted before the publication", false, trustedBeforePublication.get())
@@ -315,7 +329,11 @@ class BleClientPhoneInitiatedSasTest {
             trustedWhenEnded.get(), fieldOf(retired, "trusted") as Boolean
         )
         assertTrue("the connection was the client's when it was trusted", connected)
-        delay(300)
+        // The drop's teardown takes stateMutex after the trust step set
+        // Connected, so Disconnected now means the teardown has run.
+        withTimeout(ThreadWait.HANG_GUARD_MILLIS) {
+            h.client.connectionState.first { it == ClientConnectionState.Disconnected }
+        }
         assertFalse(h.client.isConnected())
     }
 
@@ -324,18 +342,13 @@ class BleClientPhoneInitiatedSasTest {
      * connectionLock step in BleClient.takeIfOwned, the one the trust step
      * holds. A block on any other monitor does not release the gate.
      */
-    private fun holdUntilFinishedOrWaitingForTheTrustStep(thread: Thread) {
-        val deadline = System.nanoTime() + 5_000_000_000L
-        while (thread.isAlive) {
-            if (thread.state == Thread.State.BLOCKED &&
-                thread.stackTrace.firstOrNull()?.methodName?.startsWith("takeIfOwned") == true
-            ) {
-                return
-            }
-            if (System.nanoTime() > deadline) throw AssertionError("the drop neither finished nor waited")
-            Thread.sleep(1)
+    private fun holdUntilFinishedOrWaitingForTheTrustStep(thread: Thread) =
+        ThreadWait.until("the drop neither finished nor waited") {
+            !thread.isAlive || (
+                thread.state == Thread.State.BLOCKED &&
+                    thread.stackTrace.firstOrNull()?.methodName?.startsWith("takeIfOwned") == true
+                )
         }
-    }
 
     /**
      * Outbound too: until the user confirms, sendRequest refuses and nothing
@@ -351,10 +364,10 @@ class BleClientPhoneInitiatedSasTest {
         })
 
         val connecting = async { h.client.connect(h.address, randomKey()) }
-        withTimeout(5_000) { shown.await() }
+        withTimeout(ThreadWait.HANG_GUARD_MILLIS) { shown.await() }
 
         try {
-            withTimeout(5_000) { h.client.sendRequest(appRequest(id = 21)) }
+            withTimeout(ThreadWait.HANG_GUARD_MILLIS) { h.client.sendRequest(appRequest(id = 21)) }
             fail("sendRequest must refuse a session whose SAS is not confirmed")
         } catch (e: BleClientException) {
             // expected
@@ -362,9 +375,9 @@ class BleClientPhoneInitiatedSasTest {
         assertTrue("no request may reach the desktop before the SAS is confirmed", h.receivedRequests.isEmpty())
 
         answer.complete(true)
-        assertTrue(withTimeout(5_000) { connecting.await() })
+        assertTrue(withTimeout(ThreadWait.HANG_GUARD_MILLIS) { connecting.await() })
 
-        withTimeout(5_000) { h.client.sendRequest(appRequest(id = 22)) }
+        withTimeout(ThreadWait.HANG_GUARD_MILLIS) { h.client.sendRequest(appRequest(id = 22)) }
         assertEquals("a confirmed session sends", 1, h.receivedRequests.size)
         assertEquals(22L, JSONObject(String(h.receivedRequests[0], Charsets.UTF_8)).getLong("id"))
     }
@@ -389,7 +402,7 @@ class BleClientPhoneInitiatedSasTest {
             }
         }
 
-        suspend fun awaitShown() = withTimeout(5_000) { shown.await() }
+        suspend fun awaitShown() = withTimeout(ThreadWait.HANG_GUARD_MILLIS) { shown.await() }
     }
 
     private class RecordingConfirmation(

@@ -43,6 +43,7 @@ import com.automatethethings.xkey.protocol.SessionBindingProvider
 import com.automatethethings.xkey.util.getStringOrNull
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -102,7 +103,9 @@ class BleClient(
      * this phone opens is trusted only once it answers yes; with none, every
      * session is refused (no unattended trust).
      */
-    private val pairingConfirmation: PairingConfirmationCallback? = null
+    private val pairingConfirmation: PairingConfirmationCallback? = null,
+    /** Runs the client's own work (inbound consumer, request workers, teardowns); tests pass one they can watch. */
+    dispatcher: CoroutineDispatcher = Dispatchers.Default
 ) {
     companion object {
         private const val TAG = "BleClient"
@@ -158,7 +161,7 @@ class BleClient(
     }
 
     // Coroutine scope for async operations
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val scope = CoroutineScope(SupervisorJob() + dispatcher)
 
     // Connection state flow for UI updates
     private val _connectionState = MutableStateFlow<ClientConnectionState>(ClientConnectionState.Disconnected)

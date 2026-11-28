@@ -35,6 +35,8 @@ import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeout
@@ -80,7 +82,9 @@ class BleClientHarness(
      * Who confirms the session's SAS. Confirms by default, so the tests that
      * are not about the SAS see a session the user accepted.
      */
-    pairingConfirmation: PairingConfirmationCallback? = CONFIRMS
+    pairingConfirmation: PairingConfirmationCallback? = CONFIRMS,
+    /** Where the client runs its own work. */
+    dispatcher: CoroutineDispatcher = Dispatchers.Default
 ) {
 
     // -----------------------------------------------------------------
@@ -260,7 +264,7 @@ class BleClientHarness(
     val statusCharacteristic: BluetoothGattCharacteristic = mockk(relaxed = true)
     val cccd: BluetoothGattDescriptor = mockk(relaxed = true)
 
-    val client = BleClient(context, inboundRequests, pairingConfirmation)
+    val client = BleClient(context, inboundRequests, pairingConfirmation, dispatcher)
     val probe = BleClientProbe(client)
 
     /** The desktop's Noise responder, so tests can assert on its identity. */
