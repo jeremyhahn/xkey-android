@@ -32,6 +32,7 @@ import androidx.credentials.provider.CredentialProviderService
 import androidx.credentials.provider.ProviderClearCredentialStateRequest
 import com.automatethethings.xkey.credential.handler.CreateCredentialHandler
 import com.automatethethings.xkey.credential.handler.GetCredentialHandler
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -68,9 +69,12 @@ import kotlinx.coroutines.launch
  * 4. The app will now handle passkey requests from browsers and apps
  */
 @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
-class XKeyCredentialService : CredentialProviderService() {
+class XKeyCredentialService(
+    /** Runs the request callbacks' work; tests pass one they can watch. */
+    dispatcher: CoroutineDispatcher = Dispatchers.IO
+) : CredentialProviderService() {
 
-    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val serviceScope = CoroutineScope(SupervisorJob() + dispatcher)
 
     private val createHandler by lazy { CreateCredentialHandler(this) }
     private val getHandler by lazy { GetCredentialHandler(this) }
