@@ -42,6 +42,7 @@ import com.automatethethings.xkey.storage.entity.CredentialMetadataEntity
 import com.automatethethings.xkey.storage.entity.KeyEntity
 import com.automatethethings.xkey.storage.entity.SharingPolicyType
 import com.automatethethings.xkey.testing.ReleaseMocks
+import com.automatethethings.xkey.testing.WatchedDispatcher
 import io.mockk.coEvery
 import io.mockk.every
 import io.mockk.mockk
@@ -114,6 +115,9 @@ class FidoGattCtap2ClientTest {
 
     /** The first notified frame no reply has consumed yet. */
     private var cursor = 0
+
+    /** The server's sessions, retries and closes run here, so a test can wait until they are done. */
+    private val serverWork = WatchedDispatcher()
 
     private lateinit var server: FidoGattServer
 
@@ -253,7 +257,7 @@ class FidoGattCtap2ClientTest {
                 return authenticator.handle(request, onUserActionNeeded)
             }
         }
-        server = FidoGattServer(context, handler)
+        server = FidoGattServer(context, handler, dispatcher = serverWork)
         assertTrue(server.start())
         callback.captured.onConnectionStateChange(device, BluetoothGatt.GATT_SUCCESS, BluetoothProfile.STATE_CONNECTED)
         subscribe()
@@ -592,12 +596,18 @@ class FidoGattCtap2ClientTest {
         throw AssertionError("no reply within $timeoutMillis ms; frames: ${notified.size - cursor}")
     }
 
-    /** Nothing follows the last reply: no second answer, no late KEEPALIVE. */
+    /**
+     * Nothing follows the last reply: no second answer, no late KEEPALIVE.
+     * The check runs once the server is quiet: no task left to run and no
+     * delay pending, so nothing is left that could still notify. A KEEPALIVE
+     * loop left running keeps its delay pending and fails the wait.
+     */
     private fun assertNothingMoreNotified() {
-        repeat(5) {
-            Thread.sleep(100)
+        do {
+            val seen = notified.size
             release()
-        }
+            serverWork.awaitQuiet("the server's work after the reply never ended")
+        } while (seen != notified.size)
         val late = synchronized(notified) { notified.subList(cursor, notified.size).map { it[0] } }
         assertTrue("frames after the reply: $late", late.isEmpty())
     }

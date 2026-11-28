@@ -22,6 +22,7 @@ import android.view.ViewGroup
 import android.widget.Button
 import android.widget.EditText
 import android.widget.TextView
+import androidx.lifecycle.lifecycleScope
 import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
 import com.automatethethings.xkey.R
@@ -30,6 +31,7 @@ import com.automatethethings.xkey.settings.BootstrapSettingsRepository
 import com.automatethethings.xkey.settings.TrustedComputingSettingsRepository
 import com.automatethethings.xkey.storage.XKeyDatabase
 import com.automatethethings.xkey.testing.MainLooperWait
+import kotlinx.coroutines.job
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -104,9 +106,14 @@ class SettingsActivityBootstrapRefusalTest {
             assertTrue("settings never finished loading", waitUntil { !isInitializing(activity) })
             val edit = editTextWithLabel(activity, label)
             edit.setText(text)
+            // The focus loss launches the save; its message, if any, is shown
+            // before the save's coroutine ends, so wait for that end.
+            val screenJob = activity.lifecycleScope.coroutineContext.job
+            val running = screenJob.children.toSet()
             edit.onFocusChangeListener.onFocusChange(edit, false)
+            val saves = screenJob.children.filter { it !in running }.toList()
             waitUntil { message in shownTexts(activity) || settled(runBlocking { repository.getSettings() }) }
-            Thread.sleep(200)
+            MainLooperWait.until("the save never finished") { saves.all { it.isCompleted } }
             idleMainLooper()
             shown = message in shownTexts(activity)
             assertEquals("the typed text stays in the field", text, editTextWithLabel(activity, label).text.toString())
