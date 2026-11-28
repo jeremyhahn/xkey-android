@@ -129,11 +129,13 @@ class MainActivitySyncNowTest {
         idleMainLooper()
     }
 
-    /** The text of every Snackbar under [root]. */
-    private fun snackbarTexts(root: View): List<String> {
+    /** The text of every Snackbar under [root]; with [shownOnly], only of those on screen. */
+    private fun snackbarTexts(root: View, shownOnly: Boolean = false): List<String> {
         val texts = mutableListOf<String>()
         fun walk(view: View) {
-            if (view is TextView && view.id == com.google.android.material.R.id.snackbar_text) {
+            if (view is TextView && view.id == com.google.android.material.R.id.snackbar_text &&
+                (!shownOnly || view.isShown)
+            ) {
                 texts += view.text.toString()
             }
             if (view is ViewGroup) (0 until view.childCount).forEach { walk(view.getChildAt(it)) }
@@ -142,15 +144,42 @@ class MainActivitySyncNowTest {
         return texts
     }
 
-    private fun snackbarTexts(scenario: ActivityScenario<MainActivity>): List<String> {
+    private fun snackbarTexts(
+        scenario: ActivityScenario<MainActivity>,
+        shownOnly: Boolean = false
+    ): List<String> {
         var texts = emptyList<String>()
-        scenario.onActivity { texts = snackbarTexts(it.window.decorView) }
+        scenario.onActivity { texts = snackbarTexts(it.window.decorView, shownOnly) }
         return texts
     }
 
+    /**
+     * Asserts a Snackbar saying [expected] is on screen. One Snackbar replacing
+     * another goes through the SnackbarManager queue, a layout pass and the
+     * enter animation, so this moves the looper on in small steps until the
+     * expected Snackbar is shown, and gives up after [SNACKBAR_STEPS] steps,
+     * well inside a short Snackbar's display time.
+     */
     private fun assertShows(scenario: ActivityScenario<MainActivity>, expected: String) {
+        repeat(SNACKBAR_STEPS) {
+            if (expected in snackbarTexts(scenario, shownOnly = true)) return
+            idleMainLooper(SNACKBAR_STEP)
+        }
         val texts = snackbarTexts(scenario)
-        assertTrue("no Snackbar says \"$expected\": $texts", expected in texts)
+        assertTrue("no Snackbar shows \"$expected\": $texts", expected in snackbarTexts(scenario, shownOnly = true))
+    }
+
+    /**
+     * Moves the looper on until no Snackbar is on screen: a short one times out
+     * after 1.5 s and then animates out. Gives up after [DISMISS_STEPS] steps.
+     */
+    private fun awaitNoSnackbarShown(scenario: ActivityScenario<MainActivity>) {
+        repeat(DISMISS_STEPS) {
+            if (snackbarTexts(scenario, shownOnly = true).isEmpty()) return
+            idleMainLooper(SNACKBAR_STEP)
+        }
+        val texts = snackbarTexts(scenario, shownOnly = true)
+        assertTrue("a Snackbar is still shown: $texts", texts.isEmpty())
     }
 
     private fun completeText(pushed: Int, pulled: Int, desktopLine: String) =
@@ -275,6 +304,10 @@ class MainActivitySyncNowTest {
 
         launch().use { scenario ->
             tapSyncNow(scenario)
+            assertShows(scenario, app.getString(R.string.sync_in_progress))
+            // Let the first tap's notice time out, so what is shown next is the
+            // second tap's own, not one Snackbar queued behind another.
+            awaitNoSnackbarShown(scenario)
             tapSyncNow(scenario)
 
             coVerify(exactly = 1) { service.syncNow() }
@@ -300,5 +333,14 @@ class MainActivitySyncNowTest {
         val failed = app.getString(R.string.sync_failed, "")
         val texts = snackbarTexts(requireNotNull(decor))
         assertTrue("a cancelled sync was reported as failed: $texts", texts.none { it.startsWith(failed) })
+    }
+
+    private companion object {
+        /** Looper steps [assertShows] allows: 20 x 50 ms, under a short Snackbar's 1.5 s. */
+        const val SNACKBAR_STEPS = 20
+
+        /** Looper steps [awaitNoSnackbarShown] allows: 80 x 50 ms, past a short Snackbar's timeout. */
+        const val DISMISS_STEPS = 80
+        val SNACKBAR_STEP: Duration = Duration.ofMillis(50)
     }
 }
