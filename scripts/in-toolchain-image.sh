@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 # Run a command in the toolchain image against a copy of the checkout, hardened, with cache volumes and the job's CPU bound. Usage: scripts/in-toolchain-image.sh <image> <command...>
+# CI_CGROUP_PARENT (default ci.slice) is the cgroup parent of every container this starts: on the runner host
+# ci.slice bounds all CI containers together, and a container outside it is not bounded at all. Set it empty
+# on a host with no ci.slice to pass no --cgroup-parent.
+# IN_IMAGE_MAX_CPUS (default 8) caps --cpus, an explicit IN_IMAGE_CPUS too, so one job does not ask for the
+# whole host and crowd out the other CI containers in ci.slice.
 set -euo pipefail
 
 if [ "$#" -lt 2 ]; then
@@ -49,14 +54,29 @@ fi
 case $cpus in
   "" | 0 | *[!0-9]*) echo "IN_IMAGE_CPUS must be a positive integer: $cpus" >&2; exit 2 ;;
 esac
+max_cpus=${IN_IMAGE_MAX_CPUS:-8}
+case $max_cpus in
+  "" | 0 | *[!0-9]*) echo "IN_IMAGE_MAX_CPUS must be a positive integer: $max_cpus" >&2; exit 2 ;;
+esac
+cgroup_parent=${CI_CGROUP_PARENT-ci.slice}
+cgroup_re='^[A-Za-z0-9][A-Za-z0-9_.@:/-]*$'
+if [ -n "$cgroup_parent" ] && ! [[ $cgroup_parent =~ $cgroup_re ]]; then
+  echo "CI_CGROUP_PARENT must be a cgroup name such as ci.slice, or empty: $cgroup_parent" >&2
+  exit 2
+fi
+cgroup_args=()
+if [ -n "$cgroup_parent" ]; then cgroup_args=(--cgroup-parent "$cgroup_parent"); fi
 # Cap --cpus at the daemon's NCPU.
 daemon_cpus=$(docker info --format '{{.NCPU}}' 2>/dev/null || true)
 case $daemon_cpus in
   "" | 0 | *[!0-9]*) ;;
   *) if [ "$cpus" -gt "$daemon_cpus" ]; then cpus=$daemon_cpus; fi ;;
 esac
+# Cap --cpus at IN_IMAGE_MAX_CPUS, an explicit IN_IMAGE_CPUS too.
+if [ "$cpus" -gt "$max_cpus" ]; then cpus=$max_cpus; fi
 args=(
   --name "$name"
+  "${cgroup_args[@]}"
   --cpus "$cpus"
   --env GOMAXPROCS="$cpus"
   --env GOFLAGS="-p=$cpus"
@@ -77,7 +97,7 @@ args=(
 modcache=/tmp/gomodcache
 if [ "$cache" = on ]; then
   vols="${prefix}cache-${class}"
-  docker run --rm --network none --cap-drop ALL --cap-add CHOWN \
+  docker run --rm "${cgroup_args[@]}" --cpus 1 --network none --cap-drop ALL --cap-add CHOWN \
     --security-opt no-new-privileges:true --user 0:0 \
     -v "$vols-gobuild:/c/gobuild" -v "$vols-golangci:/c/golangci" -v "$vols-gomod:/c/gomod" \
     "$image" sh -c "for d in /c/*; do [ \"\$(stat -c %u:%g \"\$d\")\" = $uid:$uid ] || chown $uid:$uid \"\$d\"; done" >/dev/null
