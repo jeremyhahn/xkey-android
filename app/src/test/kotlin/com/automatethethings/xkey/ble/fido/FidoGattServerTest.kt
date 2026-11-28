@@ -29,6 +29,7 @@ import android.content.Context
 import android.os.Build
 import com.automatethethings.xkey.crypto.CborDecoder
 import com.automatethethings.xkey.testing.ReleaseMocks
+import com.automatethethings.xkey.testing.ThreadWait
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.slot
@@ -546,7 +547,7 @@ class FidoGattServerTest {
         }
 
         pingFrom(device, 0x0A)
-        otherReply!!.join(5_000)
+        ThreadWait.join(otherReply ?: throw AssertionError("client B never wrote"), "client B's reply never finished")
 
         val toA = sent.filter { it.first == device.address }.map { it.second.toList() }
         val toB = sent.filter { it.first == other.address }.map { it.second.toList() }
@@ -627,14 +628,18 @@ class FidoGattServerTest {
         // disconnect is being handled on another thread.
         val other = mockk<BluetoothDevice>(relaxed = true)
         val disconnecting = CountDownLatch(1)
+        var disconnect: Thread? = null
         every { other.address } answers {
             if (disconnecting.count > 0) {
                 disconnecting.countDown()
-                thread {
+                val thread = thread {
                     callback.captured.onConnectionStateChange(
                         device, BluetoothGatt.GATT_SUCCESS, BluetoothProfile.STATE_DISCONNECTED
                     )
-                }.join(200)
+                }
+                disconnect = thread
+                // The disconnect runs until it ends or waits on the lock this write holds.
+                ThreadWait.untilStopped(thread, "the disconnect neither ended nor waited on the write")
             }
             "02:00:00:00:00:01"
         }
@@ -642,6 +647,8 @@ class FidoGattServerTest {
         FidoBle.fragment(FidoBle.CMD_MSG, byteArrayOf(Ctap2.CMD_GET_INFO.toByte()), 20).forEach {
             callback.captured.onCharacteristicWriteRequest(other, 2, cp, false, true, 0, it)
         }
+        // The write has let go of the lock: the disconnect finishes, then its scheduled work runs.
+        ThreadWait.join(disconnect ?: throw AssertionError("the disconnect never started"), "the disconnect never finished")
         drain()
 
         assertEquals("no client outlives its disconnect", 0, clientCount())

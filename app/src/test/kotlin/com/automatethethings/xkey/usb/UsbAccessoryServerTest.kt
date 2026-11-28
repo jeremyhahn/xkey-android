@@ -351,7 +351,7 @@ class UsbAccessoryServerTest {
         }
 
         attach()
-        detacher!!.join(5_000)
+        ThreadWait.join(detacher ?: throw AssertionError("the open never ran"), "the detach never finished")
 
         assertTrue("the detach was lost", awaitTrue { closedCalls == 1 })
         verify { pfd.close() }

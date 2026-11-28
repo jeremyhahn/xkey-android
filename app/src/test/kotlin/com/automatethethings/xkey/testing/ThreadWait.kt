@@ -42,6 +42,20 @@ object ThreadWait {
     fun untilBlocked(thread: Thread, what: String = "${thread.name} waits on a lock") =
         until(what) { thread.state == Thread.State.BLOCKED }
 
+    /**
+     * Waits until [thread] can go no further by itself: it has ended, or it
+     * is blocked on a monitor or waiting. Use it to let another thread run
+     * as far as it can before the caller goes on; join it before asserting.
+     */
+    fun untilStopped(thread: Thread, what: String = "${thread.name} neither ended nor waited") =
+        until(what) { thread.state != Thread.State.NEW && thread.state != Thread.State.RUNNABLE }
+
+    /** Joins [thread]; fails with [what] if it has not ended within [HANG_GUARD_MILLIS]. */
+    fun join(thread: Thread, what: String = "${thread.name} never ended") {
+        thread.join(HANG_GUARD_MILLIS)
+        if (thread.isAlive) throw AssertionError("$what: not within $HANG_GUARD_MILLIS ms")
+    }
+
     /** Waits until [latch] is counted down; fails with [what] if it never is. */
     fun await(latch: CountDownLatch, what: String) {
         if (!latch.await(HANG_GUARD_MILLIS, TimeUnit.MILLISECONDS)) {
