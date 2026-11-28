@@ -5,7 +5,7 @@
 	tools-check tools-check-trivy tools-check-actionlint tools-check-gradle \
 	deps-check deps-check-test docker-build docker-build-toolchain docker-build-it \
 	docker-run toolchain-image it-image toolchain-image-id it-image-id device-check coverage it-jvm-test \
-	reaper-test revert-red-main-test code-review-test runner-select-test ci-tier-test build-image-test image-tag-test fetch-test apt-retry-test gradle-retry-test ci-verify-signatures-test release-check
+	reaper-test revert-red-main-test code-review-test runner-select-test ci-tier-test build-image-test image-tag-test fetch-test apt-retry-test in-toolchain-image-test gradle-retry-test ci-verify-signatures-test release-check
 
 .DEFAULT_GOAL := help
 
@@ -119,7 +119,7 @@ lint: android-lint ## Android lint on the debug variant (the repository's own ga
 # of lint: CI's lint-gates job runs `make lint-gates` in parallel with the
 # image job's `make lint`, so nothing runs twice there. It runs without -k,
 # so the first failing gate ends the run.
-lint-gates: actionlint closing-links-test revert-red-main-test runner-select-test ci-tier-test reaper-test build-image-test image-tag-test fetch-test apt-retry-test gradle-retry-test deps-check-test code-review-test ci-verify-signatures-test ## actionlint over .github/workflows + the signature check's fixtures + the revert workflow's closing-link and resume fixtures + the review workflow's fixtures + the reaper's fixtures + the concurrent image build fixtures + the image tag's index sums + deps-check's fixtures (offline) + the image download helper's fixtures + the image builds' apt retries + the toolchain image's Gradle download retry
+lint-gates: actionlint closing-links-test revert-red-main-test runner-select-test ci-tier-test reaper-test build-image-test image-tag-test fetch-test apt-retry-test in-toolchain-image-test gradle-retry-test deps-check-test code-review-test ci-verify-signatures-test ## actionlint over .github/workflows + the signature check's fixtures + the revert workflow's closing-link and resume fixtures + the review workflow's fixtures + the reaper's fixtures + the concurrent image build fixtures + the image tag's index sums + deps-check's fixtures (offline) + the image download helper's fixtures + the image builds' apt retries + the toolchain image's Gradle download retry + the toolchain launcher's cgroup parent and CPU cap
 
 android-lint: ## Android lint on the debug variant (abortOnError, see app/build.gradle.kts)
 	$(GRADLE) lintDebug
@@ -166,6 +166,9 @@ fetch-test: ## Test build/docker/devcontainer/fetch.sh, the image download helpe
 
 apt-retry-test: ## Test that every Dockerfile stage running apt-get has build/docker/devcontainer/apt-retries.conf, and that apt-get update with it recovers from HTTP 500s of a loopback stub mirror and still fails on one that always fails (bash, apt-get, java; offline, unprivileged)
 	./scripts/apt-retry-test.sh
+
+in-toolchain-image-test: ## Test that scripts/in-toolchain-image.sh starts its containers under CI_CGROUP_PARENT (default ci.slice, empty for none, a bad name refused) with at most IN_IMAGE_MAX_CPUS (default 8) CPUs, against a fake docker (bash, offline)
+	./scripts/in-toolchain-image-test.sh
 
 gradle-retry-test: ## Test that the toolchain image's warm stage runs its Gradle dependency download through gradle-retry, and that the script, extracted from the Dockerfile, retries a resolution failure a bounded number of times against a stubbed gradle and still fails closed (bash, offline)
 	./scripts/gradle-retry-test.sh
