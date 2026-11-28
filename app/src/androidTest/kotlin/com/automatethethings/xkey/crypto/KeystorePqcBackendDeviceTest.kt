@@ -18,6 +18,7 @@ package com.automatethethings.xkey.crypto
 import android.os.Build
 import android.security.keystore.KeyInfo
 import android.security.keystore.KeyProperties
+import android.util.Log
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -30,7 +31,9 @@ import org.bouncycastle.crypto.util.PublicKeyFactory
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Assume.assumeTrue
 import org.junit.Before
 import org.junit.Test
@@ -58,9 +61,12 @@ class KeystorePqcBackendDeviceTest {
     @Before
     fun setUp() {
         assumeTrue("ML-DSA needs API ${KeystorePqcBackend.MIN_SDK}", Build.VERSION.SDK_INT >= KeystorePqcBackend.MIN_SDK)
+        // The app's own probe uses the same probe aliases: let it end first.
+        (PqcHardware.backend as? KeystorePqcBackend)?.let { runBlocking { it.awaitProbe(PROBE_TIMEOUT_MS) } }
         backend = KeystorePqcBackend()
         backend.startProbe(scope)
         supported = runBlocking { backend.awaitProbe(PROBE_TIMEOUT_MS) }
+        Log.i(TAG, "hardware sets ${supported.map { it.wireName }}")
         assumeTrue("no hardware ML-DSA on this device", supported.isNotEmpty())
     }
 
@@ -133,9 +139,35 @@ class KeystorePqcBackendDeviceTest {
         assertEquals(set.oid, SubjectPublicKeyInfo.getInstance(spki).algorithm.algorithm.id)
     }
 
+    @Test
+    fun refusesEverySetTheProbeDidNotReport() {
+        for (set in MlDsaParameterSet.entries.filter { it !in supported }) {
+            try {
+                backend.generate(alias(set), set, authDurationSeconds = -1, preferStrongBox = false)
+                fail("${set.wireName} generated without a probe report")
+            } catch (expected: UnsupportedAlgorithmException) {
+                // refused, as the probe did not report the set
+            }
+            assertFalse(set.wireName, keyStore.containsAlias(alias(set)))
+        }
+    }
+
+    @Test
+    fun appCapabilitiesListTheProbedHardwareSets() {
+        val registered = PqcHardware.backend
+        assertNotNull("XKeyApplication registers a hardware backend", registered)
+        val appSets = runBlocking { (registered as KeystorePqcBackend).awaitProbe(PROBE_TIMEOUT_MS) }
+        val appWireNames = MlDsaParameterSet.entries.filter { it in appSets }.map { it.wireName }
+        val ownWireNames = MlDsaParameterSet.entries.filter { it in supported }.map { it.wireName }
+
+        assertEquals(appWireNames, KeystoreCapabilities.hardwareAlgorithms())
+        assertEquals(ownWireNames, KeystoreCapabilities.hardwareAlgorithms())
+    }
+
     private fun alias(set: MlDsaParameterSet) = "xkey_key_pqc_hw_test_${set.name.lowercase()}"
 
     private companion object {
+        const val TAG = "PqcDeviceTest"
         const val PROBE_TIMEOUT_MS = 60_000L
     }
 }
